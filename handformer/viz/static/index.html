@@ -211,7 +211,11 @@
         <button role="tab" data-map="mlp" data-tip="How strongly each calculating unit (rows) fired at each character (columns), for one layer.">MLP activations</button>
         <button role="tab" data-map="weights" data-tip="The hand-written numbers themselves, labelled by what they connect.">Raw weights</button>
       </nav>
-      <label class="small" data-tip="Give every row of the map room for its name (the map then scrolls inside its box: drag the grip under it to resize). Off: the whole map fits on screen and only the circuit groups are named."><input id="row-names" type="checkbox" checked> row names</label>
+      <span class="map-rows">
+        <label class="small" data-tip="Rows from every circuit, not only the active one that 'focus active circuit' keeps; each row named, under its circuit's title. The map scrolls inside its box: drag the grip under it to resize."><input id="map-circuits" type="checkbox"> every circuit</label>
+        <label class="small" data-tip="Leave out the rows that are zero at every position, for a more compact map. Off: unused rows are shown too, as empty rows."><input id="map-hide-unused" type="checkbox" checked> hide unused</label>
+        <label class="small" data-tip="Give every row room for its name (the map then scrolls inside its box). Off: the whole map fits on screen and only the circuit groups are named."><input id="row-names" type="checkbox" checked> row names</label>
+      </span>
       <label id="diff-ctl" class="diff-ctl" hidden data-tip="With parts knocked out, show how each value changed compared with the normal run (knocked-out minus normal), instead of the raw values. Every lit cell is part of the knockout's footprint."><input id="diff" type="checkbox" checked> show change vs normal</label>
       <span id="map-controls" class="map-controls">
         <label data-for="residual">after <select id="snapshot"></select></label>

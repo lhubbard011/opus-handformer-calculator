@@ -322,3 +322,13 @@ button.pin { font-size: 11px; padding: 1px 6px; border-color: var(--border); }
 body.resizing { user-select: none; -webkit-user-select: none; cursor: ns-resize; }
 @media (pointer: coarse) { .grip { height: 24px; } .grip::before { width: 56px; height: 4px; } }
 
+/* the dividers between the three columns (app.js setupColumnResizers) */
+main.grid { position: relative; }
+.col-grip { position: absolute; cursor: ew-resize; touch-action: none; display: flex; justify-content: center; }
+.col-grip[hidden] { display: none; }
+.col-grip::before { content: ""; width: 3px; height: 48px; margin-top: 10px; border-radius: 2px; background: var(--border); }
+.col-grip:hover::before, .col-grip:focus-visible::before, .col-grip.dragging::before { background: var(--accent); height: 100%; margin-top: 0; }
+.col-grip:focus-visible { outline: none; }
+body.resizing-x { user-select: none; -webkit-user-select: none; cursor: ew-resize; }
+.map-rows { display: inline-flex; gap: 10px; flex-wrap: wrap; }
+

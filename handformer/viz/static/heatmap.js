@@ -10,6 +10,7 @@ export const isTouch = () => matchMedia("(pointer: coarse)").matches;
 // resizable box); off, the rows shrink until the whole map fits FIT_H px and only the circuit
 // groups are named.
 const LABEL_ROW = 11, LABEL_MIN = 8, FIT_H = 560;
+const BAND = 15; // px: a group's title band above its rows, when the rows are named
 let rowNames = true;
 export function setRowNames(on) { rowNames = !!on; }
 
@@ -27,7 +28,22 @@ export function drawHeatmap(canvas, spec, view) {
   const fit = Math.min(12, FIT_H / Math.max(1, spec.rows));
   const rowH = spec.square ? plotW / spec.cols
     : Math.max(touch ? TOUCH_ROW : 3, rowNames && spec.rowLabels ? Math.max(LABEL_ROW, fit) : fit);
-  const plotH = spec.square ? plotW : rowH * spec.rows;
+  // Row layout. With named rows, each circuit group gets a title band above its rows (so a title
+  // never covers a row name); compact, the title sits on the group's separator line instead.
+  const bands = !spec.square && rowH >= LABEL_MIN && !!spec.rowLabels && !!spec.groups?.length;
+  const segs = []; // {start, end, y}: rows [start, end) drawn from y
+  if (bands) {
+    let y = 0;
+    spec.groups.forEach((g, k) => {
+      const end = k + 1 < spec.groups.length ? spec.groups[k + 1].row : spec.rows;
+      y += BAND;
+      segs.push({ start: g.row, end, y, label: g.label });
+      y += (end - g.row) * rowH;
+    });
+  } else segs.push({ start: 0, end: spec.rows, y: 0 });
+  const last = segs[segs.length - 1];
+  const yOf = (r) => { const sg = segs.find((x) => r < x.end) || last; return sg.y + (r - sg.start) * rowH; };
+  const plotH = spec.square ? plotW : last.y + (last.end - last.start) * rowH;
   const colW0 = plotW / Math.max(1, spec.cols);
   const charAxis = spec.colChars && colW0 >= 9; // room for one character per column
   const cssH = Math.max(40, plotH + (charAxis ? 32 : 18));
@@ -46,7 +62,10 @@ export function drawHeatmap(canvas, spec, view) {
   }
   const colW = plotW / spec.cols;
   ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(canvas._bitmap, GUTTER, 0, plotW, plotH);
+  for (const sg of segs) {
+    if (sg.end > sg.start) ctx.drawImage(canvas._bitmap, 0, sg.start, spec.cols, sg.end - sg.start,
+                                         GUTTER, sg.y, plotW, spec.square ? plotH : (sg.end - sg.start) * rowH);
+  }
 
   // pointer trace: where each row's attention peaks, drawn as a staircase so jumps stand out
   if (spec.pointers) {
@@ -96,19 +115,30 @@ export function drawHeatmap(canvas, spec, view) {
   ctx.textBaseline = "middle";
   if (rowH >= LABEL_MIN && spec.rowLabels) {
     ctx.fillStyle = "#aab2c0";
-    spec.rowLabels.forEach((l, r) => ctx.fillText(l.slice(0, 19), 4, r * rowH + rowH / 2));
+    spec.rowLabels.forEach((l, r) => ctx.fillText(l.slice(0, 19), 4, yOf(r) + rowH / 2));
   }
-  (spec.groups || []).forEach((g) => {
-    ctx.strokeStyle = "#3a4150";
-    ctx.beginPath();
-    ctx.moveTo(0, g.row * rowH + 0.5);
-    ctx.lineTo(cssW, g.row * rowH + 0.5);
-    ctx.stroke();
-    if (rowH < LABEL_MIN) {
+  if (bands) {
+    for (const sg of segs) { // the group's title band, across the whole map
+      ctx.fillStyle = "#1a1f28";
+      ctx.fillRect(0, sg.y - BAND, cssW, BAND);
+      ctx.strokeStyle = "#3a4150";
+      ctx.beginPath(); ctx.moveTo(0, sg.y - BAND + 0.5); ctx.lineTo(cssW, sg.y - BAND + 0.5); ctx.stroke();
+      ctx.fillStyle = "#f2a541";
+      ctx.font = "bold 10px ui-monospace, Menlo, monospace";
+      ctx.fillText(`${sg.label} · ${sg.end - sg.start}`, 4, sg.y - BAND / 2);
+    }
+    ctx.font = "10px ui-monospace, Menlo, monospace";
+  } else {
+    (spec.groups || []).forEach((g) => {
+      ctx.strokeStyle = "#3a4150";
+      ctx.beginPath();
+      ctx.moveTo(0, g.row * rowH + 0.5);
+      ctx.lineTo(cssW, g.row * rowH + 0.5);
+      ctx.stroke();
       ctx.fillStyle = "#f2a541";
       ctx.fillText(g.label, 4, g.row * rowH + 7);
-    }
-  });
+    });
+  }
   // column ticks
   ctx.fillStyle = "#7d8696";
   ctx.textBaseline = "top";
@@ -124,7 +154,12 @@ export function drawHeatmap(canvas, spec, view) {
   }
   for (let c = 0; c < spec.cols; c += step) ctx.fillText(String(c), GUTTER + c * colW, plotH + (charAxis ? 17 : 3));
 
-  canvas._geom = { spec, rowH, colW, plotW, plotH };
+  // y -> row (null on a title band), for hover and click
+  const rowAt = (y) => {
+    const sg = segs.find((x) => y >= x.y && y < x.y + (x.end - x.start) * rowH);
+    return sg ? sg.start + Math.floor((y - sg.y) / rowH) : null;
+  };
+  canvas._geom = { spec, rowH, colW, plotW, plotH, rowAt: spec.square ? (y) => Math.floor(y / rowH) : rowAt };
 }
 
 export function attachHeatmapEvents(canvas, tooltip) {
@@ -135,8 +170,10 @@ export function attachHeatmapEvents(canvas, tooltip) {
     const x = e.clientX - rect.left - GUTTER;
     const y = e.clientY - rect.top;
     if (y < 0 || y >= g.plotH || x >= g.plotW) return null;
-    if (x < 0) return g.spec.rowTip ? [Math.floor(y / g.rowH), -1] : null; // row label gutter
-    return [Math.floor(y / g.rowH), Math.floor(x / g.colW)];
+    const r = g.rowAt(y);
+    if (r === null) return null; // a group's title band
+    if (x < 0) return g.spec.rowTip ? [r, -1] : null; // row label gutter
+    return [r, Math.floor(x / g.colW)];
   };
   const text = (spec, r, c) => (c < 0 ? spec.rowTip(r) : spec.valueText(r, c));
   // Touch: the first tap on a cell shows its readout, a second tap on the same cell

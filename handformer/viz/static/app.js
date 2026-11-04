@@ -1026,6 +1026,13 @@ async function mapData(path, body) {
   return { key, ...state.maps.get(key) };
 }
 
+// Which rows a heatmap shows: "every circuit" ignores the focus filter (not just the active
+// circuit); "hide unused" drops rows that are zero at every position (a compact map).
+function mapRow(circuit, used) {
+  return ($("map-circuits").checked || focused(circuit)) && (used || !$("map-hide-unused").checked);
+}
+const rowCount = (shown, total, what) => (shown === total ? `all ${total} ${what}` : `${shown} of ${total} ${what}`);
+
 function groupsOf(cats) {
   const groups = [];
   cats.forEach((c, r) => { if (r === 0 || c !== cats[r - 1]) groups.push({ row: r, label: c }); });
@@ -1285,8 +1292,8 @@ async function renderMap(p) {
     const snap = Number($("snapshot").value);
     const { key, meta, data } = await mapData("/api/residual", { run_id: run.run_id, snapshot: snap });
     const rows = state.info.dims.map((d, i) => ({ ...d, i }))
-      .filter((d) => focused(d.cat) && meta.scale[d.i] > 1e-9);
-    cap.textContent = `every residual dim (rows) at every position (columns) after ${meta.label}; ` +
+      .filter((d) => mapRow(d.cat, meta.scale[d.i] > 1e-9));
+    cap.textContent = `${rowCount(rows.length, state.info.dims.length, "residual dims")} (rows) at every position (columns) after ${meta.label}; ` +
       "each row scaled by its own max |value| (blue negative, orange positive); positions after the current step are dimmed; click a cell to jump there";
     drawHeatmap(canvas, {
       key: key + rows.map((r) => r.i).join(","),
@@ -1300,9 +1307,9 @@ async function renderMap(p) {
   } else if (state.map === "step") {
     const labels = run.snapshots;
     const rows = state.info.dims.map((d, i) => ({ ...d, i, vals: p.values[i] }))
-      .filter((d) => focused(d.cat) && d.vals.some((v) => Math.abs(v) > 1e-9));
-    const scale = rows.map((r) => Math.max(...r.vals.map(Math.abs)));
-    cap.textContent = `position ${q} ${charAt(q)}: every dim (rows) after each sublayer (columns: embed, L1 attn, L1 mlp, …); ` +
+      .filter((d) => mapRow(d.cat, d.vals.some((v) => Math.abs(v) > 1e-9)));
+    const scale = rows.map((r) => Math.max(...r.vals.map(Math.abs)) || 1); // an all-zero row (hide unused off) stays 0
+    cap.textContent = `position ${q} ${charAt(q)}: ${rowCount(rows.length, state.info.dims.length, "dims")} (rows) after each sublayer (columns: embed, L1 attn, L1 mlp, …); ` +
       "a colour change marks the sublayer that wrote the dim";
     drawHeatmap(canvas, {
       key: `step${run.run_id}:${q}:${rows.map((r) => r.i).join(",")}`,
@@ -1374,8 +1381,8 @@ async function renderMap(p) {
     const layer = Number(sel.value);
     const { key, meta, data } = await mapData("/api/mlp", { run_id: run.run_id, layer });
     const specs = state.info.layers[layer].units;
-    const rows = specs.map((u, i) => ({ ...u, i })).filter((u) => focused(u.circuit) && meta.scale[u.i] > 1e-9);
-    cap.textContent = `layer ${layer + 1} MLP: post-ReLU activation of each unit (rows) at every position (columns), ` +
+    const rows = specs.map((u, i) => ({ ...u, i })).filter((u) => mapRow(u.circuit, meta.scale[u.i] > 1e-9));
+    cap.textContent = `layer ${layer + 1} MLP: post-ReLU activation of ${rowCount(rows.length, specs.length, "units")} (rows) at every position (columns), ` +
       "each unit scaled by its max; hover a cell for the unit's formula, a row name for what its abbreviations mean";
     drawHeatmap(canvas, {
       key: key + rows.map((r) => r.i).join(","),
@@ -1435,15 +1442,18 @@ function wire() {
   $("btn-link").addEventListener("click", copyLink);
   $("model-sel").addEventListener("change", (e) => switchModel(e.target.value).catch((err) => setStatus(err.message, true)));
   $("diff").addEventListener("change", () => state.pos.has(state.q) && renderMap(state.pos.get(state.q)));
-  // row names on the heatmaps (remembered in this browser, like the pins and sizes)
-  try { if (localStorage.getItem(ROWNAMES_KEY) === "0") $("row-names").checked = false; } catch { /* private mode */ }
-  setRowNames($("row-names").checked);
-  $("row-names").addEventListener("change", () => {
-    setRowNames($("row-names").checked);
-    try { localStorage.setItem(ROWNAMES_KEY, $("row-names").checked ? "1" : "0"); } catch { /* private mode */ }
-    log("heatmap row names", $("row-names").checked ? "on" : "off");
-    if (state.pos.has(state.q)) renderMap(state.pos.get(state.q));
-  });
+  // heatmap row options (remembered in this browser, like the pins and sizes)
+  for (const [id, key] of [["row-names", "handviz.rownames"], ["map-circuits", "handviz.mapcircuits"], ["map-hide-unused", "handviz.hideunused"]]) {
+    const box = $(id);
+    try { const v = localStorage.getItem(key); if (v !== null) box.checked = v === "1"; } catch { /* private mode */ }
+    box.addEventListener("change", () => {
+      setRowNames($("row-names").checked || $("map-circuits").checked); // every circuit: each row named
+      try { localStorage.setItem(key, box.checked ? "1" : "0"); } catch { /* private mode */ }
+      log("heatmap", id, box.checked ? "on" : "off");
+      if (state.pos.has(state.q)) renderMap(state.pos.get(state.q));
+    });
+  }
+  setRowNames($("row-names").checked || $("map-circuits").checked);
   document.querySelectorAll("#guide .try").forEach((b) => {
     b.dataset.tip = "Set the visualizer up to show this (runs an example and opens the right view).";
     b.addEventListener("click", () => tryIt(JSON.parse(b.dataset.try)).catch((e) => setStatus(e.message, true)));
@@ -1560,7 +1570,6 @@ async function tryIt(cfg) {
 // the usual size, or use the arrow keys. The size is a max-height, so a short list stays short.
 // Sizes are remembered in this browser only, a per-viewer convenience like the pins.
 const SIZE_KEY = "handviz.sizes";
-const ROWNAMES_KEY = "handviz.rownames";
 const MIN_VIEW = 48; // px: always room for a row or two
 const KEY_STEP = 40; // px per arrow key
 
@@ -1624,6 +1633,95 @@ function setupResizers() {
       commit();
     });
   });
+}
+
+// The three side-by-side columns (Step | Attention heads | Residual stream) on wide screens: a
+// divider in each gap, dragged left or right, moves width between its two neighbours (each keeps
+// at least MIN_COL). Double-click or Enter resets; arrow keys work. Remembered per browser. On a
+// narrow screen the columns stack, so the dividers hide and the stylesheet's layout applies.
+const COLS_KEY = "handviz.cols";
+const MIN_COL = 220; // px
+
+function setupColumnResizers() {
+  const grid = document.querySelector("main.grid");
+  const wide = matchMedia("(min-width: 1101px)"); // = style.css: one column at 1100px and below
+  let weights = null; // fr weight per column (the px widths the viewer chose), or null: the stylesheet's
+  try {
+    const w = JSON.parse(localStorage.getItem(COLS_KEY) || "null");
+    if (Array.isArray(w) && w.length === 3 && w.every((x) => typeof x === "number" && x > 0)) weights = w;
+  } catch { /* private mode, or something unreadable: the usual widths */ }
+  const save = () => {
+    try { weights ? localStorage.setItem(COLS_KEY, JSON.stringify(weights)) : localStorage.removeItem(COLS_KEY); }
+    catch { /* private mode: not remembered */ }
+    log("columns", weights ? weights.map((w) => Math.round(w)).join(" / ") + " px" : "back to their usual widths");
+  };
+  const tracks = () => getComputedStyle(grid).gridTemplateColumns.split(" ").map(parseFloat);
+  const apply = () => {
+    if (weights && wide.matches) grid.style.gridTemplateColumns = weights.map((w) => `minmax(${MIN_COL}px, ${w}fr)`).join(" ");
+    else grid.style.removeProperty("grid-template-columns");
+  };
+  const bars = [0, 1].map((i) => {
+    const d = document.createElement("div");
+    d.className = "col-grip";
+    d.tabIndex = 0;
+    d.setAttribute("role", "separator");
+    d.setAttribute("aria-orientation", "vertical");
+    d.setAttribute("aria-label", `Resize columns ${i + 1} and ${i + 2}`);
+    d.dataset.tip = "Drag left or right to widen one column and narrow its neighbour. Double-click (or Enter) for the usual widths; arrow keys work too.";
+    grid.append(d); // absolutely positioned: not a grid cell
+    return d;
+  });
+  const place = () => {
+    const cs = getComputedStyle(grid), t = tracks(), gap = parseFloat(cs.columnGap) || 0;
+    let x = parseFloat(cs.paddingLeft) || 0;
+    bars.forEach((d, i) => {
+      d.hidden = !wide.matches || t.length < 3;
+      x += t[i] || 0;
+      Object.assign(d.style, { left: `${x}px`, width: `${Math.max(gap, 6)}px`, top: cs.paddingTop, bottom: cs.paddingBottom });
+      x += gap;
+    });
+  };
+  const resize = (i, a, t) => { // column i gets width a (px), i+1 the rest of the pair
+    const pair = t[i] + t[i + 1];
+    a = Math.min(Math.max(a, MIN_COL), pair - MIN_COL);
+    weights = t.map((w, k) => (k === i ? a : k === i + 1 ? pair - a : w));
+    apply();
+    place();
+  };
+  bars.forEach((d, i) => {
+    let drag = null;
+    d.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      drag = { x: e.clientX, t: tracks() };
+      d.setPointerCapture(e.pointerId);
+      d.classList.add("dragging");
+      document.body.classList.add("resizing-x");
+      e.preventDefault();
+    });
+    d.addEventListener("pointermove", (e) => { if (drag) resize(i, drag.t[i] + e.clientX - drag.x, drag.t); });
+    const stop = () => {
+      if (!drag) return;
+      drag = null;
+      d.classList.remove("dragging");
+      document.body.classList.remove("resizing-x");
+      save();
+    };
+    d.addEventListener("pointerup", stop);
+    d.addEventListener("pointercancel", stop);
+    d.addEventListener("dblclick", () => { weights = null; apply(); place(); save(); });
+    d.addEventListener("keydown", (e) => {
+      const t = tracks();
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") resize(i, t[i] + (e.key === "ArrowRight" ? KEY_STEP : -KEY_STEP), t);
+      else if (e.key === "Enter") { weights = null; apply(); place(); }
+      else return;
+      e.preventDefault();
+      save();
+    });
+  });
+  wide.addEventListener("change", () => { apply(); place(); });
+  new ResizeObserver(place).observe(grid);
+  apply();
+  place();
 }
 
 const PIN_KEY = "handviz.pinned";
@@ -1766,6 +1864,7 @@ async function main() {
   wire();
   setupPins();
   setupResizers();
+  setupColumnResizers();
   trackBar();
   if (matchMedia("(max-width: 700px)").matches) $("map-howto").open = false; // long on a phone; one tap opens it
   try {
