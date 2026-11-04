@@ -446,10 +446,10 @@ on the bounding byte, whose value is 0.
 | | |
 |---|---|
 | layers | 22 |
-| heads | 133 |
-| MLP units | 800 |
-| d_model | 458 |
-| nonzero parameters | 6,930 (0.5% of 1.37M stored cells) |
+| heads | 147 |
+| MLP units | 1,044 |
+| d_model | 576 |
+| nonzero parameters | 8,478 |
 
 The dense size is much larger, mostly zeros in the per-head `d×d` value/output
 matrices. A factored per-head value/output layout would shrink it without
@@ -489,7 +489,7 @@ changing the nonzero count.
 1. ~~Signed operands~~: done (§19).
 2. ~~Decimals~~: done (§20).
 3. ~~Division~~: done (§21).
-4. **Integer powers** `a^n`: repeated multiplication frames (a negative n becomes division).
+4. ~~Integer powers~~: done (§23).
 5. **Square root**, digit by digit, by the subtraction-only (Jarvis) method.
 6. **Test tooling:** teacher-forced checks still run the full n² pass; long × / ÷ cases
    should decode with the cached path.
@@ -644,3 +644,55 @@ against exact truncated rational arithmetic.
   dimensions. The sparsity is the price of one meaning per dimension. Planned
   compaction: time-share the private dimensions of the mutually exclusive
   operator circuits (about 458 → 280), and merge repeated building blocks.
+
+## 23. Integer powers
+
+```
+2^5=[2^5=;(2*2^4)](2*2^4)=[2^4=;(2*2)^2](2*(2*2)^2)=…=32
+2^100 → 1267650600228229401496703205376 (1,350 bytes, all written by the model)
+```
+
+- **Grammar.** `^` is the highest precedence and right-associative: the
+  parser chooses the latest `^` in the innermost group. Unary minus binds
+  tighter, so `-2^2` = (−2)² = 4 (this differs from the usual maths convention).
+- **A rewrite frame, not a computing frame (`power.py`).** The frame body is
+  `;` plus one step of binary exponentiation written as text, which the rewrite
+  splices into the line:
+
+  | case | written |
+  |---|---|
+  | b < 0 | `(1/a^\|b\|)` |
+  | b = 0 | `1` |
+  | b = 1 | `a` |
+  | b odd | `(a*a^(b−1))` (only the last digit changes) |
+  | b even | `(a*a)^(b/2)` (halving is digit-local) |
+
+  The base is copied verbatim (sign, digits, `.`). Each case is a list of
+  segments (fixed bytes, copied spans, computed digits) laid out by region
+  flags.
+- **Parser changes.**
+  - Power frames get no decimal normalisation.
+  - The group's parentheses drop only for a plain-number result, or a result
+    that is itself fully parenthesised (ends in `)`).
+  - `cont` also fires when the result is an expression.
+  - The group end is c = min(first `)` after p, Le), because a frame body can
+    now contain `)`.
+- **Stable frame operator.** A power frame's body writes `*` and `^`, which
+  moved P ("latest binary operator"). The frame's operator is now Pf = P read
+  at the frame's `=`.
+- **Three bugs found while building it:**
+  1. **Shadowed dims.** Private dims named `one` and `neg` shadowed the shared
+     constant and borrow dims. `arith` now refuses any private name equal to a
+     shared dim.
+  2. **Unwrapped expansions.** `1/2^3` → `1/2*2^2` = 2 (wrong). The exact-value
+     check in the tests caught it, though the model matched the reference.
+  3. **A fixed generation cap.** The decode cache now grows as needed.
+
+Tests (`tests/test_power.py`):
+- a^k for a ∈ [−5, 5], k ∈ [0, 6];
+- decimal bases and negative exponents with `~N`;
+- precedence and right-associativity;
+- 2^64, 3^40, 7^20, 12^12, 2^100;
+- random mixed expressions.
+
+All answers are checked against exact arithmetic.

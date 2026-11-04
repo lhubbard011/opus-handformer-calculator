@@ -12,7 +12,26 @@ def unary(x: str, i: int) -> bool:
 
 
 def binary_op(x: str, i: int) -> bool:
-    return x[i] in "+*/" or (x[i] == "-" and not unary(x, i))
+    return x[i] in "+*/^" or (x[i] == "-" and not unary(x, i))
+
+
+def halve(n: str) -> str:
+    """Digit-local halving: out_j = 5*[d_{j-1} odd] + d_j // 2, leading 0 dropped."""
+    out = "".join(str(5 * (int(n[j - 1]) % 2 if j else 0) + int(n[j]) // 2) for j in range(len(n)))
+    return out[1:] if len(out) > 1 and out[0] == "0" else out
+
+
+def power_expansion(a: str, b: str) -> str:
+    """One binary-exponentiation step for a^b, written as text."""
+    if b.startswith("-"):
+        return f"(1/{a}^{b[1:]})"
+    if int(b) == 0:
+        return "1"
+    if b == "1":
+        return a
+    if int(b[-1]) % 2:
+        return f"({a}*{a}^{b[:-1]}{int(b[-1]) - 1})"
+    return f"({a}*{a})^{halve(b)}"
 
 
 def magnitude_body(a: str, op: str, b: str) -> tuple[str, str, int]:
@@ -113,7 +132,9 @@ def step(x: str) -> tuple[str, str, bool]:
     p = x.rfind("(")
     c = x.find(")", p + 1) if p >= 0 else len(x)
     span = range(p + 1, c)
-    o = next((i for i in span if x[i] in "*/"), None)
+    o = next((i for i in reversed(span) if x[i] == "^"), None)  # right-associative
+    if o is None:
+        o = next((i for i in span if x[i] in "*/"), None)
     if o is None:
         o = next(i for i in span if x[i] in "+-" and binary_op(x, i))
     a_lo = max(i for i in range(-1, o) if i == -1 or not is_num(x[i]))
@@ -122,6 +143,17 @@ def step(x: str) -> tuple[str, str, bool]:
     b_hi = next(i for i in range(o + 1 + sb, len(x) + 1) if i == len(x) or not is_num(x[i]))
     a, op, b = x[afence + 1:o], x[o], x[o + 1:b_hi]
 
+    if op == "^":  # rewrite frame: verbatim operands, the result is an expression
+        result = power_expansion(a, b)
+        frame = f"[{a}^{b}=;{result}]"
+        plain = not any(binary_op(result, i) for i in range(len(result)))
+        drop = p >= 0 and afence == p and b_hi == c and (plain or result.endswith(")"))
+        lo, hi = (p, c) if drop else (afence + 1, b_hi - 1)
+        if result.startswith("-") and lo >= 1 and unary(x, lo - 1):
+            lo, result = lo - 1, result[1:]
+        more = sum(binary_op(x, i) for i in range(len(x))) >= 2
+        tail = x[hi + 1:].split("~")[0]
+        return frame, x[:lo] + result + tail, more or any(binary_op(result, i) for i in range(len(result)))
     ia, fa = split_decimal(a)
     ib, fb = split_decimal(b)
     if op == "/":  # a*10^(fb+N) / b*10^fa: the integer quotient has N fractional digits

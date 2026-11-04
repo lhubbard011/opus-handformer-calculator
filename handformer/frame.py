@@ -49,10 +49,11 @@ MARKERS: dict[str, list[Form]] = {
     "E": [{"is_eq": 1.0}],
     "S": [{"is_semi": 1.0}],
     "R": [{"is_bar": 1.0}],
-    "P": [{"is_plus": 1.0}, {"is_star": 1.0}, {"is_slash": 1.0}, BINMINUS],  # binary operators only
+    "P": [{"is_plus": 1.0}, {"is_star": 1.0}, {"is_slash": 1.0}, {"is_caret": 1.0}, BINMINUS],  # binary ops only
     "Lg": [{"is_lpar": 1.0}, {"is_rbr": 1.0}],
     "Lrp": [{"is_rpar": 1.0}],
     "Lmul": [{"is_star": 1.0}, {"is_slash": 1.0}],  # multiplicative: * and /
+    "Lpow": [{"is_caret": 1.0}],  # powers: highest precedence, right-associative
     "Ladd": [{"is_plus": 1.0}, BINMINUS],
     "Lnd": [{"one": 1.0, "is_digit": -1.0, "is_dot": -1.0}],  # not part of a number
     "Ldot": [{"is_dot": 1.0}],
@@ -60,7 +61,7 @@ MARKERS: dict[str, list[Form]] = {
     "Ptil": [{"is_tilde": 1.0}],  # the prompt's precision marker (0 if absent)
 }
 NEXT_CLASSES = ("Lrp", "Lmul", "Ladd", "Lnd")  # classes searched with next_match
-OPS = {"add": "is_plus", "sub": "is_minus", "mul": "is_star", "div": "is_slash"}
+OPS = {"add": "is_plus", "sub": "is_minus", "mul": "is_star", "div": "is_slash", "pow": "is_caret"}
 N_DIGITS = 4  # precision ~N supports N <= 9999
 
 DIMS = (
@@ -68,7 +69,7 @@ DIMS = (
     *(f"f_{m}" for m in MARKERS), *MARKERS,
     "open", "seen_eq", "seen_semi", "seen_bar",
     "Ls", "p", *(f"PM_{c}" for c in NEXT_CLASSES), *(f"typ_{op}" for op in OPS),
-    "neg", "sa", "sb", "eff_sb", "PF2",
+    "Pf", "neg", "sa", "sb", "PF2",
     "f_E0", "E0", "has_til", *(f"tN{k}" for k in range(N_DIGITS)), *(f"Nd{k}" for k in range(N_DIGITS)), "N",
     *(f"act_{op}" for op in OPS), "phase1", "phase2", "phase4",
 )
@@ -116,12 +117,9 @@ def build(b: ModelBuilder) -> None:
         pr.gather_head("line start", {"F": 1.0}, "Ls", src="Rb"),
         pr.gather_head("innermost group", pr.add({"F": 1.0}, pr.const(-1.0)), "p", src="Lg"),
         *(pr.gather_head(f"prev {c}", prev, f"PM_{c}", src=c) for c in NEXT_CLASSES),
-        HeadSpec(
-            name="op type",
-            query=[pr.scale({"P": 1.0}, 2 * pr.GATHER_BETA), pr.const(-pr.GATHER_BETA)],
-            key=[{"pos": 1.0}, {"pos2": 1.0}],
-            value={dim: {f"typ_{op}": 1.0} for op, dim in OPS.items()},
-        ),
+        # The frame's own operator: the latest binary operator at the frame's '='. Stable even
+        # when a frame body writes operators (a power frame writes "a*a^n").
+        pr.gather_head("frame operator", {"E": 1.0}, "Pf", src="P"),
         pr.gather_head("borrow sign", {"S": 1.0}, "neg", src="is_lt"),
         pr.gather_head("sign of a", pr.add({"F": 1.0}, pr.const(1.0)), "sa", src="is_minus"),
         pr.gather_head("sign of b", pr.add({"P": 1.0}, pr.const(1.0)), "sb", src="is_minus"),
@@ -129,25 +127,37 @@ def build(b: ModelBuilder) -> None:
           for k in range(N_DIGITS)),
     ]
     l3.units += pr.times_flag_units({f"Nd{k}": 10.0 ** k for k in range(N_DIGITS)}, {"has_til": 1.0}, {"N": 1.0})
-    # effective sign of b for + and -: a - b == a + (-b)
     l3.units += [
-        pr.relu_unit({"sb": 1.0, "typ_sub": -1.0}, {"eff_sb": 1.0}),
-        pr.relu_unit({"typ_sub": 1.0, "sb": -1.0}, {"eff_sb": 1.0}),
         pr.relu_unit({"is_eq": 1.0, "open": -1.0}, {"phase1": 1.0}),
         pr.relu_unit({"open": 1.0, "seen_eq": -1.0}, {"phase2": 1.0}),
         pr.relu_unit({"one": 1.0, "open": -1.0, "is_eq": -1.0}, {"phase4": 1.0}),
     ]
 
     l4 = b.at(4)
-    l4.heads.append(pr.gather_head("(P-Fa)^2", pr.add({"P": 1.0}, pr.scale(FA, -1.0)), "PF2", src="pos2"))
-    # Routing: + and - with equal (effective) signs add magnitudes, otherwise subtract them.
+    l4.heads += [
+        pr.gather_head("(P-Fa)^2", pr.add({"P": 1.0}, pr.scale(FA, -1.0)), "PF2", src="pos2"),
+        HeadSpec(
+            name="frame operator type",
+            query=[pr.scale({"Pf": 1.0}, 2 * pr.GATHER_BETA), pr.const(-pr.GATHER_BETA)],
+            key=[{"pos": 1.0}, {"pos2": 1.0}],
+            value={dim: {f"typ_{op}": 1.0} for op, dim in OPS.items()},
+        ),
+    ]
+    # Routing. For + and -, b's effective sign is sb XOR [op is -]: equal to sa -> add
+    # magnitudes, different -> subtract them. Each case is one exact ReLU over 0/1 flags.
     work = {"open": 1.0, "seen_eq": 1.0}
-    additive = pr.add(work, {"typ_add": 1.0, "typ_sub": 1.0})  # == 3 when routable
+    plus = pr.add(work, {"typ_add": 1.0})  # == 3 for a '+' frame
+    minus = pr.add(work, {"typ_sub": 1.0})  # == 3 for a '-' frame
     l4.units += [
-        pr.relu_unit(pr.add(additive, {"sa": 1.0, "eff_sb": 1.0}, pr.const(-4.0)), {"act_add": 1.0}),
-        pr.relu_unit(pr.add(additive, {"sa": -1.0, "eff_sb": -1.0}, pr.const(-2.0)), {"act_add": 1.0}),
-        pr.relu_unit(pr.add(additive, {"sa": 1.0, "eff_sb": -1.0}, pr.const(-3.0)), {"act_sub": 1.0}),
-        pr.relu_unit(pr.add(additive, {"sa": -1.0, "eff_sb": 1.0}, pr.const(-3.0)), {"act_sub": 1.0}),
+        pr.relu_unit(pr.add(plus, {"sa": 1.0, "sb": 1.0}, pr.const(-4.0)), {"act_add": 1.0}),
+        pr.relu_unit(pr.add(plus, {"sa": -1.0, "sb": -1.0}, pr.const(-2.0)), {"act_add": 1.0}),
+        pr.relu_unit(pr.add(minus, {"sa": 1.0, "sb": -1.0}, pr.const(-3.0)), {"act_add": 1.0}),
+        pr.relu_unit(pr.add(minus, {"sa": -1.0, "sb": 1.0}, pr.const(-3.0)), {"act_add": 1.0}),
+        pr.relu_unit(pr.add(plus, {"sa": 1.0, "sb": -1.0}, pr.const(-3.0)), {"act_sub": 1.0}),
+        pr.relu_unit(pr.add(plus, {"sa": -1.0, "sb": 1.0}, pr.const(-3.0)), {"act_sub": 1.0}),
+        pr.relu_unit(pr.add(minus, {"sa": 1.0, "sb": 1.0}, pr.const(-4.0)), {"act_sub": 1.0}),
+        pr.relu_unit(pr.add(minus, {"sa": -1.0, "sb": -1.0}, pr.const(-2.0)), {"act_sub": 1.0}),
         pr.relu_unit(pr.add(work, {"typ_mul": 1.0}, pr.const(-2.0)), {"act_mul": 1.0}),
         pr.relu_unit(pr.add(work, {"typ_div": 1.0}, pr.const(-2.0)), {"act_div": 1.0}),
+        pr.relu_unit(pr.add(work, {"typ_pow": 1.0}, pr.const(-2.0)), {"act_pow": 1.0}),
     ]

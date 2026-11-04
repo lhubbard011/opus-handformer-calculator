@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 
-from . import addition, division, expr, frame, multiplication, subtraction
+from . import addition, division, expr, frame, multiplication, power, subtraction
 from . import common as cm
 from . import primitives as pr
 from .model import Form, HeadSpec, Layout, ModelBuilder, Transformer, UnitSpec
@@ -26,7 +26,7 @@ from .model import Form, HeadSpec, Layout, ModelBuilder, Transformer, UnitSpec
 log = logging.getLogger(__name__)
 
 CIRCUITS = {"add": addition.builder, "sub": subtraction.builder, "mul": multiplication.builder,
-            "div": division.builder}
+            "div": division.builder, "pow": power.builder}
 
 # Output dims written by operator circuits, and the byte each one emits.
 OP_OUTPUTS = {
@@ -62,7 +62,7 @@ class _Namespace:
 
     def unit(self, u: UnitSpec) -> UnitSpec:
         read, write = self.form(u.read), self.form(u.write)
-        if any(d in OP_OUTPUTS for d in write):
+        if any(d in OP_OUTPUTS or d in expr.OUT_DIMS for d in write):
             read = pr.gated(read, {f"act_{self.ns}": 1.0}, 1.0)
         return UnitSpec(read=read, write=write)
 
@@ -73,7 +73,11 @@ def builder() -> ModelBuilder:
     lay = Layout()
     cm.add_input_dims(lay)
     lay.add(*frame.DIMS, *expr.DIMS)
+    shared = set(lay.names) | set(OP_OUTPUTS) | set(expr.OUT_DIMS)
     for ns, cb in circuits.items():
+        clash = shared & set(cb.layout.names)
+        if clash:  # a private name equal to a shared dim would silently capture every use of it
+            raise ValueError(f"circuit {ns} declares private dims that shadow shared dims: {sorted(clash)}")
         lay.add(*(f"{ns}.{d}" for d in cb.layout.names))
     lay.add(*OP_OUTPUTS, *expr.OUT_DIMS)
 
@@ -106,8 +110,9 @@ def prompt(expression: str) -> list[int]:
 def solve(model: Transformer, expression: str) -> str:
     """Feed ``\\n<expression>=`` and decode; return everything the model wrote."""
     p = prompt(expression)
-    budget = 4 * len(expression) ** 2 + 64
-    out = model.generate(p, stop=cm.EOS, max_new=budget)
+    # The model stops itself at '\n'; the cap only guards against a runaway and is the
+    # model's own length bound (positions beyond LEN_MAX lose float64 exactness).
+    out = model.generate(p, stop=cm.EOS, max_new=int(pr.LEN_MAX) - len(p))
     text = bytes(out[len(p):]).decode("ascii", "replace")
     log.info("solve %s: %r", expression, text)
     return text

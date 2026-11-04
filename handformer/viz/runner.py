@@ -164,7 +164,7 @@ class Runner:
             raise ValueError(f"unsupported characters: {''.join(bad)!r} (use digits . + - * / ( ) and ~N)")
         prompt = arith.prompt(expression)
         t0 = time.perf_counter()
-        budget = min(MAX_TOKENS - len(prompt), 4 * len(expression) ** 2 + 64)
+        budget = MAX_TOKENS - len(prompt)  # the model stops itself at '\n' 
         tokens = self.model.generate(prompt, stop=cm.EOS, max_new=budget)
         t1 = time.perf_counter()
         rec = _Recorder()

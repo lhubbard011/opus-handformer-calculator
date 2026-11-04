@@ -1,0 +1,163 @@
+"""Power circuit: a frame ``[ a ^ b = ; expansion ]`` that rewrites, not computes.
+
+The frame's result is one step of binary exponentiation written as text; the
+rewrite splices it into the line and the existing * and / circuits do the
+arithmetic. With b an integer (a is any signed decimal, copied verbatim):
+
+  b negative  ->  (1/a^|b|)        (uses the prompt's ~N precision)
+  b == 0      ->  1
+  b == 1      ->  a
+  b odd       ->  (a*a^(b-1))      (only b's last digit changes: odd - 1 never borrows)
+  b even      ->  (a*a)^(b/2)      (halving is local: out_j = 5*[d_{j-1} odd] + floor(d_j/2),
+                                    dropping a leading 0)
+
+so a^b takes O(log b) power frames. Expansions that are expressions are
+parenthesised: substituted bare, 1/2^3 would become 1/2*2^2 = (1/2)*4. Each case is a list of segments (fixed
+bytes, spans copied from the frame, or computed digits) laid out by region
+flags over u = q - E - 1, the index of the next expansion byte; byte 0 of the
+frame body is ';' (no working).
+
+Global layers 4..11.
+"""
+
+from __future__ import annotations
+
+from . import common as cm
+from . import primitives as pr
+from .model import Form, HeadSpec, Layout, ModelBuilder
+
+CASES = ("negexp", "zero", "unit", "odd", "even")
+NAMES = list(cm.ALPHABET.values())
+
+# The frame operator is Pf (stable): this frame's body writes operators, which moves P.
+LA: Form = {"Pf": 1.0, "F": -1.0, "one": -1.0}  # base bytes, verbatim (sign, digits, '.')
+A0: Form = {"F": 1.0, "one": 1.0}
+B0: Form = {"Pf": 1.0, "sbp": 1.0, "one": 1.0}  # first exponent digit
+LB: Form = {"E": 1.0, "Pf": -1.0, "sbp": -1.0, "one": -1.0}
+U: Form = {"pos": 1.0, "E": -1.0, "one": -1.0}
+
+
+def _c(k: float) -> Form:
+    return pr.const(k)
+
+
+def _segments() -> dict[str, list[tuple[str, Form, object]]]:
+    """case -> [(kind, length, payload)]; kind: fixed (byte dim), copy (start form), dec, half."""
+    one = _c(1.0)
+    return {
+        "negexp": [("fixed", one, "is_lpar"), ("fixed", one, "oh1"), ("fixed", one, "is_slash"), ("copy", LA, A0),
+                   ("fixed", one, "is_caret"), ("copy", LB, B0), ("fixed", one, "is_rpar")],
+        "zero": [("fixed", one, "oh1")],
+        "unit": [("copy", LA, A0)],
+        "odd": [("fixed", one, "is_lpar"), ("copy", LA, A0), ("fixed", one, "is_star"), ("copy", LA, A0),
+                ("fixed", one, "is_caret"), ("copy", pr.add(LB, _c(-1.0)), B0), ("dec", one, None),
+                ("fixed", one, "is_rpar")],
+        "even": [("fixed", one, "is_lpar"), ("copy", LA, A0), ("fixed", one, "is_star"), ("copy", LA, A0),
+                 ("fixed", one, "is_rpar"), ("fixed", one, "is_caret"), ("half", pr.add(LB, {"lead": -1.0}), None)],
+    }
+
+
+def builder() -> ModelBuilder:
+    segs = _segments()
+    private = ["sbp", "ld", "d0", "LnzB", "fl2", "nzb", "d0one", "lbge2", "lb1", *CASES, "lead", "dj", "dj1", "flj", "flj1",
+               "semi", "src", *(f"Ycp_{d}" for d in NAMES)]
+    for case, lst in segs.items():
+        private += [f"lt_{case}_{i}" for i in range(len(lst) + 1)]
+        private += [f"seg_{case}_{i}" for i in range(len(lst))]
+        private += [f"endraw_{case}", f"end_{case}"]
+    lay = Layout()
+    lay.add(*private)
+    b = ModelBuilder(lay)
+
+    # Pf (the frame operator) is ready after the frame locator's layer 3.
+    l4 = b.at(4)
+    l4.heads += [
+        pr.gather_head("exponent sign", {"Pf": 1.0, "one": 1.0}, "sbp", src="is_minus"),
+        pr.gather_head("last exponent digit", pr.add({"E": 1.0}, _c(-1.0)), "ld"),
+        pr.gather_head("exponent's last nonzero", pr.add({"E": 1.0}, _c(-1.0)), "LnzB", src="Lnz"),
+    ]
+    for t in range(1, 5):
+        l4.units += pr.clamp01_units(pr.add({"ld": 1.0}, _c(-2.0 * t + 1.0)), {"fl2": 1.0})  # floor(ld/2)
+
+    l5 = b.at(5)
+    l5.heads.append(pr.gather_head("first exponent digit", B0, "d0"))
+    l5.units += pr.clamp01_units(pr.add({"LnzB": 1.0}, pr.scale(B0, -1.0), _c(1.0)), {"nzb": 1.0})  # b != 0
+    l5.units += pr.hat_units({"d0": 1.0}, 1.0, {"d0one": 1.0})
+    l5.units += pr.clamp01_units(pr.add(LB, _c(-1.0)), {"lbge2": 1.0})
+    l5.units += pr.hat_units(LB, 1.0, {"lb1": 1.0})
+
+    odd = {"ld": 1.0, "fl2": -2.0}  # parity of b
+    l6c = b.at(6)
+    l6c.units += [
+        pr.relu_unit({"sbp": 1.0}, {"negexp": 1.0}),
+        pr.relu_unit({"one": 1.0, "sbp": -1.0, "nzb": -1.0}, {"zero": 1.0}),
+        pr.relu_unit({"lb1": 1.0, "d0one": 1.0, "sbp": -1.0, "one": -1.0}, {"unit": 1.0}),  # b == 1
+        pr.relu_unit(pr.add(odd, {"nzb": 1.0, "sbp": -1.0, "one": -1.0}), {"odd": 1.0}),
+        pr.relu_unit(pr.add(odd, {"nzb": 1.0, "sbp": -1.0, "lb1": 1.0, "d0one": 1.0, "one": -3.0}), {"odd": -1.0}),
+        pr.relu_unit(pr.add(pr.scale(odd, -1.0), {"nzb": 1.0, "sbp": -1.0}), {"even": 1.0}),
+        pr.relu_unit({"d0one": 1.0, "lbge2": 1.0, "one": -1.0}, {"lead": 1.0}),  # halving drops a leading 0
+    ]
+    l6c.units += pr.hat_units(pr.add(U, _c(1.0)), 0.0, {"semi": 1.0})  # body byte 0 is ';'
+
+    # cumulative segment boundaries per case (linear forms; lead is known from layer 7 on)
+    bounds: dict[str, list[Form]] = {}
+    for case, lst in segs.items():
+        cum, acc = [_c(0.0)], _c(0.0)
+        for _, length, _ in lst:
+            acc = pr.add(acc, length)
+            cum.append(acc)
+        bounds[case] = cum
+
+    l7 = b.at(7)
+    half_start = bounds["even"][6]
+    j = pr.add(U, pr.scale(half_start, -1.0), {"lead": 1.0})  # exponent digit index for the half digit
+    l7.heads += [
+        pr.gather_head("d_j", pr.add(B0, j), "dj"),
+        pr.gather_head("d_{j-1}", pr.add(B0, j, _c(-1.0)), "dj1"),
+    ]
+    for t in range(1, 5):
+        l7.units += pr.clamp01_units(pr.add({"dj": 1.0}, _c(-2.0 * t + 1.0)), {"flj": 1.0})
+        l7.units += pr.clamp01_units(pr.add({"dj1": 1.0}, _c(-2.0 * t + 1.0)), {"flj1": 1.0})
+    for case, cum in bounds.items():
+        for i, c in enumerate(cum):  # lt_i = [u < cum_i]
+            l7.units += pr.clamp01_units(pr.add(c, pr.scale(U, -1.0)), {f"lt_{case}_{i}": 1.0})
+        l7.units += pr.hat_units(pr.add(U, pr.scale(cum[-1], -1.0)), 0.0, {f"endraw_{case}": 1.0})
+
+    l8 = b.at(8)
+    for case, lst in segs.items():
+        for i in range(len(lst)):
+            l8.units.append(pr.relu_unit({f"lt_{case}_{i + 1}": 1.0, f"lt_{case}_{i}": -1.0, case: 1.0, "one": -1.0},
+                                         {f"seg_{case}_{i}": 1.0}))
+        l8.units.append(pr.relu_unit({f"endraw_{case}": 1.0, case: 1.0, "one": -1.0}, {f"end_{case}": 1.0}))
+
+    l9 = b.at(9)
+    copy_flags: Form = {}
+    for case, lst in segs.items():
+        for i, (kind, _, payload) in enumerate(lst):
+            if kind == "copy":
+                start = pr.add(payload, U, pr.scale(bounds[case][i], -1.0))
+                l9.units += pr.times_flag_units(start, {f"seg_{case}_{i}": 1.0}, {"src": 1.0})
+                copy_flags[f"seg_{case}_{i}"] = 1.0
+
+    l10 = b.at(10)
+    l10.heads.append(HeadSpec(
+        name="expansion copy",
+        query=[pr.scale({"src": 1.0}, 2 * pr.GATHER_BETA), pr.const(-pr.GATHER_BETA)],
+        key=[{"pos": 1.0}, {"pos2": 1.0}],
+        value={d: {f"Ycp_{d}": 1.0} for d in NAMES},
+    ))
+    for d in NAMES:
+        l10.units.append(pr.relu_unit(pr.add({f"Ycp_{d}": 1.0}, copy_flags, _c(-1.0)), {f"O_{d}": 1.0}))
+    for case, lst in segs.items():
+        for i, (kind, _, payload) in enumerate(lst):
+            flag = {f"seg_{case}_{i}": 1.0}
+            if kind == "fixed":
+                l10.units.append(pr.relu_unit(flag, {f"O_{payload}": 1.0}))
+            elif kind == "dec":  # odd exponent: last digit - 1
+                l10.units += cm.ramp_mod10_units({"ld": 1.0, "one": -1.0}, 0, 8, flag, 1.0)
+            elif kind == "half":  # 5*[d_{j-1} odd] + floor(d_j/2)
+                hv = {"dj1": 5.0, "flj1": -10.0, "flj": 1.0}
+                l10.units += cm.ramp_mod10_units(hv, 0, 9, flag, 1.0)
+        l10.units.append(pr.relu_unit({f"end_{case}": 1.0}, {"frame_end": 1.0}))
+    l10.units.append(pr.relu_unit({"semi": 1.0}, {"work_end": 1.0}))
+    return b

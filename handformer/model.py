@@ -294,7 +294,7 @@ class Transformer:
         makes this exact; ``tests/test_expr.py`` checks greedy output against
         the reference sequences.
         """
-        cache = _DecodeCache(self, len(tokens) + max_new)
+        cache = _DecodeCache(self, min(len(tokens) + max_new, 1024))
         logits = None
         for t in tokens:
             logits = cache.step(t)
@@ -320,8 +320,17 @@ class _DecodeCache:
         self.x_in = [np.zeros((capacity, d)) for _ in model.layers]
         self.keys = [[np.zeros((capacity, h.w_k.shape[1])) for h in layer.heads] for layer in model.layers]
 
+    def _grow(self) -> None:
+        """Double the capacity (amortised O(1) per token)."""
+        for li in range(len(self.x_in)):
+            self.x_in[li] = np.concatenate([self.x_in[li], np.zeros_like(self.x_in[li])])
+            self.keys[li] = [np.concatenate([k, np.zeros_like(k)]) for k in self.keys[li]]
+        log.debug("decode cache grown to %d positions", len(self.x_in[0]))
+
     def step(self, token: int) -> np.ndarray:
         """Append one token; return its next-byte logits."""
+        if self.n == len(self.x_in[0]):
+            self._grow()
         m, q = self.m, self.n
         x = m.embed[token] + m.positional(q + 1)[q]
         for li, layer in enumerate(m.layers):

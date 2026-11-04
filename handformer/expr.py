@@ -54,9 +54,9 @@ COPY_LOGIT = cm.DIGIT_LOGIT
 
 DIMS = (
     "PM2_Lrp", "PM2_Lmul", "PM2_Ladd", "PM2_Lnd", "Lt_Lrp", "Lt_Lmul", "Lt_Ladd",
-    "c_raw", "fc", "om", "fm", "oa", "fa", "c", "use_mul", "o",
-    "a_lo", "sb_x", "LopLe", "LopO", "op_div", "e3", "cont_raw", "sa_x", "b_hi", "a_dot", "e1", "e2", "cont",
-    "has_a", "rneg", "b_dot", "drop", "frac_a", "has_b", "prevA_unary", "Lnzr", "cancel", "frac_b",
+    "c_raw", "fc", "om", "fm", "oa", "fa", "c", "use_mul", "opw", "pw", "o",
+    "a_lo", "sb_x", "LopLe", "LopO", "op_div", "op_pow", "op_md", "e3", "cont_raw", "sa_x", "b_hi", "a_dot", "e1", "e2", "cont",
+    "has_a", "res_op", "res_wrap", "rneg", "b_dot", "res_expr", "drop", "frac_a", "has_b", "prevA_unary", "Lnzr", "cancel", "cont2", "frac_b",
     "found_nz", "pad_a_raw", "pad_b_raw", "pad_a", "pad_b", "f_res", "tzx",
     "inA", "inPA", "atOp", "inB", "inPB", "end2", "skipA", "skipB",
     "tz", "src2", *(f"Y2_{d}" for d in NAMES.values()), "fp", "til_line", "Lend", "wd", "dotf",
@@ -104,16 +104,25 @@ def build(b: ModelBuilder) -> None:
         pr.next_match_head("first +- after p", "PM_Ladd", "PM2_Ladd",
                            {"is_plus": 1.0, "is_binminus": 1.0}, {"Lt_Ladd": 1.0}, "oa", "fa"),
     ]
+    # c = min(first ')' after p, Le): a ')' beyond the line (e.g. inside a frame body that
+    # wrote "(a*a)^n") must not end the group. fc * ReLU(x) is one ReLU silenced by BIG.
     l5.units.append(pr.relu_unit(LE, {"c": 1.0}))
-    l5.units += pr.times_flag_units(pr.add({"c_raw": 1.0}, neg(LE)), {"fc": 1.0}, {"c": 1.0})
+    l5.units.append(pr.relu_unit(pr.add(LE, {"c_raw": -1.0, "fc": pr.BIG}, pr.const(-pr.BIG)), {"c": -1.0}))
 
     l6 = b.at(6)
+    l6.heads.append(pr.gather_head("latest ^ before c", pr.add({"c": 1.0}, pr.const(-1.0)), "opw", src="Lpow"))
     l6.units += pr.clamp01_units(pr.add({"c": 1.0, "om": -1.0}, pr.scale({"fm": 1.0}, pr.BIG),
                                         pr.const(-pr.BIG)), {"use_mul": 1.0})
+    l6.units += pr.clamp01_units({"opw": 1.0, "p": -1.0}, {"pw": 1.0})  # a '^' inside the group
 
+    # o: latest '^' in the group (right-associative), else first * or /, else first + or -.
+    # Positions are >= 0, so each choice is one ReLU silenced by BIG unless selected.
     l7 = b.at(7)
-    l7.units.append(pr.relu_unit({"oa": 1.0}, {"o": 1.0}))
-    l7.units += pr.times_flag_units({"om": 1.0, "oa": -1.0}, {"use_mul": 1.0}, {"o": 1.0})
+    l7.units += [
+        pr.relu_unit({"oa": 1.0, "use_mul": -pr.BIG, "pw": -pr.BIG}, {"o": 1.0}),
+        pr.relu_unit({"om": 1.0, "use_mul": pr.BIG, "pw": -pr.BIG, "one": -pr.BIG}, {"o": 1.0}),
+        pr.relu_unit({"opw": 1.0, "pw": pr.BIG, "one": -pr.BIG}, {"o": 1.0}),
+    ]
 
     # ---------------------------------------------------------- operands
     l8 = b.at(8)
@@ -123,6 +132,11 @@ def build(b: ModelBuilder) -> None:
         pr.gather_head("latest op at Le", LE, "LopLe", src="P"),
         pr.gather_head("latest op before o", pr.add({"o": 1.0}, pr.const(-1.0)), "LopO", src="P"),
         pr.gather_head("redex is a division?", {"o": 1.0}, "op_div", src="is_slash"),
+        pr.gather_head("redex is a power?", {"o": 1.0}, "op_pow", src="is_caret"),
+        HeadSpec(name="redex is * or /?",
+                 query=[pr.scale({"o": 1.0}, 2 * pr.GATHER_BETA), pr.const(-pr.GATHER_BETA)],
+                 key=[{"pos": 1.0}, {"pos2": 1.0}],
+                 value={"is_star": {"op_md": 1.0}, "is_slash": {"op_md": 1.0}}),
     ]
     l8.units += pr.clamp01_units({"p": 1.0, "Ls": -1.0}, {"e3": 1.0})
     l8.units += pr.clamp01_units({"LopLe": 1.0, "o": -1.0}, {"cont_raw": 1.0})
@@ -136,33 +150,43 @@ def build(b: ModelBuilder) -> None:
     ]
     l9.units += pr.hat_units(pr.add(AF, {"p": -1.0}), 0.0, {"e1": 1.0})
     l9.units += pr.hat_units({"b_hi": 1.0, "c": -1.0}, 0.0, {"e2": 1.0})
+    l9.heads += [
+        pr.gather_head("operator inside the result?", pr.add({"Rb": 1.0}, pr.const(-1.0)), "res_op", src="P"),
+        pr.gather_head("result ends in ')'?", pr.add({"Rb": 1.0}, pr.const(-1.0)), "res_wrap", src="is_rpar"),
+    ]
     l9.units += pr.clamp01_units({"cont_raw": 1.0}, {"cont": 1.0})
-    l9.units += pr.clamp01_units({"a_dot": 1.0, "a_lo": -1.0}, {"has_a": 1.0})  # '.' inside a
+    l9.units += pr.clamp01_units({"a_dot": 1.0, "a_lo": -1.0, "op_pow": -pr.BIG}, {"has_a": 1.0})  # '.' in a
 
     l10 = b.at(10)
     l10.heads += [
         pr.gather_head("result negative?", pr.add({"S": 1.0}, pr.const(1.0)), "rneg", src="is_minus"),
         pr.gather_head("b's '.'", pr.add({"b_hi": 1.0}, pr.const(-1.0)), "b_dot", src="Ldot"),
     ]
-    l10.units.append(pr.relu_unit({"e1": 1.0, "e2": 1.0, "e3": 1.0, "one": -2.0}, {"drop": 1.0}))
+    l10.units += pr.clamp01_units({"res_op": 1.0, "S": -1.0}, {"res_expr": 1.0})
+    # (drop also needs res_expr; both are only read by the rewrite, from layer 11 on)
     l10.units += pr.times_flag_units(pr.add({"o": 1.0, "a_dot": -1.0}, pr.const(-1.0)), {"has_a": 1.0},
                                      {"frac_a": 1.0})
 
+    # The group's parentheses go when the redex is the whole group and the result is a plain
+    # number, or is itself fully parenthesised (ends in ')': power expansions "(a*a^n)", "(1/a^n)").
+    b.at(11).units.append(pr.relu_unit({"e1": 1.0, "e2": 1.0, "e3": 1.0, "res_expr": -1.0, "res_wrap": 1.0,
+                                        "one": -2.0}, {"drop": 1.0}))
     A = pr.add(AF, {"drop": -1.0}, pr.const(1.0))
     B = pr.add({"b_hi": 1.0, "drop": 1.0}, pr.const(-1.0))
 
     # Double negation: a negative result replacing bytes right after a unary '-'
     # ("-(1-4)", "2*-(1-4)") drops both signs.
     l11 = b.at(11)
-    l11.heads += [
-        pr.gather_head("unary '-' before A?", pr.add(A, pr.const(-1.0)), "prevA_unary", src="is_unary"),
-        pr.gather_head("result's last nonzero digit", pr.add({"Rb": 1.0}, pr.const(-1.0)), "Lnzr", src="Lnz"),
-    ]
-    l11.units.append(pr.relu_unit({"prevA_unary": 1.0, "rneg": 1.0, "one": -1.0}, {"cancel": 1.0}))
-    l11.units += pr.clamp01_units(pr.add({"b_dot": 1.0}, neg(BSTART)), {"has_b": 1.0})
+    l11.heads.append(
+        pr.gather_head("result's last nonzero digit", pr.add({"Rb": 1.0}, pr.const(-1.0)), "Lnzr", src="Lnz"))
+    l11.units += pr.clamp01_units(pr.add({"b_dot": 1.0, "op_pow": -pr.BIG}, neg(BSTART)), {"has_b": 1.0})
     l11.units += pr.clamp01_units({"Lnzr": 1.0, "S": -1.0, "rneg": -1.0}, {"found_nz": 1.0})
 
     l12 = b.at(12)
+    l12.heads.append(pr.gather_head("unary '-' before A?", pr.add(A, pr.const(-1.0)), "prevA_unary", src="is_unary"))
+    l12.units.append(pr.relu_unit({"prevA_unary": 1.0, "rneg": 1.0, "one": -1.0}, {"cancel": 1.0}))
+    # keep going if another operator remains, or the frame's result is itself an expression
+    l12.units += pr.clamp01_units({"cont": 1.0, "res_expr": 1.0}, {"cont2": 1.0})
     l12.units += pr.times_flag_units(pr.add({"b_hi": 1.0, "b_dot": -1.0}, pr.const(-1.0)), {"has_b": 1.0},
                                      {"frac_b": 1.0})
 
@@ -175,11 +199,11 @@ def build(b: ModelBuilder) -> None:
 
     l14 = b.at(14)
     l14.units += [
-        pr.relu_unit(pr.gated({"pad_a_raw": 1.0}, {"use_mul": 1.0}, 0.0), {"pad_a": 1.0}),
-        pr.relu_unit(pr.gated({"pad_b_raw": 1.0}, {"use_mul": 1.0}, 0.0), {"pad_b": 1.0}),
+        pr.relu_unit(pr.gated({"pad_a_raw": 1.0}, {"op_md": 1.0}, 0.0), {"pad_a": 1.0}),
+        pr.relu_unit(pr.gated({"pad_b_raw": 1.0}, {"op_md": 1.0}, 0.0), {"pad_b": 1.0}),
         pr.relu_unit({"frac_a": 1.0, "pad_a_raw": 1.0}, {"f_res": 1.0}),  # max(frac_a, frac_b)
     ]
-    l14.units += pr.times_flag_units({"frac_b": 1.0, "pad_a_raw": -1.0}, {"use_mul": 1.0}, {"f_res": 1.0})
+    l14.units += pr.times_flag_units({"frac_b": 1.0, "pad_a_raw": -1.0}, {"op_md": 1.0}, {"f_res": 1.0})
     # a/b: the frame holds a*10^(frac_b+N) / b*10^frac_a, so the integer quotient has N fractional digits
     l14.units += pr.times_flag_units({"frac_b": 1.0, "N": 1.0}, {"op_div": 1.0}, {"pad_a": 1.0})
     l14.units += pr.times_flag_units({"frac_a": 1.0}, {"op_div": 1.0}, {"pad_b": 1.0})
@@ -288,8 +312,8 @@ def build(b: ModelBuilder) -> None:
         pr.relu_unit({"phase4": 1.0, "isSign": 1.0, "in12": 1.0, "in1": -1.0, "one": -2.0}, {"O_is_minus": 1.0}),
         pr.relu_unit({"phase4": 1.0, "isDot": 1.0, "in12": 1.0, "in1": -1.0, "one": -2.0}, {"O_is_dot": 1.0}),
         pr.relu_unit({"phase4": 1.0, "padzero": 1.0, "one": -1.0}, {"O_oh0": 1.0}),
-        pr.relu_unit({"phase4": 1.0, "end4": 1.0, "cont": 1.0, "one": -2.0}, {"out_eq": 1.0}),
-        pr.relu_unit({"phase4": 1.0, "end4": 1.0, "cont": -1.0, "one": -1.0}, {"out_nl": 1.0}),
+        pr.relu_unit({"phase4": 1.0, "end4": 1.0, "cont2": 1.0, "one": -2.0}, {"out_eq": 1.0}),
+        pr.relu_unit({"phase4": 1.0, "end4": 1.0, "cont2": -1.0, "one": -1.0}, {"out_nl": 1.0}),
     ]
 
     for byte, d in NAMES.items():

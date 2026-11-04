@@ -1,8 +1,8 @@
 # handformer
 
 A transformer that does arithmetic, with **every weight written by hand**.
-Nothing is trained. The tokenizer is raw bytes. One set of **6,930 hand-written
-weights** evaluates whole expressions with `+ − * /`, unary minus, parentheses
+Nothing is trained. The tokenizer is raw bytes. One set of **8,478 hand-written
+weights** evaluates whole expressions with `+ − * / ^`, unary minus, parentheses
 and precedence on signed decimal numbers of any length, with division to a
 precision given in the prompt (`1/3~5` → `0.33333`). The model writes its own working and its own answer;
 the host only feeds bytes and stops at `\n`.
@@ -25,10 +25,10 @@ precedence, copies it into a frame, computes it, and writes the reduced line.
 
 | | |
 |---|---|
-| operators | `+`, `-`, `*`, `/` (truncated to `~N` digits), unary minus, parentheses, precedence, left-to-right order |
+| operators | `+`, `-`, `*`, `/` (truncated to `~N` digits), `^` (integer exponents), unary minus, parentheses, precedence, left-to-right order |
 | operand length | arbitrary (tested to 300 digits for + and −, 25 for ×; designed for ~10⁶ positions) |
-| model | 22 layers, 133 attention heads, 800 MLP units, d_model 458 |
-| weights | 6,930 nonzero (0.5% of stored cells), every one from a documented formula over named residual dims |
+| model | 22 layers, 147 attention heads, 1,044 MLP units, d_model 576 |
+| weights | 8,478 nonzero, every one from a documented formula over named residual dims |
 | architecture | standard decoder-only transformer: causal multi-head attention + ReLU MLP; no LayerNorm, no biases |
 | host logic | none: no parsing, no routing, no reversing, no answer fix-up |
 
@@ -44,6 +44,21 @@ cd /home/lyle/a/alg
 ../.venv/bin/python -m handformer.viz                          # visualizer: http://127.0.0.1:8768
 ../.venv/bin/python -m unittest discover -s tests -t .         # full test suite (~3 min)
 ```
+
+## Everything is in the weights
+
+`tools/run_weights.py` is a ~60-line numpy-only forward pass that never
+imports `handformer`. It runs the exported tensors directly:
+
+```
+../.venv/bin/python -m handformer.export weights.npz
+../.venv/bin/python -I tools/run_weights.py weights.npz "2+3*(4-1)" "1/3~5" "-2^3"
+```
+
+The only facts it uses beyond the arrays: the architecture (causal attention
+summed over heads, a ReLU MLP, residual adds) and which two input columns carry
+position p and p². Dimension and circuit names exist only at build time and
+for labelling.
 
 ## Visualizer
 
@@ -106,6 +121,10 @@ hook, so the visualizer shows exactly the computation the tests check.
   the 9 multiples of the divisor, then quotient-digit + remainder rows. Each
   remainder digit compares itself with all 9 multiples as it is written, and
   9 latest-match heads pick each quotient digit in one pass.
+- **Powers by rewriting.** A power frame writes one step of binary
+  exponentiation as text: `(a*a^(n−1))`, `(a*a)^(n/2)`, `(1/a^n)`, `1` or `a`.
+  The `*` and `/` circuits do the arithmetic. Halving the exponent is
+  digit-local.
 - **Complement during the copy.** For a negative difference, the model emits
   10ⁿ − D digit by digit while reading D out (9−d, 10−d or 0, depending on
   position), with no second pass.
@@ -165,8 +184,10 @@ handformer/
   common.py          byte embedding, operand addressing, mod-10 ramps
   frame.py           layers 1–4: unary vs binary '-', markers, frame flags, phases, sign-aware operator routing
   expr.py            layers 4–22: choose the sub-expression, copy it into the frame, rewrite the line
-  addition.py  subtraction.py  multiplication.py  division.py    operator circuits
+  addition.py  subtraction.py  multiplication.py  division.py  power.py    operator circuits
   export.py          python -m handformer.export weights.npz: every tensor + a JSON index of names
+tools/
+  run_weights.py     independent numpy-only inference from the exported weights
   arith.py           merges everything into one model; solve()
   viz/               step-through visualizer (FastAPI + vanilla JS)
 tests/
@@ -175,6 +196,7 @@ tests/
   test_expr.py       hand-picked and random expression trees; greedy decoding
   test_decimal.py    decimal literal pairs, formatting, long fractions, random decimal trees (exact)
   test_division.py   small/long/signed/decimal quotients at several ~N; random trees with '/' (exact)
+  test_power.py      small/large/decimal/negative exponents, precedence, right-associativity (exact)
 DESIGN.md            full design: attention, residual stream, order of operations, every circuit
 ANSWER_FIRST.md      analysis: can the first emitted byte be the answer? (deferred)
 ```
@@ -192,13 +214,13 @@ sequence exactly. A separate test runs real cached greedy decoding.
 Not supported yet:
 - a prompt with no operator;
 - parentheses around a bare number;
-- division by zero (undefined); powers and roots.
+- division by zero (undefined); roots and fractional exponents.
 
 Roadmap, in dependency order:
 1. ~~signed operands~~ (done);
 2. ~~decimals~~ (done);
 3. ~~division with precision given in the prompt (`~N`)~~ (done);
-4. integer powers;
+4. ~~integer powers~~ (done);
 5. square root.
 
 Planned alongside: visualizer readability (each unit labelled by its meaning,
