@@ -19,14 +19,14 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .. import ablate, arith, common as cm, expr, frame
+from .. import ablate, common as cm
 from ..model import Form, Tracer
 from . import sources
+from .models import MODELS, ModelDef
 from .glossary import describe_dim, describe_head
 
 log = logging.getLogger(__name__)
 
-MAX_TOKENS = 3000
 MAX_RUNS = 4
 MAX_RUN_BYTES = 1 << 30  # stored traces of all kept runs together; oldest runs go first
 # A knocked-out model may never write its final '\n'. It gets this many bytes, so a broken
@@ -38,11 +38,6 @@ MAX_KNOCKOUT_MODELS = 4
 TOP_KEYS = 3
 TOP_LOGITS = 5
 
-# Shared dims shown on the sequence strip as pointers for the selected step.
-MARK_DIMS = ("Ls", "F", "p", "c", "o", "a_lo", "b_hi", "E", "S", "Rb", "P", "R")
-SUMMARY_DIMS = (*MARK_DIMS, "phase1", "phase2", "phase4", "act_add", "act_sub", "act_mul", "act_div", "act_pow",
-                "open", "seen_eq", "seen_semi", "seen_bar", "drop", "cont", "end2", "end4",
-                "in1", "in12", "in123", "src4", "neg", "use_mul")
 
 
 def _num(c: float) -> str:
@@ -72,26 +67,15 @@ def form_str(form: Form) -> str:
     return s
 
 
-def _category(name: str) -> str:
-    if name in cm.INPUT_DIMS:
-        return "input"
-    if name in frame.DIMS:
-        return "frame"
-    if name in expr.DIMS:
-        return "parser"
-    if name in expr.OUT_DIMS or name in arith.OP_OUTPUTS:
-        return "output"
-    return name.split(".", 1)[0] if "." in name else "other"
-
-
-def _circuit(write_dims: list[str], read_dims: list[str]) -> str:
-    """Which circuit a head/unit belongs to: the category of the dims it writes."""
-    cats = [_category(d) for d in write_dims]
+def _circuit(category, default: str, write_dims: list[str], read_dims: list[str]) -> str:
+    """Which circuit a head/unit belongs to: the category of the dims it writes (output writers:
+    the calculator namespace they read, else the model's main circuit ``default``)."""
+    cats = [category(d) for d in write_dims]
     owner = next((c for c in cats if c not in ("output", "input")), None)
     if owner:
         return owner
     ns = next((d.split(".", 1)[0] for d in read_dims if "." in d), None)
-    return ns or "parser"
+    return ns or default
 
 
 @dataclass
@@ -180,9 +164,13 @@ class Run:
 
 
 class Runner:
-    def __init__(self) -> None:
+    def __init__(self, model: str = "calc") -> None:
         t0 = time.perf_counter()
-        self.builder = arith.builder()
+        if model not in MODELS:
+            raise ValueError(f"unknown model {model!r} (one of {', '.join(MODELS)})")
+        self.spec: ModelDef = MODELS[model]
+        self._main = "parser" if model == "calc" else model  # circuit of units that only write outputs
+        self.builder = self.spec.builder()
         self.model = self.builder.build()
         self.layout = self.model.layout
         self.names = self.layout.names
@@ -190,7 +178,7 @@ class Runner:
         self.ko_models: OrderedDict[str, object] = OrderedDict()  # knockout key -> model
         self.normal_len: dict[str, int] = {}  # expression -> bytes the intact model writes
         # Identifies this exact model, so a page loaded against an older server can tell.
-        self.model_id = (f"d{len(self.layout)}-L{len(self.model.layers)}-h{sum(len(l.heads) for l in self.model.layers)}"
+        self.model_id = (f"{self.spec.key}-d{len(self.layout)}-L{len(self.model.layers)}-h{sum(len(l.heads) for l in self.model.layers)}"
                          f"-u{sum(l.w_in.shape[1] for l in self.model.layers)}-nz{self.model.nonzero_params()}")
         log.info("model built in %.2fs: %d layers, d_model=%d, %d nonzero params",
                  time.perf_counter() - t0, len(self.model.layers), len(self.layout),
@@ -205,8 +193,9 @@ class Runner:
             lst = wires[dim][role]
             if where not in lst:
                 lst.append(where)
-        for n in cm.INPUT_DIMS:
-            note(n, "writers", "the position features" if n in ("pos", "pos2") else "the byte embedding")
+        for n in self.names:
+            if self.spec.category(n) == "input":
+                note(n, "writers", "the position features" if n in ("pos", "pos2") else "the byte embedding")
         for li, spec in enumerate(self.builder.layers):
             for h in spec.heads:
                 where = f"L{li + 1} head '{h.name}'"
@@ -232,6 +221,9 @@ class Runner:
         more = len(items) - limit
         return ", ".join(items[:limit]) + (f" and {more} more" if more > 0 else "")
 
+    def _doc(self, name: str) -> str:
+        return self.spec.docs.get(name) or describe_dim(name)
+
     def info(self) -> dict:
         wires = self._wiring()
         sites = sources.dim_sites(self.builder)
@@ -240,7 +232,7 @@ class Runner:
             heads = [{
                 "name": h.name,
                 "doc": describe_head(h),
-                "circuit": _circuit([d for f in h.value.values() for d in f],
+                "circuit": _circuit(self.spec.category, self._main, [d for f in h.value.values() for d in f],
                                     [d for f in h.query for d in f]),
                 "query": [form_str(f) for f in h.query],
                 "key": [form_str(f) for f in h.key],
@@ -252,16 +244,19 @@ class Runner:
             units = [{"read": form_str(u.read), "write": form_str(u.write), "label": u.label,
                       "doc": u.label or ("Writes " + "; ".join(f"{d}: {describe_dim(d) or 'working value'}"
                                                               for d in u.write)),
-                      "circuit": _circuit(list(u.write), list(u.read)), "src": u.where,
+                      "circuit": _circuit(self.spec.category, self._main, list(u.write), list(u.read)), "src": u.where,
                       "reads": sorted(u.read), "writes": sorted(u.write)} for u in spec.units]
             layers.append({"index": li, "name": spec.name, "heads": heads, "units": units})
         return {
             "name": "handformer",
+            "model": self.spec.key, "title": self.spec.title, "marks": list(self.spec.marks),
+            "default_input": self.spec.default_input, "input_hint": self.spec.input_hint,
+            "models": {k: m.title for k, m in MODELS.items()},
             "model_id": self.model_id,
             "d_model": len(self.layout),
             "nonzero_params": self.model.nonzero_params(),
             "source": sources.repo(),  # GitHub repo + branch for "view source" links
-            "dims": [{"name": n, "cat": _category(n), "doc": describe_dim(n),
+            "dims": [{"name": n, "cat": self.spec.category(n), "doc": self._doc(n),
                       "written_by": self._summ(wires[n]["writers"]), "read_by": self._summ(wires[n]["readers"]),
                       "src": sites[n]}
                      for n in self.names],
@@ -282,17 +277,12 @@ class Runner:
         return self.ko_models[key]
 
     def run(self, expression: str, knockout: dict | None = None) -> dict:
-        expression = expression.replace(" ", "").removesuffix("=")  # the page adds the '=' itself
-        if not expression:
-            raise ValueError("empty expression")
-        bad = sorted({ch for ch in expression if ord(ch) not in cm.ALPHABET and ch != "~"})
-        if bad:
-            raise ValueError(f"unsupported characters: {''.join(bad)!r} (use digits . + - * / ( ) and ~N)")
-        prompt = arith.prompt(expression)
+        prompt = self.spec.prompt(expression)  # checks the input characters and framing, or ValueError
+        expression = bytes(prompt[1:-1]).decode("ascii")
         ko = ablate.Knockout.from_request(knockout)
         model = self._model_for(ko)
         t0 = time.perf_counter()
-        budget = MAX_TOKENS - len(prompt)  # the model stops itself at '\n'
+        budget = self.spec.max_tokens - len(prompt)  # the model stops itself at '\n'
         if ko:
             normal = self._normal_len(expression, prompt, budget)
             budget = knockout_budget(normal, budget)
@@ -348,7 +338,7 @@ class Runner:
         """Raw per-step values; the page turns them into phase, explanation and pointer tags."""
         x = run.rec.snapshot(len(run.rec.labels) - 1)[q]
         return {"pred": chr(int(np.argmax(run.logits[q]))),
-                "v": {d: round(float(x[self.layout[d]]), 6) for d in SUMMARY_DIMS}}
+                "v": {d: round(float(x[self.layout[d]]), 6) for d in self.spec.summary}}
 
     def position(self, run_id: str, q: int) -> dict:
         run = self._get(run_id)

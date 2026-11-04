@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 import export_web  # noqa: E402
 from handformer import export as npz_export  # noqa: E402
+from handformer.viz.models import MODELS  # noqa: E402
 
 log = logging.getLogger("build_site")
 STATIC = ROOT / "handformer" / "viz" / "static"
@@ -44,7 +45,8 @@ def build(out: Path) -> None:
         raise RuntimeError(f"index.html no longer contains {anchor!r}; update build_site.py")
     (out / "index.html").write_text(html.replace(anchor, FLAG + "  " + anchor))
     (out / ".nojekyll").write_text("")  # serve files as-is
-    export_web.export(out / "data")
+    for key in MODELS:  # data/calc/, data/life/: model.json + info.json each
+        export_web.export(out / "data" / key, key)
     npz_export.export(out / "handformer-weights.npz")
     npz_export.export(out / "handformer-weights.safetensors")
     files = sorted(p for p in out.rglob("*") if p.is_file())

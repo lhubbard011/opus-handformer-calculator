@@ -51,6 +51,9 @@ def dim_sites(builder: ModelBuilder) -> dict[str, list[str]]:
     embed, positional = _def_site(cm.embed), _def_site(Transformer.positional)
     for n in cm.INPUT_DIMS:
         note(n, positional if n in ("pos", "pos2") else embed)
+    for n, where in builder.embed_where.items():  # a model's own byte features (e.g. Life's 'alive')
+        if n not in cm.INPUT_DIMS:
+            note(n, where)
     for spec in builder.layers:
         for h in spec.heads:
             for dst in h.value.values():

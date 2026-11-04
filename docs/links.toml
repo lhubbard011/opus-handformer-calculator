@@ -244,3 +244,56 @@ match = "def ramp_mod10_units"
 [src."ablate.apply"]
 file = "handformer/ablate.py"
 match = "def apply("
+
+# --- Game of Life (handformer/life/circuit.py)
+[src."life.tags"]
+file = "handformer/life/circuit.py"
+match = 'l1.units += pr.latest_feature({"is_colon": 1.0}, "f_C")'
+
+[src."life.prev"]
+file = "handformer/life/circuit.py"
+match = "l1.heads += [pr.gather_head(\"prev byte"
+
+[src."life.landmarks"]
+file = "handformer/life/circuit.py"
+match = 'l2.heads += [pr.latest_head('
+
+[src."life.count_flag"]
+file = "handformer/life/circuit.py"
+match = 'l2.units.append(pr.relu_unit({"is_digit": 1.0, "prev_eq": 1.0'
+
+[src."life.edges"]
+file = "handformer/life/circuit.py"
+match = '# [o - W1 >= 0]'
+
+[src."life.neighbours"]
+file = "handformer/life/circuit.py"
+match = 'same = {"pos": 1.0, "one": 1.0, "L": -1.0}'
+
+[src."life.rowend"]
+file = "handformer/life/circuit.py"
+match = 'term = pr.gather_head('
+
+[src."life.count_read"]
+file = "handformer/life/circuit.py"
+match = 'count = pr.gather_head('
+
+[src."life.count_n"]
+file = "handformer/life/circuit.py"
+match = 'for name, (dr, _dc) in NEIGHBOURS.items():'
+
+[src."life.rule3"]
+file = "handformer/life/circuit.py"
+match = 'l4.units += pr.hat_units({"n": 1.0}, 3.0'
+
+[src."life.rule2"]
+file = "handformer/life/circuit.py"
+match = 'l4.units += pr.hat_units({"n": 1.0, "self": 10.0'
+
+[src."life.votes"]
+file = "handformer/life/circuit.py"
+match = 'l5 = b.at(5)'
+
+[src."life.next_count"]
+file = "handformer/life/circuit.py"
+match = 'for v in range(1, 10):'

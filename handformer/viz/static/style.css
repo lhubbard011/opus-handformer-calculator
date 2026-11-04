@@ -250,3 +250,22 @@ button.pin { font-size: 11px; padding: 1px 6px; border-color: var(--border); }
 .pinned[hidden] { display: none; }
 .diff-ctl { display: flex; gap: 6px; align-items: center; font-size: 12px; font-weight: 600; color: #e07bd0; }
 .diff-ctl[hidden] { display: none; }
+/* Game of Life phases */
+:root { --ph-cell: #7bd88f; --ph-rowend: #4fd1c5; --ph-count: #f2a541; }
+.ph-cell { border-bottom-color: var(--ph-cell); } .lg.ph-cell { background: var(--ph-cell); }
+.ph-rowend { border-bottom-color: var(--ph-rowend); } .lg.ph-rowend { background: var(--ph-rowend); }
+.ph-count { border-bottom-color: var(--ph-count); } .lg.ph-count { background: var(--ph-count); }
+.legend[hidden] { display: none; }
+#model-sel { font-weight: 600; }
+/* Game of Life board */
+.board-panel[hidden] { display: none; }
+.board-row { display: flex; gap: 28px; flex-wrap: wrap; margin-top: 6px; }
+.board { display: inline-flex; flex-direction: column; gap: 2px; padding: 6px; background: var(--panel-2); border-radius: 6px; margin-top: 4px; }
+.board-line { display: flex; gap: 2px; }
+.bcell { width: 16px; height: 16px; border-radius: 3px; background: #262b34; border: 2px solid transparent; cursor: pointer; }
+.bcell.alive { background: var(--ph-cell); }
+.bcell.later { background: transparent; border: 1px dashed #3a4150; }
+.bcell.is-cell { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.bcell.is-nb { border-color: var(--accent-2); }
+.bcell.is-next { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+@media (pointer: coarse) { .bcell { width: 20px; height: 20px; } }

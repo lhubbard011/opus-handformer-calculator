@@ -25,32 +25,38 @@ class Knockout(BaseModel):
 
 
 class RunBody(BaseModel):
+    model: str = "calc"
     expression: str = Field(min_length=1, max_length=400)
     knockout: Knockout | None = None
 
 
 class PositionBody(BaseModel):
+    model: str = "calc"
     run_id: str
     q: int = Field(ge=0)
 
 
 class AttentionBody(BaseModel):
+    model: str = "calc"
     run_id: str
     layer: int
     head: int
 
 
 class ResidualBody(BaseModel):
+    model: str = "calc"
     run_id: str
     snapshot: int
 
 
 class MlpBody(BaseModel):
+    model: str = "calc"
     run_id: str
     layer: int
 
 
 class WeightsBody(BaseModel):
+    model: str = "calc"
     kind: str
     layer: int | None = None
     head: int | None = None
@@ -70,7 +76,14 @@ def _binary(arr: np.ndarray, meta: dict) -> Response:
     return Response(content=data, media_type="application/octet-stream", headers={"X-Meta": json.dumps(meta)})
 
 
-def create_app(runner: Runner) -> FastAPI:
+def create_app(runners: dict[str, Runner]) -> FastAPI:
+    """One app for every model; each request names its model (default: the calculator)."""
+
+    def pick(model: str) -> Runner:
+        if model not in runners:
+            raise ValueError(f"unknown model {model!r} (one of {', '.join(runners)})")
+        return runners[model]
+
     app = FastAPI(title="handformer visualizer")
 
     @app.exception_handler(ValueError)
@@ -91,32 +104,32 @@ def create_app(runner: Runner) -> FastAPI:
         return response
 
     @app.get("/api/info")
-    def info() -> dict:
-        return runner.info()
+    def info(model: str = "calc") -> dict:
+        return pick(model).info()
 
     @app.post("/api/run")
     def run(body: RunBody) -> dict:
-        return runner.run(body.expression, body.knockout.model_dump() if body.knockout else None)
+        return pick(body.model).run(body.expression, body.knockout.model_dump() if body.knockout else None)
 
     @app.post("/api/position")
     def position(body: PositionBody) -> dict:
-        return runner.position(body.run_id, body.q)
+        return pick(body.model).position(body.run_id, body.q)
 
     @app.post("/api/attention")
     def attention(body: AttentionBody) -> Response:
-        return _binary(*runner.attention_map(body.run_id, body.layer, body.head))
+        return _binary(*pick(body.model).attention_map(body.run_id, body.layer, body.head))
 
     @app.post("/api/residual")
     def residual(body: ResidualBody) -> Response:
-        return _binary(*runner.residual_map(body.run_id, body.snapshot))
+        return _binary(*pick(body.model).residual_map(body.run_id, body.snapshot))
 
     @app.post("/api/mlp")
     def mlp(body: MlpBody) -> Response:
-        return _binary(*runner.mlp_map(body.run_id, body.layer))
+        return _binary(*pick(body.model).mlp_map(body.run_id, body.layer))
 
     @app.post("/api/weights")
     def weights(body: WeightsBody) -> Response:
-        return _binary_f32(*runner.weights(body.kind, body.layer, body.head, body.trim))
+        return _binary_f32(*pick(body.model).weights(body.kind, body.layer, body.head, body.trim))
 
     @app.get("/")
     def index() -> FileResponse:

@@ -13,9 +13,19 @@ const logErr = (...args) => console.error("[handviz]", ...args);
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const MARK_LABELS = { Ls: "Ls", F: "[", p: "p", c: "c", o: "o", a_lo: "a_lo", b_hi: "b_hi", E: "=", S: ";", Rb: "]" };
+// Tags that are positions computed for display, not dims of their own.
+const PTR_DOCS = {
+  cell: "The same cell one generation back (L bytes back): the 'self' head reads it.",
+  nb: "A neighbour of that cell, read by one of the eight neighbour heads ('/' ':' '=' read as dead).",
+};
+// Pointer tags drawn above the sequence, per model (dim -> label).
+const MARK_LABELS_BY = {
+  calc: { Ls: "Ls", F: "[", p: "p", c: "c", o: "o", a_lo: "a_lo", b_hi: "b_hi", E: "=", S: ";", Rb: "]" },
+  life: { C: ":", cell: "cell", nb: "nb" },
+};
 
 const state = {
+  model: "calc", // which hand-written model the page shows (handformer/viz/models.py)
   info: null,
   run: null, // /api/run response
   q: 0,
@@ -37,17 +47,20 @@ const state = {
 // Static hosting (GitHub Pages): window.HANDFORMER_STATIC is the folder holding
 // model.json + info.json, and the model runs in this page (local-api.js answers
 // the same endpoints the Python server does). Otherwise: the Python server.
-let local = null;
+// One page, several models (calculator, Game of Life): every request names state.model.
+const locals = {}; // model -> LocalApi (static site: each model's files live in data/<model>/)
 
 async function api(path, body, binary = false) {
   const t0 = performance.now();
+  if (body !== undefined) body = { ...body, model: state.model };
   if (window.HANDFORMER_STATIC !== undefined) {
-    if (!local) local = LocalApi.load(window.HANDFORMER_STATIC).catch((e) => { local = null; throw e; });
-    const out = await (await local).call(path, body);
+    const m = state.model;
+    if (!locals[m]) locals[m] = LocalApi.load(`${window.HANDFORMER_STATIC}${m}/`).catch((e) => { delete locals[m]; throw e; });
+    const out = await (await locals[m]).call(path, body);
     if (binary) log(`${path} (in page) shape=[${out.meta.shape}] in ${(performance.now() - t0).toFixed(0)}ms`);
     return out;
   }
-  const r = await fetch(path, {
+  const r = await fetch(body === undefined ? `${path}?model=${encodeURIComponent(state.model)}` : path, {
     method: body === undefined ? "GET" : "POST",
     headers: body === undefined ? {} : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -78,6 +91,7 @@ async function api(path, body, binary = false) {
 // Circuits that matter at this step (used by "focus active circuit").
 function focusSet() {
   const s = state.run?.steps[state.q];
+  if (state.model === "life") return new Set(["input", "output", "life"]); // one circuit, always on
   const set = new Set(["input", "output", "frame"]);
   if (!s) return set;
   if (s.phase === "copy" || s.phase === "rewrite") set.add("parser");
@@ -184,9 +198,81 @@ function summarize(run, q, raw) {
   return { q, phase, op, pred: raw.pred, explain, marks: Object.fromEntries(MARK_DIMS.map((d) => [d, r(v[d])])) };
 }
 
+// Game of Life: what the byte written at this step is, and why (from the model's own values:
+// C latest ':', L block length, F first row end, n live neighbours, self, nxt). Display only.
+const NEIGH = [["ul", -1, -1], ["u", -1, 0], ["ur", -1, 1], ["l", 0, -1], ["r", 0, 1], ["dl", 1, -1], ["d", 1, 0], ["dr", 1, 1]];
+function summarizeLife(run, q, raw) {
+  const v = raw.v, r = Math.round, p = raw.pred;
+  const W1 = r(v.F) - 2, L = r(v.L), o = q - r(v.C);
+  const gen = run.chars.slice(0, q + 1).filter((c) => c === "=").length; // generation being written
+  const cell = q + 1 - L; // the same cell one generation back
+  const marks = { C: r(v.C), L, F: r(v.F) };
+  let phase, explain, nbs = [];
+  if (q < run.prompt_len - 1) { phase = "prompt"; explain = "Part of your prompt: the count, then the starting grid."; }
+  else if (p === "#" || p === ".") {
+    phase = "cell";
+    const row = Math.floor(o / W1), col = o % W1, n = r(v.n), was = v.self > 0.5, now = v.nxt > 0.5;
+    const nb = `${n} live neighbour${n === 1 ? "" : "s"}`;
+    const why = now ? (was ? `survives with ${nb} (2 or 3)` : "is born with exactly 3 live neighbours")
+      : (was ? `dies with ${nb} (it needs 2 or 3)` : `stays dead with ${nb} (it needs exactly 3)`);
+    explain = `Generation ${gen}, row ${row}, column ${col}: one generation back it was ${was ? "alive" : "dead"}, and it ${why}, ` +
+      `so the model writes '${p}'. It read its 3×3 neighbourhood ${L} bytes back (tags "cell" and "nb").`;
+    marks.cell = cell;
+    nbs = NEIGH.filter(([, dr]) => (dr < 0 ? v.up_ok > 0.5 : dr > 0 ? v.down_ok > 0.5 : true))
+      .map(([, dr, dc]) => cell + dr * W1 + dc);
+  } else if (p === "/" || p === "=") {
+    phase = "rowend";
+    explain = p === "/" ? `One generation back has '/' at this offset (${L} bytes back), so this row ends here: copy it.`
+      : `One generation back has '=' here: the grid of generation ${gen} is complete.`;
+    marks.cell = cell;
+  } else if (p === ":") { phase = "count"; explain = "After the count digit comes ':', then the grid."; }
+  else {
+    phase = "count";
+    const k = [...Array(10).keys()].find((d) => v[`K${d}`] > 0.5);
+    explain = p === "\n" ? `This block's count was ${k ?? "?"}: the last generation is written, so the model writes the final newline.`
+      : `Generation ${gen} is complete and its count was ${k ?? "?"}, so the next block starts with ${p} (one less): the count lives in the text.`;
+  }
+  return { q, phase, op: null, pred: p, explain, marks, nbs };
+}
+
+const summarizeStep = (run, q, raw) => (state.model === "life" ? summarizeLife(run, q, raw) : summarize(run, q, raw));
 const phaseClass = (s) => (s.phase === "op" ? `ph-${s.op || "prompt"}` : `ph-${s.phase}`);
 
 // ------------------------------------------------------------------ runs
+
+const GRAPH_CIRCUITS = {
+  calc: [["all", "all circuits together"], ["frame", "frame locator"], ["parser", "parser / rewriter"],
+         ["add", "add"], ["sub", "sub"], ["mul", "mul"], ["div", "div"], ["pow", "pow"]],
+  life: [["life", "game of life"]],
+};
+
+/** Show the parts of the page that belong to the current model (legend, guide, graph menu, input hint). */
+function applyModelChrome() {
+  const m = state.model, info = state.info;
+  $("model-sel").value = m;
+  document.querySelectorAll(".legend[data-model]").forEach((el) => { el.hidden = el.dataset.model !== m; });
+  $("guide").hidden = m !== "calc"; // the guide's examples are the calculator's
+  const keep = $("g-circuit").value;
+  $("g-circuit").replaceChildren(...GRAPH_CIRCUITS[m].map(([v, t]) => new Option(t, v)));
+  if (GRAPH_CIRCUITS[m].some(([v]) => v === keep)) $("g-circuit").value = keep;
+  $("expr-input").placeholder = info.input_hint;
+  $("expr-input").dataset.tip = `Input for the ${info.title}: ${info.input_hint}.`;
+  document.title = `handformer · ${info.title}`;
+}
+
+/** Switch the page to another model and run its default (or given) input. */
+async function switchModel(key, input = null) {
+  if (key === state.model && state.info) return;
+  log("switching model", state.model, "->", key);
+  stopPlay();
+  Object.assign(state, { model: key, run: null, head: null, openDim: null, base: null, q: 0 });
+  state.pos.clear(); state.maps.clear(); state.baseline.clear();
+  state.ko = { heads: [], units: [], dims: [] };
+  await loadInfo();
+  applyModelChrome();
+  $("expr-input").value = input ?? state.info.default_input;
+  await runExpression($("expr-input").value);
+}
 
 async function loadInfo() {
   state.info = await api("/api/info");
@@ -202,7 +288,10 @@ async function loadInfo() {
 
 /** The final line, made safe to show: unprintable bytes as '·', capped, and flagged if the model never stopped. */
 function answerOf(run) {
-  const raw = run.chars.join("").split("]").pop().trim();
+  const text = run.chars.join("");
+  // Life: the last generation's grid; the calculator: the line after the last step
+  const raw = state.model === "life" ? (text.trim().split("=").filter(Boolean).pop() || "").split(":").pop()
+    : text.split("]").pop().trim();
   let a = [...raw].map((c) => (c >= " " && c <= "~" ? c : "·")).join("");
   if (a.length > 40) a = `${a.slice(0, 40)}… (${raw.length} bytes)`;
   return run.finished ? a : `${a || "—"} (did not finish)`;
@@ -327,7 +416,7 @@ async function runExpression(expression, keepStep = null) {
     }
     if (seq !== state.runSeq) { log("dropping a stale run response", run.run_id); return; }
     state.running = false;
-    run.steps = run.steps.map((raw, q) => summarize(run, q, raw));
+    run.steps = run.steps.map((raw, q) => summarizeStep(run, q, raw));
     if (run.model_id !== state.info?.model_id) {
       log("server model changed", state.info?.model_id, "->", run.model_id, "; reloading model description");
       await loadInfo();
@@ -406,10 +495,15 @@ function renderStrip() {
   const q = state.q;
   const step = run.steps[q];
   const marks = {};
-  for (const [dim, label] of Object.entries(MARK_LABELS)) {
+  const labels = MARK_LABELS_BY[state.model] || {};
+  for (const [dim, label] of Object.entries(labels)) {
     const at = step.marks[dim];
     if (step.phase === "prompt" || step.phase === "open") break;
     if (at >= 0 && at < run.chars.length) (marks[at] ||= []).push({ dim, label });
+  }
+  // Life: the 3x3 neighbourhood the cell's heads read, one generation back
+  for (const at of step.nbs || []) {
+    if (at >= 0 && at < run.chars.length) (marks[at] ||= []).push({ dim: "nb", label: labels.nb || "nb" });
   }
   const srcs = new Set();
   const p = state.pos.get(q);
@@ -433,7 +527,7 @@ function renderStrip() {
       : "Part of the prompt you typed.") + "\n(click to step to this position)";
     if (marks[i]) {  // the pointers drawn above this byte, spelled out (orange, like the tags)
       el.dataset.tipPtr = "Pointers here at this step:\n" + marks[i].map(({ dim, label }) =>
-        `▲ ${label}${label !== dim ? ` (${dim})` : ""}: ${dimDoc(dim)?.doc || ""}`).join("\n");
+        `▲ ${label}${label !== dim ? ` (${dim})` : ""}: ${dimDoc(dim)?.doc || PTR_DOCS[dim] || ""}`).join("\n");
     }
     if (marks[i]) {
       const tags = document.createElement("span");
@@ -464,12 +558,63 @@ function renderStrip() {
   }
 }
 
+// ------------------------------------------------------------------ Life board
+// The grid one generation back and the one being written, from the written text (display only);
+// the outlined cells are the model's own pointers: the cell (q+1-L) and its neighbours.
+function lifeBlocks(chars) {
+  const blocks = [];
+  let start = 1;
+  for (let i = 1; i < chars.length; i++) {
+    if (chars[i] === "=" || i === chars.length - 1) {
+      const colon = chars.indexOf(":", start);
+      if (colon >= start && colon < i) blocks.push({ start, colon, end: i }); // the final '\n' is not a block
+      start = i + 1;
+    }
+  }
+  return blocks;
+}
+function drawBoard(el, chars, block, upto, marks) {
+  el.replaceChildren();
+  if (!block) return;
+  let row = document.createElement("div");
+  row.className = "board-line";
+  for (let p = block.colon + 1; p < block.end || (p === block.end && chars[p] !== "="); p++) {
+    const c = chars[p];
+    if (c === "/") { el.append(row); row = document.createElement("div"); row.className = "board-line"; continue; }
+    if (c !== "#" && c !== ".") continue;
+    const sq = document.createElement("span");
+    sq.className = "bcell" + (p > upto ? " later" : c === "#" ? " alive" : "") + (marks[p] ? ` ${marks[p]}` : "");
+    sq.dataset.tip = `position ${p}: '${c}'` + (marks[p] === "is-cell" ? "\nthe cell being written, one generation back" :
+      marks[p] === "is-nb" ? "\na neighbour its heads read" : marks[p] === "is-next" ? "\nwritten at this step" : "");
+    sq.addEventListener("click", () => goto(p - 1));
+    row.append(sq);
+  }
+  el.append(row);
+}
+function renderBoard() {
+  const panel = $("p-board");
+  panel.hidden = state.model !== "life";
+  if (panel.hidden || !state.run) return;
+  const run = state.run, q = state.q, s = run.steps[q], blocks = lifeBlocks(run.chars);
+  const i = blocks.findIndex((b) => q + 1 >= b.start && q + 1 <= b.end);
+  const cur = blocks[i], prev = blocks[i - 1];
+  const prevMarks = {}, curMarks = { [q + 1]: "is-next" };
+  for (const p of s.nbs || []) prevMarks[p] = "is-nb";
+  if (s.marks.cell !== undefined) prevMarks[s.marks.cell] = "is-cell";
+  drawBoard($("board-prev"), run.chars, prev, Infinity, prevMarks);
+  drawBoard($("board-cur"), run.chars, cur, q + 1, curMarks);
+  $("board-prev-title").textContent = prev ? `one generation back (count ${run.chars[prev.start]})` : "the prompt is being read";
+  $("board-cur-title").textContent = cur ? `being written (count ${run.chars[cur.start]})` : "";
+  $("board-caption").textContent = s.phase === "cell" ? `· ${s.explain.split(":")[0]}` : "";
+}
+
 function renderStep() {
   const run = state.run;
   const s = run.steps[state.q];
   const n = run.chars.length - 1 - (run.prompt_len - 1);
   $("step-label").textContent = `step ${state.q - run.prompt_len + 2} / ${n} · query pos ${state.q} ${JSON.stringify(run.chars[state.q])} → writes ${JSON.stringify(run.chars[state.q + 1])}`;
   $("explain").textContent = s.explain;
+  renderBoard();
   $("explain").style.borderLeftColor = getComputedStyle(document.documentElement)
     .getPropertyValue(`--${phaseClass(s)}`) || "var(--accent)";
   const m = $("marks");
@@ -478,7 +623,7 @@ function renderStep() {
     const el = document.createElement("span");
     const ch = v >= 0 && v < run.chars.length ? showChar(run.chars[v]) : "";
     el.innerHTML = `${dim} <b>${v}</b> <span class="muted">${ch}</span>`;
-    el.dataset.tip = `${dim} = ${v}${ch ? ` (the "${ch}" at position ${v})` : ""}\n${dimDoc(dim)?.doc || ""}`;
+    el.dataset.tip = `${dim} = ${v}${ch ? ` (the "${ch}" at position ${v})` : ""}\n${dimDoc(dim)?.doc || PTR_DOCS[dim] || ""}`;
     m.appendChild(el);
   }
 }
@@ -1050,6 +1195,7 @@ function wire() {
   $("w-layer").addEventListener("input", fillHeads);
   $("g-circuit").addEventListener("input", () => { renderGraph(); scheduleHash(); });
   $("btn-link").addEventListener("click", copyLink);
+  $("model-sel").addEventListener("change", (e) => switchModel(e.target.value).catch((err) => setStatus(err.message, true)));
   $("diff").addEventListener("change", () => state.pos.has(state.q) && renderMap(state.pos.get(state.q)));
   document.querySelectorAll("#guide .try").forEach((b) => {
     b.dataset.tip = "Set the visualizer up to show this (runs an example and opens the right view).";
@@ -1236,6 +1382,7 @@ let hashTimer = null;
 function viewParams() {
   const h = new URLSearchParams();
   if (!state.run) return h;
+  if (state.model !== "calc") h.set("m", state.model);
   h.set("e", state.run.expression);
   h.set("q", String(state.q));
   h.set("map", state.map);
@@ -1267,7 +1414,7 @@ function readHash() {
     else if (t[0] === "d") ko.dims.push(t.slice(1));
   }
   const head = /^(\d+)\.(\d+)$/.exec(h.get("head") || "");
-  return { e: h.get("e"), q: num("q"), map: h.get("map"), head: head ? [Number(head[1]), Number(head[2])] : null,
+  return { m: h.get("m") || "calc", e: h.get("e"), q: num("q"), map: h.get("map"), head: head ? [Number(head[1]), Number(head[2])] : null,
            ml: num("ml"), snap: num("snap"), g: h.get("g"), pins: (h.get("pins") || "").split(",").filter(Boolean),
            ko, diff: h.get("diff") !== "0", any: h.toString().length > 0 };
 }
@@ -1302,9 +1449,12 @@ async function main() {
   trackBar();
   if (matchMedia("(max-width: 700px)").matches) $("map-howto").open = false; // long on a phone; one tap opens it
   try {
-    await loadInfo();
-    setStatus(`${state.info.layers.length} layers · d_model ${state.info.d_model} · ${state.info.nonzero_params} hand-written params`);
     const v = readHash();
+    if (["calc", "life"].includes(v.m)) state.model = v.m;
+    await loadInfo();
+    applyModelChrome();
+    if (!v.e) $("expr-input").value = state.info.default_input;
+    setStatus(`${state.info.layers.length} layers · d_model ${state.info.d_model} · ${state.info.nonzero_params} hand-written params`);
     if (v.any) log("opening the view from the link", location.hash.length, "chars");
     if (v.e) $("expr-input").value = v.e;
     state.ko = v.ko;

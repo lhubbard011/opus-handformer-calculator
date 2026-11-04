@@ -59,11 +59,11 @@ class TestWebParity(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def node(self, requests: list) -> list:
+    def node(self, requests: list, model_dir: Path | None = None) -> list:
         req, out = self.tmp / "req.json", self.tmp / "out.json"
         req.write_text(json.dumps(requests))
         proc = subprocess.run([NODE, "--experimental-detect-module", "--no-warnings", str(ROOT / "tests/web_parity.mjs"),
-                               str(self.tmp), str(req), str(out)], capture_output=True, text=True, timeout=600)
+                               str(model_dir or self.tmp), str(req), str(out)], capture_output=True, text=True, timeout=600)
         log.info("node exited %d: %s", proc.returncode, proc.stdout.strip().splitlines()[-1:] )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return json.loads(out.read_text())
@@ -148,6 +148,27 @@ class TestWebParity(unittest.TestCase):
                 close(js[1]["values"], r.position(py["run_id"], q)["values"], f"knockout values q={q}")
         bad = self.node([["/api/run", {"expression": "1+1", "knockout": {"dims": ["pos"]}}]])
         self.assertIn("cannot be knocked out", bad[0]["error"])
+
+    def test_life_matches(self):
+        """The Game of Life model: same bytes, step values and traces in both engines (and a knockout)."""
+        life_dir = self.tmp / "life"
+        export_web.export(life_dir, "life")
+        r = Runner("life")
+        for text, ko in (("3:.#./.#./.#.", None), ("2:....../..#.../...#../.###../....../......", None),
+                         ("2:###/#../.#.", {"units": [[1, 3]]})):
+            with self.subTest(text=text, ko=ko):
+                py = r.run(text, ko)
+                q = len(py["chars"]) // 2
+                req = [["/api/run", {"expression": text, **({"knockout": ko} if ko else {})}], ["/api/position", {"run_id": "$run", "q": q}]]
+                js = self.node(req, life_dir)
+                self.assertNotIn("error", js[0], js[0])
+                self.assertEqual(js[0]["chars"], py["chars"])
+                for a, b in zip(js[0]["steps"], py["steps"]):
+                    self.assertEqual(a["pred"], b["pred"])
+                    close_dict(a["v"], b["v"], "life step")
+                close(js[1]["values"], r.position(py["run_id"], q)["values"], f"life values q={q}")
+        bad = self.node([["/api/run", {"expression": ".#./###"}]], life_dir)
+        self.assertIn("start with the number of generations", bad[0]["error"])
 
     def test_weights_match(self):
         r = self.runner

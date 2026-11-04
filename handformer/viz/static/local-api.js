@@ -116,11 +116,13 @@ export class LocalApi {
   run(expression, knockout) {
     expression = String(expression).replaceAll(" ", "");
     if (expression.endsWith("=")) expression = expression.slice(0, -1);
-    if (!expression) throw new Error("empty expression");
+    // the same input checks as the server's model (handformer/viz/models.py): characters, then framing
+    if (!expression) throw new Error(this.cfg.pattern_error);
     if (expression.length > 400) throw new Error("expression longer than 400 characters");
     const allowed = new Set(this.cfg.input_chars);
     const bad = [...new Set([...expression].filter((ch) => !allowed.has(ch)))].sort();
-    if (bad.length) throw new Error(`unsupported characters: '${bad.join("")}' (use digits . + - * / ( ) and ~N)`);
+    if (bad.length) throw new Error(`unsupported characters: '${bad.join("")}' ${this.cfg.chars_hint}`);
+    if (!new RegExp(this.cfg.input_pattern).test(expression)) throw new Error(this.cfg.pattern_error);
     const prompt = [...`\n${expression}=`].map((c) => c.charCodeAt(0));
     const ko = normKnockout(knockout);
     let budget = this.cfg.max_tokens - prompt.length;

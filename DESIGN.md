@@ -917,11 +917,11 @@ Each circuit is a short list of named heads and units, placed at fixed layers wi
 | what | where |
 |---|---|
 | **Engine** | |
-| weights from named linear forms | [model.py:182](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L182 "src:engine.builder") `ModelBuilder`: `{dim: coef}` forms become matrices |
-| a head = query, key, value forms | [model.py:88](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L88 "src:engine.head_spec") `HeadSpec` |
-| an MLP unit = ReLU(read) → write | [model.py:124](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L124 "src:engine.unit_spec") `UnitSpec` |
-| the forward pass | [model.py:328](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L328 "src:engine.forward") `Transformer.residual` |
-| cached greedy decoding | [model.py:403](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L403 "src:engine.decode_cache") `_DecodeCache` |
+| weights from named linear forms | [model.py:185](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L185 "src:engine.builder") `ModelBuilder`: `{dim: coef}` forms become matrices |
+| a head = query, key, value forms | [model.py:91](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L91 "src:engine.head_spec") `HeadSpec` |
+| an MLP unit = ReLU(read) → write | [model.py:127](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L127 "src:engine.unit_spec") `UnitSpec` |
+| the forward pass | [model.py:333](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L333 "src:engine.forward") `Transformer.residual` |
+| cached greedy decoding | [model.py:408](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L408 "src:engine.decode_cache") `_DecodeCache` |
 | **Primitives** | |
 | exact lookup: score −β(k−t)² | [primitives.py:66](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L66 "src:prim.gather") `gather_head` |
 | latest match (tags grow with position) | [primitives.py:142](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L142 "src:prim.latest_feature") `latest_feature` |
@@ -1042,3 +1042,18 @@ into 75, and leaves `12+34` (no carry) unchanged.
   with a layer-by-layer walkthrough and a knockout that breaks the carry chain
   exactly as the explanation predicts. `tests/test_hello.py` checks every pair
   below 100 and long random operands.
+
+## 31. A second model: Game of Life (`handformer/life/`, `LIFE.md`)
+
+The same engine and primitives build a Game of Life model (5 layers, 16 heads, 41 units, 641
+nonzero weights). The sequence is `\nN:<grid>=` followed by blocks `k:<grid>=` counting down to
+0, then `\n`; the count is kept in the text. Because every block has the length L of the prompt
+block, the cell written at p reads its 3×3 neighbourhood at fixed offsets p − L + dr·W1 + dc with
+nine exact lookups; left and right edges read the dead `/` `:` `=` bytes, top and bottom edges
+are two exact steps on the cell's offset, and row ends are copied from the previous block, so no
+division or modulo is needed. The rule is two equality tests, [n = 3] + [n = 2 and alive].
+
+The visualizer shows both models (`viz/models.py`: each model brings its builder, input check,
+circuit grouping, pointers and docs; everything else is shared). Life adds a Board panel and
+its own step explanations, all derived from the written text and the model's own values.
+Unlike the calculator, Life has no known claim exceptions (`tests/test_life.py`).

@@ -9,6 +9,9 @@
 <body>
   <header class="topbar">
     <div class="brand">handformer <span class="brand-sub">visualizer</span></div>
+    <select id="model-sel" aria-label="Model" data-tip="Which hand-written model to look at. Both are built with the same engine and primitives, and every view below works for either.">
+      <option value="calc">calculator</option><option value="life">game of life</option>
+    </select>
     <form id="expr-form" class="prompt">
       <input id="expr-input" type="text" value="2+3*(4-1)" spellcheck="false" autocomplete="off" aria-label="Expression">
       <button type="submit" class="primary" data-tip="Run the expression through the model and record every internal value.">Run</button>
@@ -37,7 +40,11 @@
       <span class="label">Sequence</span>
       <span id="step-label" class="muted"></span>
       <span class="spacer"></span>
-      <span class="legend">
+      <span class="legend" data-model="life" hidden>
+        <span class="lg ph-prompt" data-tip="The count and the starting grid you typed.">prompt</span><span class="lg ph-cell" data-tip="A cell of the next generation, from the rule: born with 3 live neighbours, survives with 2 or 3.">cell</span>
+        <span class="lg ph-rowend" data-tip="A row end ('/') or grid end ('='), copied from the same offset one generation back.">row end</span><span class="lg ph-count" data-tip="The count digit (one less than the last block's) and its ':', or the final newline.">count</span>
+      </span>
+      <span class="legend" data-model="calc">
         <span class="lg ph-prompt" data-tip="Characters you typed.">prompt</span><span class="lg ph-open" data-tip="The model opens a working step with '['.">open [</span>
         <span class="lg ph-copy" data-tip="The model copies the piece it chose to solve next (innermost brackets first, then ^, then × ÷, then + −).">copy redex</span><span class="lg ph-add" data-tip="Written by the addition calculator (inside a step).">add</span>
         <span class="lg ph-sub" data-tip="Written by the subtraction calculator.">sub</span><span class="lg ph-mul" data-tip="Written by the multiplication calculator.">mul</span>
@@ -132,6 +139,15 @@
     </div>
   </details>
 
+
+  <section id="p-board" data-pin="Board" class="panel wide board-panel" hidden>
+    <div class="panel-title" data-tip="The grid one generation back and the generation being written. The cell being written and the nine cells its heads read are outlined.">Board
+      <span class="muted small" id="board-caption"></span></div>
+    <div class="board-row">
+      <div><div class="muted small" id="board-prev-title">one generation back</div><div id="board-prev" class="board"></div></div>
+      <div><div class="muted small" id="board-cur-title">being written</div><div id="board-cur" class="board"></div></div>
+    </div>
+  </section>
 
   <main class="grid">
     <section id="p-step" data-pin="Step" class="panel">

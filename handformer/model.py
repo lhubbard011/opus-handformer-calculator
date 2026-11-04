@@ -47,8 +47,11 @@ def authored_at() -> str:
     f = sys._getframe(1)
     while f is not None:
         p = Path(f.f_code.co_filename)
-        # private helpers inside a circuit file (``_lt``, ``_ruler``) are skipped too
-        if p.parent == _PKG and p.name not in _HELPERS and not f.f_code.co_name.startswith("_"):
+        # circuit files live in the package or a model subpackage (handformer/life/); the shared
+        # helpers and private helpers inside a circuit file (``_lt``, ``_ruler``) are skipped
+        in_pkg = p.parent == _PKG or _PKG in p.parents
+        helper = p.parent == _PKG and p.name in _HELPERS
+        if in_pkg and not helper and "viz" not in p.parts and not f.f_code.co_name.startswith("_"):
             return f"{p.relative_to(_PKG.parent).as_posix()}:{f.f_lineno}"
         f = f.f_back
     return ""
@@ -201,11 +204,13 @@ class ModelBuilder:
         self.token_embed: dict[int, Form] = {}
         self.layers: list[LayerSpec] = []
         self.unembed: dict[str, dict[int, float]] = {}
+        self.embed_where: dict[str, str] = {}  # dim -> source line that first embeds it (docs only)
 
     def embed_byte(self, byte: int, form: Form) -> None:
         row = self.token_embed.setdefault(byte, {})
         for dim, coef in form.items():
             row[dim] = row.get(dim, 0.0) + coef
+            self.embed_where.setdefault(dim, authored_at())
 
     def layer(self, name: str) -> LayerSpec:
         spec = LayerSpec(name)

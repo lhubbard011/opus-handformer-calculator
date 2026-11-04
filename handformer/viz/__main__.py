@@ -6,6 +6,7 @@ import logging
 
 import uvicorn
 
+from .models import MODELS
 from .runner import Runner
 from .server import create_app
 
@@ -13,7 +14,7 @@ log = logging.getLogger("handformer.viz")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Step-through visualizer for the hand-written arithmetic transformer")
+    parser = argparse.ArgumentParser(description="Step-through visualizer for the hand-written transformers (calculator, Game of Life)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8768)
     parser.add_argument("--log-level", default="INFO")
@@ -23,8 +24,8 @@ def main() -> None:
         level=args.log_level.upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    runner = Runner()
-    app = create_app(runner)
+    runners = {key: Runner(key) for key in MODELS}  # the calculator and Game of Life
+    app = create_app(runners)
     log.info("serving on http://%s:%d", args.host, args.port)
     # log_config=None: uvicorn's loggers propagate to the root config above instead of installing their own.
     uvicorn.run(app, host=args.host, port=args.port, log_config=None, access_log=False)

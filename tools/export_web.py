@@ -31,8 +31,10 @@ def sparse(mat: np.ndarray) -> list[list]:
     return [[int(i), int(j), float(mat[i, j])] for i, j in zip(r, c)]
 
 
-def export(out: Path) -> None:
-    runner = Runner()
+def export(out: Path, model: str = "calc") -> None:
+    """Write ``out``/model.json and ``out``/info.json for one model (see handformer/viz/models.py)."""
+    runner = Runner(model)
+    spec = runner.spec
     m = runner.model
     layers = []
     for layer in m.layers:
@@ -48,11 +50,15 @@ def export(out: Path) -> None:
         "eos": cm.EOS,
         "names": list(m.layout.names),
         # Host-side constants the server uses, so the page behaves identically.
-        "input_chars": "".join(sorted(chr(b) for b in cm.ALPHABET)) + "~",
-        "max_tokens": rn.MAX_TOKENS,
+        "model": spec.key,
+        "input_chars": spec.input_chars,
+        "chars_hint": spec.chars_hint,
+        "input_pattern": spec.input_pattern,
+        "pattern_error": spec.pattern_error,
+        "max_tokens": spec.max_tokens,
         "top_keys": rn.TOP_KEYS,
         "top_logits": rn.TOP_LOGITS,
-        "summary_dims": list(rn.SUMMARY_DIMS),
+        "summary_dims": list(spec.summary),
         "byte_labels": [repr(chr(i)) for i in range(256)],
         "embed": sparse(m.embed),
         "unembed": sparse(m.unembed),
@@ -70,9 +76,10 @@ def export(out: Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("out", type=Path)
+    ap.add_argument("--model", default="calc", help="calc or life")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    export(args.out)
+    export(args.out, args.model)
 
 
 if __name__ == "__main__":
