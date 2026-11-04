@@ -51,7 +51,7 @@ def export(out: Path, model: str = "calc") -> None:
         "names": list(m.layout.names),
         # Host-side constants the server uses, so the page behaves identically.
         "model": spec.key,
-        "input_chars": spec.input_chars,
+        "input_chars": spec.input_chars, "lenient": spec.lenient,
         "chars_hint": spec.chars_hint,
         "input_pattern": spec.input_pattern,
         "pattern_error": spec.pattern_error,

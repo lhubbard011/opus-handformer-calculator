@@ -27,13 +27,16 @@ LIFE_SUMMARY = (*LIFE_MARKS, "is_count", "up_ok", "down_ok", "self", "n", "nxt",
 
 
 def _calc_prompt(text: str) -> list[int]:
-    text = text.replace(" ", "").removesuffix("=")  # the page adds the '=' itself
+    """The input exactly as typed, as its UTF-8 bytes, framed as ``\\n<input>=``. Nothing is
+    stripped or refused for what it contains: spaces, letters, '=' or 'é' reach the weights, and
+    what they do with bytes they have no input features for is the model's business (the run
+    lists those as unknown_chars)."""
     if not text:
         raise ValueError("empty expression")
-    bad = sorted({ch for ch in text if ord(ch) not in cm.ALPHABET and ch != "~"})
-    if bad:
-        raise ValueError(f"unsupported characters: {''.join(bad)!r} (use digits . + - * / ( ) and ~N)")  # = chars_hint
-    return arith.prompt(text)
+    unknown = sorted({ch for ch in text if len(ch.encode("utf-8")) > 1 or ord(ch) not in cm.ALPHABET and ch != "~"})
+    if unknown:
+        log.info("calculator input has bytes it has no features for: %r", "".join(unknown))
+    return [cm.BOS, *text.encode("utf-8"), ord("=")]  # = arith.prompt, for any bytes
 
 
 def _calc_category(name: str) -> str:
@@ -67,7 +70,7 @@ class ModelDef:
     max_tokens: int
     default_input: str
     input_hint: str
-    input_chars: str  # the characters the input may contain (the page checks these too)
+    input_chars: str  # the characters the model has input features for (the page checks these too)
     chars_hint: str  # how the "unsupported characters" message ends
     input_pattern: str  # regex the input must match (input framing only)
     pattern_error: str
@@ -76,6 +79,7 @@ class ModelDef:
     max_input: int = 400
     multiline: bool = False  # the page shows a code box instead of a one-line input
     node_names: tuple[tuple[str, str], ...] = ()  # parser: node code -> name (the page's tree view)
+    lenient: bool = False  # any input goes in, as its UTF-8 bytes (to see what the weights do); runs list the unknown ones
 
 
 C_SAMPLE = """#include <stdio.h>
@@ -107,7 +111,8 @@ MODELS = {
     "calc": ModelDef("calc", "calculator", arith.builder, _calc_prompt, _calc_category, CALC_MARKS, CALC_SUMMARY,
                      {}, 3000, "2+3*(4-1)", "an expression: + - * / ^ ( ), decimals, ~N for division precision",
                      "".join(sorted(chr(b) for b in cm.ALPHABET)) + "~",
-                     "(use digits . + - * / ( ) and ~N)", r"^.+$", "empty expression"),
+                     "(use digits . + - * / ( ) and ~N)", r"^.+$", "empty expression", strip_spaces=False,
+                     lenient=True),
     "life": ModelDef("life", "game of life", life.builder, life.prompt, _life_category, LIFE_MARKS, LIFE_SUMMARY,
                      life.circuit.DOCS, 4000, "8:....../..#.../...#../.###../....../......",
                      "N:grid: generations (one digit), ':', rows of . and # separated by /",

@@ -227,9 +227,30 @@ class TestWebParity(unittest.TestCase):
                 close(np.array(j["data"]).reshape(mat.shape), mat.astype(np.float32), kind)
 
     def test_errors_match(self):
-        js = self.node([["/api/run", {"expression": "2+x"}], ["/api/run", {"expression": "="}]])
-        self.assertIn("unsupported characters: 'x'", js[0]["error"])
-        self.assertIn("empty expression", js[1]["error"])
+        """The calculator takes any input as its bytes, unknown ones included (spaces, letters, '=',
+        UTF-8), and both engines run it the same way, list the unknown bytes and cut a run that
+        never finishes at the same length ("run longer" lifts that); only an empty input is refused."""
+        cases = ["2+x", "2 + 3", "2+\u00e9", "x", "7=="]
+        js = self.node([*(["/api/run", {"expression": e}] for e in cases), ["/api/run", {"expression": ""}],
+                        ["/api/run", {"expression": "x", "max_new": 300}]])
+        for e, j in zip(cases, js):
+            with self.subTest(expression=e):
+                self.assertNotIn("error", j, j)
+                py = self.runner.run(e)
+                self.assertEqual(j["chars"], py["chars"])
+                self.assertEqual(j["unknown_chars"], py["unknown_chars"])
+                self.assertEqual((j["budget"], j["max_budget"]), (py["budget"], py["max_budget"]))
+        self.assertEqual(js[0]["unknown_chars"], "x")
+        self.assertEqual(js[1]["unknown_chars"], " ")  # spaces reach the model now
+        self.assertEqual(js[2]["chars"][3:5], ["\u00c3", "\u00a9"])  # 'é' as its two UTF-8 bytes
+        loop = self.runner.run("x")  # never finishes: cut off
+        self.assertFalse(loop["finished"])
+        self.assertEqual(len(loop["chars"]) - loop["prompt_len"], loop["budget"])
+        self.assertLess(loop["budget"], loop["max_budget"])
+        self.assertIn("error", js[len(cases)])  # empty: no prompt to run
+        longer = self.runner.run("x", max_new=300)
+        self.assertEqual(longer["budget"], 300)
+        self.assertEqual(js[-1]["chars"], longer["chars"])
 
 
 class TestModelsFile(unittest.TestCase):

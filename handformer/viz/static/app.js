@@ -6,6 +6,7 @@ import { decodeF16, SEQ, DIV } from "./render.js";
 import { drawHeatmap, attachHeatmapEvents, isTouch, showSheet, hideSheet, setTip, setRowNames } from "./heatmap.js";
 import { LocalApi } from "./local-api.js";
 import { drawGraph, drawOverview } from "./graph.js";
+import { renderModelGraph } from "./model-graph.js";
 
 const $ = (id) => document.getElementById(id);
 // The input is a one-line box (calculator, Life) or a code box (C): read and write it through these.
@@ -79,7 +80,7 @@ async function api(path, body, binary = false) {
       detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
     } catch { /* keep raw text */ }
     logErr(`${path} failed ${r.status}: ${detail}`);
-    throw new Error(`${path}: ${detail}`);
+    throw Object.assign(new Error(`${path}: ${detail}`), { status: r.status }); // the server answered: not a connection problem
   }
   if (binary) {
     const buf = await r.arrayBuffer();
@@ -390,6 +391,14 @@ async function loadInfo() {
     .map((l) => new Option(`${l.index + 1}`, l.index)));
   $("w-layer").dispatchEvent(new Event("input"));
   renderGraph();
+  renderModelGraph($("model-graph"), state.info, {
+    srcLinks,
+    onHead: (layer, head) => { // the head's attention pattern in the heatmap panel
+      state.head = [layer, head];
+      document.querySelector('[data-map="attention"]').click();
+      $("p-maps").scrollIntoView({ behavior: "smooth", block: "start" });
+    },
+  });
 }
 
 /** The final line, made safe to show: unprintable bytes as '·', capped, and flagged if the model never stopped. */
@@ -514,14 +523,14 @@ function koButton(kind, item) {
   return b;
 }
 
-async function runExpression(expression, keepStep = null) {
+async function runExpression(expression, keepStep = null, { maxNew = null } = {}) {
   stopPlay();
   setStatus("running…");
   const seq = ++state.runSeq;
   state.running = true;
   try {
     const ko = koCount() ? JSON.parse(JSON.stringify(state.ko)) : null; // the set this request was made with
-    const body = ko ? { expression, knockout: ko } : { expression };
+    const body = { expression, ...(ko ? { knockout: ko } : {}), ...(maxNew ? { max_new: maxNew } : {}) };
     const run = await api("/api/run", body);
     if (ko && !state.baseline.has(run.expression)) {
       const normal = await api("/api/run", { expression }); // also the difference view's comparison run
@@ -549,8 +558,22 @@ async function runExpression(expression, keepStep = null) {
     $("scrubber").min = run.prompt_len - 1;
     $("scrubber").max = run.chars.length - 2;
     const answer = answerOf(run);
-    setStatus(`${run.chars.length - run.prompt_len} bytes written by the model · answer ${answer}` +
-      (koCount() ? ` · ${koCount()} part(s) knocked out` : ""));
+    const written = run.chars.length - run.prompt_len;
+    const cutOff = !run.finished && written >= run.budget; // it was still writing when its byte budget ran out
+    setStatus(`${written} bytes written by the model · answer ${answer}` +
+      (koCount() ? ` · ${koCount()} part(s) knocked out` : "") +
+      (run.unknown_chars ? ` · fed bytes it has no input features for (${JSON.stringify(run.unknown_chars)}): ` +
+        "they reach the model as just the constant 'one', so this is what the weights do with them" : "") +
+      (cutOff ? ` · cut off after ${written} bytes: it never wrote its final newline` : ""));
+    if (cutOff && run.budget < run.max_budget) { // let it keep going: a question of memory, not of hiding anything
+      const more = Math.min(run.max_budget, 2 * run.budget);
+      const b = document.createElement("button");
+      b.className = "longer";
+      b.textContent = `run longer (${more} bytes)`;
+      b.dataset.tip = "Run again with room for more bytes, to see where the model goes. Long runs take more memory and time to trace.";
+      b.addEventListener("click", () => keepView(() => runExpression(run.expression, state.q, { maxNew: more })));
+      $("status").append(" ", b);
+    }
     log("run", run.run_id, run.expression, run.chars.length, "bytes");
     renderKnockouts();
     const last = run.chars.length - 2;
@@ -559,7 +582,9 @@ async function runExpression(expression, keepStep = null) {
     if (seq !== state.runSeq) return; // a newer request owns the page
     state.running = false;
     renderKnockouts();
-    setStatus(window.HANDFORMER_STATIC === undefined ? `${e.message} (is the server running?)` : e.message, true);
+    // only a request that got no answer at all suggests the server is down
+    const unreachable = window.HANDFORMER_STATIC === undefined && e.status === undefined;
+    setStatus(unreachable ? `${e.message} (is the server running?)` : e.message, true);
     logErr("run failed:", e.message);
   }
 }

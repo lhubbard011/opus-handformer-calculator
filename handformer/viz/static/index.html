@@ -252,6 +252,12 @@
     <div id="g-pick" class="detail muted">click a value to highlight what it is computed from and what it feeds</div>
   </section>
 
+  <section id="p-model" data-pin="Model graph" class="panel wide">
+    <div class="panel-title" data-tip="The forward pass as a diagram: weights (blue) with their shapes, operations (grey), the output (green). Open a block for its attention and MLP, those for their heads and units grouped by the code module that wrote them, and those for their formulas and source lines.">Model graph
+      <span class="muted small">the forward pass, block by block; click to expand</span></div>
+    <div id="model-graph" class="model-graph" data-resize="the model graph"></div>
+  </section>
+
   <section id="p-units" data-pin="Active MLP units" class="panel wide">
     <div class="panel-title" data-tip="The small calculating units that fired at this character. Hover one for what it computes.">Active MLP units <span class="muted small">ReLU(read) → write, at this step</span>
       <input id="unit-filter" class="filter" type="text" placeholder="filter (e.g. carry, D3)" spellcheck="false">

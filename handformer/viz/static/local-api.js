@@ -13,6 +13,9 @@ const POSITIONAL = ["pos", "pos2"];
 // A knocked-out model may never write its final '\n': cap it near the intact answer's length
 // (same rule as handformer/viz/runner.py knockout_budget).
 const knockoutBudget = (normalNew, budget) => Math.min(budget, 2 * normalNew + 32);
+// Input with bytes the model has no features for often never finishes: a fixed multiple of the
+// prompt (same rule as handformer/viz/runner.py unknown_budget).
+const unknownBudget = (promptLen, budget) => Math.min(budget, 16 * promptLen + 64);
 
 /** Normalised knockout request: sorted lists, like handformer/ablate.py Knockout.as_request. */
 function normKnockout(ko) {
@@ -82,7 +85,7 @@ export class LocalApi {
     const t0 = performance.now();
     const route = {
       "/api/info": () => this.info,
-      "/api/run": () => this.run(body.expression, body.knockout),
+      "/api/run": () => this.run(body.expression, body.knockout, body.max_new),
       "/api/position": () => this.position(body.run_id, body.q),
       "/api/attention": () => this.attentionMap(body.run_id, body.layer, body.head),
       "/api/residual": () => this.residualMap(body.run_id, body.snapshot),
@@ -113,7 +116,7 @@ export class LocalApi {
     return this.koModels.get(key);
   }
 
-  run(expression, knockout) {
+  run(expression, knockout, maxNew = null) {
     expression = String(expression);
     if (this.cfg.strip_spaces) {  // the calculator and Life ignore spaces and a trailing '='; C keeps its source
       expression = expression.replaceAll(" ", "");
@@ -124,17 +127,28 @@ export class LocalApi {
     if (expression.length > this.cfg.max_input) throw new Error(`input longer than ${this.cfg.max_input} characters`);
     const allowed = new Set(this.cfg.input_chars);
     const bad = [...new Set([...expression].filter((ch) => !allowed.has(ch)))].sort();
-    if (bad.length) throw new Error(`unsupported characters: '${bad.join("")}' ${this.cfg.chars_hint}`);
-    if (!new RegExp(this.cfg.input_pattern).test(expression)) throw new Error(this.cfg.pattern_error);
-    const prompt = [...`\n${expression}${this.cfg.prompt_end}`].map((c) => c.charCodeAt(0));
+    // lenient (the calculator): any input goes in, as its bytes, to see what the weights do with it
+    if (!this.cfg.lenient && bad.length) throw new Error(`unsupported characters: '${bad.join("")}' ${this.cfg.chars_hint}`);
+    if (bad.length) log(`input has bytes the model has no features for: ${JSON.stringify(bad.join(""))}`);
+    if (!this.cfg.lenient && !new RegExp(this.cfg.input_pattern).test(expression)) throw new Error(this.cfg.pattern_error);
+    const prompt = [...new TextEncoder().encode(`\n${expression}${this.cfg.prompt_end}`)]; // its UTF-8 bytes
     const ko = normKnockout(knockout);
     let budget = this.cfg.max_tokens - prompt.length;
+    const maxBudget = budget;
     if (!koEmpty(ko)) {
       if (!this.normalLen.has(expression)) {
         this.normalLen.set(expression, this.model.generate(prompt, budget, this.cfg.top_keys).tokens.length - prompt.length);
       }
       budget = knockoutBudget(this.normalLen.get(expression), budget);
       log(`knockout run capped at ${budget} new bytes (normal answer: ${this.normalLen.get(expression)})`);
+    }
+    if (this.cfg.lenient && bad.length) {
+      budget = unknownBudget(prompt.length, budget);
+      log(`unknown bytes: run capped at ${budget} new bytes`);
+    }
+    if (maxNew !== null && maxNew !== undefined) { // "run longer": the viewer's choice beats both caps
+      budget = Math.max(1, Math.min(maxBudget, Math.floor(maxNew)));
+      log(`run longer: ${budget} new bytes allowed`);
     }
     const tr = this._modelFor(ko).generate(prompt, budget, this.cfg.top_keys);
     const runId = Math.random().toString(16).slice(2, 14).padEnd(12, "0");
@@ -154,6 +168,8 @@ export class LocalApi {
       chars: tokens.map((t) => String.fromCharCode(t)),
       prompt_len: prompt.length,
       finished,
+      unknown_chars: this.cfg.lenient ? bad.join("") : "",
+      budget, max_budget: maxBudget,
       knockout: ko,
       steps: tokens.map((_, q) => this._step(tr, q)),
       snapshots: this.labels,

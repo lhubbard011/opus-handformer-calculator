@@ -331,4 +331,36 @@ main.grid { position: relative; }
 .col-grip:focus-visible { outline: none; }
 body.resizing-x { user-select: none; -webkit-user-select: none; cursor: ew-resize; }
 .map-rows { display: inline-flex; gap: 10px; flex-wrap: wrap; }
+.status button.longer { font-size: 11px; padding: 1px 8px; margin-left: 4px; }
+
+/* model graph (model-graph.js): torchviz-style boxes; weights blue, operations grey, output green */
+.model-graph { max-height: 75vh; overflow: auto; margin-top: 6px; padding: 10px; background: var(--bg); border-radius: 6px;
+               font: 12px/1.4 var(--mono); }
+.mg-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.mg-bar button { font-size: 11px; padding: 1px 8px; }
+.mg-flow, .mg-inner { display: flex; flex-direction: column; align-items: flex-start; }
+.mg-flow > * + *, .mg-inner > * + *, .mg-params + .mg-node { margin-top: 20px; position: relative; }
+.mg-flow > * + *::before, .mg-inner > * + *::before, .mg-params + .mg-node::before {
+  content: "↓"; position: absolute; top: -18px; left: 22px; color: #8a93a3; font-size: 13px; line-height: 16px; }
+.mg-step { display: flex; flex-direction: column; align-items: flex-start; }
+.mg-params { display: flex; gap: 8px; flex-wrap: wrap; }
+.mg-node { display: inline-flex; flex-direction: column; padding: 3px 8px; border: 1px solid #111; border-radius: 2px;
+           color: #111; max-width: 100%; overflow-wrap: anywhere; }
+.mg-node .mg-sub { font-size: 10px; opacity: 0.8; }
+.mg-param { background: #a7d8e8; } .mg-op { background: #d6d6d6; } .mg-out { background: #b4f27a; }
+.mg-block, .mg-sub-block { border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; background: var(--panel); max-width: 100%; }
+.mg-block > summary, .mg-sub-block > summary, .mg-group > summary, .mg-item > summary {
+  cursor: pointer; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.mg-block[open], .mg-sub-block[open] { padding-bottom: 8px; }
+.mg-block > .mg-inner, .mg-sub-block > .mg-inner { margin: 8px 0 0 14px; }
+.mg-block-name { font-weight: 600; color: var(--text); }
+.mg-muted { color: #8a93a3; }
+.mg-chips { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.mg-chip { font-size: 10px; padding: 0 5px; border-radius: 3px; background: var(--panel-2); color: #c3cad6; }
+.mg-group { margin-top: 6px; } .mg-mod { color: var(--accent); }
+.mg-items { margin: 4px 0 4px 14px; display: flex; flex-direction: column; gap: 2px; }
+.mg-item-name { color: var(--text); }
+.mg-formula { margin: 4px 0 6px 14px; display: flex; flex-direction: column; gap: 3px; overflow-wrap: anywhere; }
+.mg-links { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.mg-links button { font-size: 11px; padding: 1px 8px; }
 

@@ -28,6 +28,7 @@ class RunBody(BaseModel):
     model: str = "calc"
     expression: str = Field(min_length=1, max_length=8000)  # each model checks its own limit
     knockout: Knockout | None = None
+    max_new: int | None = Field(default=None, ge=1, le=100_000)  # "run longer"; the model's own limit still applies
 
 
 class PositionBody(BaseModel):
@@ -115,7 +116,7 @@ def create_app(runners: dict[str, Runner]) -> FastAPI:
 
     @app.post("/api/run")
     def run(body: RunBody) -> dict:
-        return pick(body.model).run(body.expression, body.knockout.model_dump() if body.knockout else None)
+        return pick(body.model).run(body.expression, body.knockout.model_dump() if body.knockout else None, body.max_new)
 
     @app.post("/api/position")
     def position(body: PositionBody) -> dict:

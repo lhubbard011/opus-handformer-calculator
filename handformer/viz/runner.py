@@ -34,6 +34,12 @@ MAX_RUN_BYTES = 1 << 30  # stored traces of all kept runs together; oldest runs 
 def knockout_budget(normal_new: int, budget: int) -> int:
     return min(budget, 2 * normal_new + 32)
 
+
+# Input with bytes the model has no features for (lenient models) often never finishes either;
+# with no normal run to compare, it gets a fixed multiple of its prompt (same rule in local-api.js).
+def unknown_budget(prompt_len: int, budget: int) -> int:
+    return min(budget, 16 * prompt_len + 64)
+
 MAX_KNOCKOUT_MODELS = 4
 TOP_KEYS = 3
 TOP_LOGITS = 5
@@ -276,17 +282,26 @@ class Runner:
         self.ko_models.move_to_end(key)
         return self.ko_models[key]
 
-    def run(self, expression: str, knockout: dict | None = None) -> dict:
-        prompt = self.spec.prompt(expression)  # checks the input characters and framing, or ValueError
-        expression = bytes(prompt[1:-1]).decode("ascii")
+    def run(self, expression: str, knockout: dict | None = None, max_new: int | None = None) -> dict:
+        """``max_new``: how many bytes the model may write ("run longer"), up to the model's limit;
+        by default a knocked-out run or one with unknown bytes is cut off sooner (see the budgets)."""
+        prompt = self.spec.prompt(expression)  # checks the input and its framing, or ValueError
+        expression = bytes(prompt[1:-1]).decode("utf-8")
         ko = ablate.Knockout.from_request(knockout)
         model = self._model_for(ko)
         t0 = time.perf_counter()
-        budget = self.spec.max_tokens - len(prompt)  # the model stops itself at '\n'
+        budget = max_budget = self.spec.max_tokens - len(prompt)  # the model stops itself at '\n'
         if ko:
             normal = self._normal_len(expression, prompt, budget)
             budget = knockout_budget(normal, budget)
             log.info("knockout run capped at %d new bytes (normal answer: %d)", budget, normal)
+        unknown = "".join(sorted({ch for ch in expression if ch not in self.spec.input_chars})) if self.spec.lenient else ""
+        if unknown:
+            budget = unknown_budget(len(prompt), budget)
+            log.info("input has bytes the model has no features for (%r): run capped at %d new bytes", unknown, budget)
+        if max_new is not None:  # asked for: the viewer's choice beats both caps
+            budget = max(1, min(max_budget, int(max_new)))
+            log.info("run longer: %d new bytes allowed", budget)
         tokens = model.generate(prompt, stop=cm.EOS, max_new=budget)
         t1 = time.perf_counter()
         rec = _Recorder()
@@ -308,6 +323,9 @@ class Runner:
             "chars": [chr(t) for t in tokens],
             "prompt_len": run.prompt_len,
             "finished": finished,
+            # bytes the model has no input features for (lenient models let them in): see what it does
+            "unknown_chars": unknown,
+            "budget": budget, "max_budget": max_budget,  # bytes the model could write this run / at most
             "knockout": run.knockout,
             "steps": [self._step(run, q) for q in range(len(tokens))],
             "snapshots": list(rec.labels),
