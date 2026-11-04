@@ -33,11 +33,15 @@ int main(int argc, char **argv) {
 EDGES = ["int x;", "/**/x", "/*/ still comment */y", "//", "a//b\nc", '"unterminated\nx', "'\\''", '"\\\\"x',
          "  #  define A 1\n#x", "1.5e+3e-2", "0x.1p-3f", ".5", "a.b", "...", "x+++++y", "_Bool b;", "_Bool_x",
          "returnx return", "if(1)else", "a/=b/c", "*/x", "#", "\n\n#if 1\n#endif", "'a", "L\"wide\"",
-         "do{}while(0);", "\t\v\f\r", "int\\\nx"]
+         "do{}while(0);", "\t\v\f\r", "int\\\nx",
+         # prefixes, digraph/trigraph directives, trigraph backslash, splices in words and numbers, UCNs
+         'L"wide"', 'u8"utf8"', "u'c'", "U'\\n'", "Lx u8x u8'", "  %:define A 1", "??=include <x>", "a=b??=c",
+         '"a??/"b"', "'??/''", "// c ??/\ncontinued", "#define A ??/\n 1", "na\\\nme", "12\\\n34", "1e\\\n+5",
+         "a\\u00e9b", "\\u00e9x", "x\\U0001F600", "??(??)", "<: :> <% %> %:%:"]
 
 
 def fuzz(rng: random.Random, n: int) -> str:
-    alphabet = "ab_09ex /*'\"\\#\n.+-E\tp(){};<=!"
+    alphabet = "ab_09ex /*'\"\\#\n.+-E\tp(){};<=!?%:LUu8"
     return "".join(rng.choice(alphabet) for _ in range(n))
 
 

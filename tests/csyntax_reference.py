@@ -1,5 +1,10 @@
 """Plain-Python C lexer (C11 §6.4, §6.10 line rule), written separately from the weights.
-Returns one state letter per source byte (see handformer/csyntax/circuit.py STATES)."""
+Returns one state letter per source byte (see handformer/csyntax/circuit.py STATES).
+
+Covered: keywords, identifiers (with universal character names), pp-numbers, strings and
+character constants with escapes and prefixes (L u U u8), block and line comments,
+directives ('#', '%:' or '??=' first on a line), backslash-newline splices in line comments,
+directives, strings, identifiers and numbers, and the trigraph '??/' acting as a backslash."""
 
 KEYWORDS = {
     "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern",
@@ -19,26 +24,42 @@ def lex(src: str) -> str:
     for i, ch in enumerate(src):
         prev = src[i - 1] if i else "\n"
         nxt = src[i + 1] if i + 1 < len(src) else ""
+        nxt2 = src[i + 2] if i + 2 < len(src) else ""
+        # the byte before acts as a backslash: '\' itself, or the '/' ending the trigraph '??/'
+        prev_bs = prev == "\\" or (i >= 3 and src[i - 3:i] == "??/")
+        trigraph_bs = src[i:i + 3] == "??/"  # this byte starts a '??/' (a backslash)
+        splice = (ch == "\\" and nxt == "\n") or (ch == "\n" and prev_bs)  # backslash-newline: deleted (phase 2)
+        ucn = ch == "\\" and nxt in "uU" and nxt != ""
         # inside a token: continue it, or fall through to "outside" below
         if state in ("L", "c"):
-            letter = "_" if ch == "\n" and prev != "\\" else "c"
+            letter = "_" if ch == "\n" and not prev_bs else "c"
         elif state == "B":
             letter = "D"
         elif state in ("D", "C"):
             letter = "E" if state == "C" and ch == "/" and prev == "*" else "C"
         elif state in ("s", "t"):
-            letter = {"\\": "S", '"': "z", "\n": "_"}.get(ch, "s")
+            letter = "G" if trigraph_bs else {"\\": "S", '"': "z", "\n": "_"}.get(ch, "s")
+        elif state == "G":
+            letter = "H"
+        elif state == "H":
+            letter = "S"
         elif state == "S":
             letter = "t"
         elif state in ("a", "b"):
-            letter = {"\\": "A", "'": "y", "\n": "_"}.get(ch, "a")
+            letter = "g" if trigraph_bs else {"\\": "A", "'": "y", "\n": "_"}.get(ch, "a")
+        elif state == "g":
+            letter = "h"
+        elif state == "h":
+            letter = "A"
         elif state == "A":
             letter = "b"
+        elif state == "P":
+            letter = {'"': "s", "'": "a"}.get(ch, "P")
         elif state == "p":
-            letter = "_" if ch == "\n" and prev != "\\" else "p"
-        elif state == "n" and (ch in IDENT or ch == "." or (ch in "+-" and prev in "eEpP")):
+            letter = "_" if ch == "\n" and not prev_bs else "p"
+        elif state == "n" and (ch in IDENT or ch == "." or (ch in "+-" and prev in "eEpP") or splice):
             letter = "n"
-        elif state in ("i", "k") and ch in IDENT:
+        elif state in ("i", "k") and (ch in IDENT or splice or ucn):
             letter = state
         else:
             letter = None
@@ -52,8 +73,12 @@ def lex(src: str) -> str:
                 letter = "s"
             elif ch == "'":
                 letter = "a"
-            elif ch == "#" and all(c in SPACE for c in line):
+            elif all(c in SPACE for c in line) and (ch == "#" or src[i:i + 2] == "%:" or src[i:i + 3] == "??="):
                 letter = "p"
+            elif (ch in "LUu" and nxt in "\"'" and nxt != "") or (ch == "u" and nxt == "8" and nxt2 == '"'):
+                letter = "P"  # a string or character prefix
+            elif ucn:
+                letter = "i"  # an identifier starting with a universal character name
             elif ch.isdigit() or (ch == "." and nxt.isdigit()):
                 letter = "n"
             elif ch in START:

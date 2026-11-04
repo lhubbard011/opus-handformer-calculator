@@ -1060,7 +1060,7 @@ Unlike the calculator, Life has no known claim exceptions (`tests/test_life.py`)
 
 ## 32. A third model: a C syntax highlighter (`handformer/csyntax/`, `CSYNTAX.md`)
 
-The lexer is a table of 32 rules (`RULES`). The prompt is the source and an end marker; for each
+The lexer is a table of 47 rules (`RULES`), covering C11's lexical grammar (prefixes, splices, UCNs, the `%:` and `??=` directive spellings, the `??/` backslash). The prompt is the source and an end marker; for each
 source byte the model writes a state letter. The state is the model's own previous letter (the
 current byte at each output step), so each rule is an AND of 0/1 conditions on that letter and
 on exact lookups of the source byte and its neighbours, one unit with its own dim; fallback rules

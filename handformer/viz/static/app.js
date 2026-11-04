@@ -243,7 +243,8 @@ function summarizeLife(run, q, raw) {
 
 // C highlighter: the state letter written, and the one rule dim that is 1 (the model's own values).
 const C_CLASS = { B: "comment", D: "comment", C: "comment", E: "comment", L: "comment", c: "comment", s: "string",
-  S: "string", t: "string", z: "string", a: "char", A: "char", b: "char", y: "char", p: "preproc", n: "number",
+  S: "string", t: "string", z: "string", P: "string", G: "string", H: "string",
+  a: "char", A: "char", b: "char", y: "char", g: "char", h: "char", p: "preproc", n: "number",
   k: "keyword", i: "ident", o: "punct", _: "space" };
 function summarizeC(run, q, raw) {
   const v = raw.v, E = Math.round(v.E), src = q - E + 1, p = raw.pred;

@@ -29,9 +29,15 @@ ends there. The later bytes of the word keep the state ('k' or 'i').
     layer 5  MLP   the fallbacks of those groups; the rules outside any token
     layer 6  MLP   the last fallback: any other byte outside a token is a punctuator
 
-Limits (documented, not hidden): trigraphs and digraphs are not translated; a backslash-newline
-splices only line comments, directives and strings, not other tokens; string prefixes (L"x",
-u8"x") colour the prefix as an identifier; macros are not expanded (this is a lexer).
+Covered: keywords, identifiers (with universal character names), pp-numbers, strings and
+character constants with escapes and prefixes (L u U u8), block and line comments, directives
+('#', '%:' or '??=' first on a line), backslash-newline splices (phase 2) in comments,
+directives, strings, identifiers and numbers, and the trigraph '??/' acting as a backslash.
+
+Limits (documented, not hidden; see CSYNTAX.md): this is a lexer, so typedef names look like
+identifiers and macros are not expanded; a keyword joined to more letters by a splice shows as
+a keyword up to the splice; a splice inside '/*' or '//' does not open a comment; '??/*' is not
+read as an escaped '*'.
 """
 from __future__ import annotations
 
@@ -59,9 +65,12 @@ STATES = {
     "B": "the '/' that opens a block comment", "D": "the '*' that opens a block comment",
     "C": "inside a block comment", "E": "the '/' that closes a block comment",
     "L": "the first '/' of a line comment", "c": "inside a line comment", "p": "a preprocessing directive",
+    "P": "a string or character prefix (L u U u8)",
+    "G": "the first '?' of a '??/' (a trigraph backslash) in a string", "H": "its second '?'",
+    "g": "the first '?' of a '??/' in a character constant", "h": "its second '?'",
 }
 # How the page colours them.
-DISPLAY = {"comment": "BDCELc", "string": "sStz", "char": "aAby", "preproc": "p", "number": "n",
+DISPLAY = {"comment": "BDCELc", "string": "sStzPGH", "char": "aAbygh", "preproc": "p", "number": "n",
            "keyword": "k", "ident": "i", "punct": "o", "space": "_"}
 
 KEYWORDS = (  # C11 §6.4.1
@@ -79,9 +88,10 @@ CLASSES = {
     "c_slash": "/", "c_star": "*", "c_dq": '"', "c_sq": "'", "c_hash": "#", "c_bs": "\\", "c_nl": "\n", "c_dot": ".",
     "c_pm": "+-", "c_digit": string.digits, "c_start": string.ascii_letters + "_",
     "c_ident": string.ascii_letters + string.digits + "_", "c_space": " \t\n\r\v\f", "c_exp": "eEpP", "c_mark": chr(END),
+    "c_q": "?", "c_eq": "=", "c_pct": "%", "c_colon": ":", "c_LUu": "LUu", "c_u": "u", "c_8": "8", "c_uU": "uU",
 }
 XFEATS = ("c_slash", "c_star", "c_dq", "c_sq", "c_hash", "c_bs", "c_nl", "c_dot", "c_pm", "c_digit", "c_start",
-          "c_ident", "c_space", "c_mark")
+          "c_ident", "c_space", "c_mark", "c_q", "c_pct", "c_LUu", "c_u")
 x_ = lambda c: "x_" + c[2:]  # noqa: E731  the classes of the byte being classified
 st = lambda letter: "st__" if letter == "_" else f"st_{letter}"  # noqa: E731  "the current byte is this letter"
 
@@ -104,41 +114,65 @@ class Rule:
 
 # ---------------------------------------------------------------- the lexer, as rules
 # Read top to bottom: each group is one lexer state; its rules are mutually exclusive by the
-# byte they look at, and its fallback catches the rest.
+# byte they look at, and its fallback catches the rest. A fallback reads its siblings' rule
+# dims ("group minus siblings"), so it sits one layer after them (layer 5, or 6 for punct).
 RULES = [
     # line comment: '//' to the end of the line; a backslash-newline continues it (C11 §5.1.1.2 phase 2)
-    Rule("line_end", "Lc", "_", "a newline ends a line comment (unless a backslash splices the lines)",
-         when=("x_nl",), unless=("p_bs",)),
+    Rule("line_end", "Lc", "_", "a newline ends a line comment (unless a backslash or '??/' splices the lines)",
+         when=("x_nl",), unless=("p_bse",)),
     Rule("line", "Lc", "c", "anything else continues the line comment", fallback=("r_line_end",), layer=5),
     # block comment
     Rule("block_star", "B", "D", "the byte after an opening '/' is its '*'"),
     Rule("block_end", "C", "E", "'*/' closes the block comment (a '*' that opened it does not count)",
          when=("x_slash", "p_star")),
     Rule("block", "DC", "C", "anything else stays in the block comment", fallback=("r_block_end",), layer=5),
-    # string literal
+    # string literal. '??/' (trigraph backslash) is three bytes but one backslash: its two '?' get
+    # their own states G and H so the '/' can become the escaping 'S'; reusing 'S' for the first
+    # '?' would make the second '?' the escaped byte, and "\\?" (a real escape) would be ambiguous.
     Rule("str_escape", "st", "S", "in a string, a backslash starts an escape", when=("x_bs",)),
+    Rule("str_trigraph", "st", "G", "in a string, '??/' is a backslash (trigraph): its first '?'", when=("tri_bs",)),
     Rule("str_close", "st", "z", "in a string, '\"' closes it", when=("x_dq",)),
     Rule("str_newline", "st", "_", "an unterminated string ends at the newline", when=("x_nl",)),
-    Rule("str", "st", "s", "anything else is string body", fallback=("r_str_escape", "r_str_close", "r_str_newline"),
-         layer=5),
+    Rule("str", "st", "s", "anything else is string body",
+         fallback=("r_str_escape", "r_str_trigraph", "r_str_close", "r_str_newline"), layer=5),
+    Rule("str_trigraph2", "G", "H", "the second '?' of a '??/' in a string"),
+    Rule("str_trigraph3", "H", "S", "the '/' of a '??/' in a string acts as the escaping backslash"),
     Rule("str_escaped", "S", "t", "the byte after an escaping backslash is part of the escape"),
     # character constant
     Rule("chr_escape", "ab", "A", "in a character constant, a backslash starts an escape", when=("x_bs",)),
+    Rule("chr_trigraph", "ab", "g", "in a character constant, '??/' is a backslash: its first '?'", when=("tri_bs",)),
     Rule("chr_close", "ab", "y", "in a character constant, \"'\" closes it", when=("x_sq",)),
     Rule("chr_newline", "ab", "_", "an unterminated character constant ends at the newline", when=("x_nl",)),
     Rule("chr", "ab", "a", "anything else is character-constant body",
-         fallback=("r_chr_escape", "r_chr_close", "r_chr_newline"), layer=5),
+         fallback=("r_chr_escape", "r_chr_trigraph", "r_chr_close", "r_chr_newline"), layer=5),
+    Rule("chr_trigraph2", "g", "h", "the second '?' of a '??/' in a character constant"),
+    Rule("chr_trigraph3", "h", "A", "the '/' of a '??/' in a character constant acts as the escaping backslash"),
     Rule("chr_escaped", "A", "b", "the byte after an escaping backslash is part of the escape"),
+    # string / character prefix: L"x", u"x", U"x", u8"x", L'x', u'x', U'x'. Decided at the prefix's
+    # first byte by looking ahead for the quote; the prefix gets its own state P so that the quote
+    # after it opens the literal (in state 'i' a quote would just end the word and open it anyway,
+    # but the prefix would be coloured as an identifier, which is wrong: it is part of the literal).
+    Rule("pfx_str", "P", "s", "after a prefix, '\"' opens the string", when=("x_dq",)),
+    Rule("pfx_chr", "P", "a", "after a prefix, \"'\" opens the character constant", when=("x_sq",)),
+    Rule("pfx", "P", "P", "the '8' of u8 is still prefix", fallback=("r_pfx_str", "r_pfx_chr"), layer=5),
     # preprocessing directive: to the end of the line, backslash-newline continues it
-    Rule("pp_end", "p", "_", "a newline ends the directive (unless a backslash splices the lines)",
-         when=("x_nl",), unless=("p_bs",)),
+    Rule("pp_end", "p", "_", "a newline ends the directive (unless a backslash or '??/' splices the lines)",
+         when=("x_nl",), unless=("p_bse",)),
     Rule("pp", "p", "p", "anything else continues the directive", fallback=("r_pp_end",), layer=5),
     # number (pp-number, C11 §6.4.8): digits, letters, '_', '.', and '+'/'-' right after e E p P
     Rule("num", "n", "n", "a pp-number continues with a digit, letter, '_', '.' or an exponent sign",
          when=("numcont",)),
-    # identifier or keyword: the word keeps the state its first byte got
+    Rule("num_splice", "n", "n", "a backslash-newline inside a number is deleted: the number goes on", when=("splice",)),
+    # identifier or keyword: the word keeps the state its first byte got. A backslash-newline is
+    # deleted before tokenising (phase 2), and \\u / \\U name a character (§6.4.3), so both continue
+    # the word (wmore). The keyword was decided at the first byte by fixed offsets, so a keyword
+    # joined to more letters by a splice keeps 'k' up to there: a documented limit.
     Rule("word_k", "k", "k", "a keyword continues with identifier characters", when=("x_ident",)),
     Rule("word_i", "i", "i", "an identifier continues with identifier characters", when=("x_ident",)),
+    Rule("word_k_more", "k", "k", "a backslash-newline or universal character name inside a word goes on "
+         "(the keyword check sees up to it)", when=("wmore",)),
+    Rule("word_i_more", "i", "i", "a backslash-newline or a universal character name (\\u, \\U) continues an identifier",
+         when=("wmore",)),
     # outside any token (norm): what the next token is
     Rule("open_block", "norm", "B", "'/' followed by '*' opens a block comment", when=("x_slash", "n_star"), layer=5),
     Rule("open_line", "norm", "L", "'/' followed by '/' opens a line comment", when=("x_slash", "n_slash"), layer=5),
@@ -146,23 +180,33 @@ RULES = [
     Rule("open_chr", "norm", "a", "\"'\" opens a character constant", when=("x_sq",), layer=5),
     Rule("pp_start", "norm", "p", "'#' first on its line starts a preprocessing directive",
          when=("x_hash", "linestart"), layer=5),
+    Rule("pp_digraph", "norm", "p", "'%:' (the digraph for '#') first on its line starts a directive",
+         when=("x_pct", "n_colon", "linestart"), layer=5),
+    Rule("pp_trigraph", "norm", "p", "'??=' (the trigraph for '#') first on its line starts a directive",
+         when=("x_q", "n_q", "nn_eq", "linestart"), layer=5),
+    Rule("prefix", "norm", "P", "L u U (or u8) right before a quote is a string or character prefix",
+         when=("pfx",), layer=5),
+    Rule("ucn_start", "norm", "i", "a universal character name (\\u, \\U) starts an identifier", when=("ucn",), layer=5),
     Rule("num_start", "norm", "n", "a digit starts a number", when=("x_digit",), layer=5),
     Rule("num_dot", "norm", "n", "'.' followed by a digit starts a number", when=("x_dot", "n_digit"), layer=5),
     Rule("keyword", "norm", "k", "a word that is a C11 keyword", when=("x_start", "kw"), layer=5),
-    Rule("ident", "norm", "i", "any other word is an identifier", when=("x_start",), unless=("kw",), layer=5),
+    Rule("ident", "norm", "i", "any other word is an identifier", when=("x_start",), unless=("kw", "pfx"), layer=5),
     Rule("space", "norm", "_", "whitespace outside a token", when=("x_space",), layer=5),
     Rule("punct", "norm", "o", "any other byte outside a token is a punctuator", layer=6,
-         fallback=("r_open_block", "r_open_line", "r_open_str", "r_open_chr", "r_pp_start", "r_num_start",
-                   "r_num_dot", "r_keyword", "r_ident", "r_space")),
+         fallback=("r_open_block", "r_open_line", "r_open_str", "r_open_chr", "r_pp_start", "r_pp_digraph",
+                   "r_pp_trigraph", "r_prefix", "r_ucn_start", "r_num_start", "r_num_dot", "r_keyword", "r_ident",
+                   "r_space")),
 ]
 NORMAL_STATES = "_ozyE"  # after these the next byte starts fresh (plus the end marker: the first byte)
 
 DIMS = (
     *CLASSES, *(f"ch_{c}" for c in sorted(set("".join(KEYWORDS)))), *(st(s) for s in STATES),
     "f_E", "f_nl", "f_ns", "E", "Lnl", "Lns",
-    *(x_(c) for c in XFEATS), "p_star", "p_bs", "p_exp", "pLnl", "pLns", "n_star", "n_slash", "n_digit",
+    *(x_(c) for c in XFEATS), "p_star", "p_bs", "p_exp", "p_slash", "pLnl", "pLns", "pp_q", "ppp_q",
+    "n_star", "n_slash", "n_digit", "n_dq", "n_sq", "n_8", "n_q", "n_colon", "n_nl", "n_uU", "nn_dq", "nn_eq", "nn_slash",
     *(f"k{j}_{c}" for j in range(MAX_KW) for c in LETTERS_AT[j]), *(f"id{j}" for j in range(MAX_KW + 1)),
     "kw", "linestart", "pexp_pm", "numcont", "norm", "r_end",
+    "p_bse", "tri_bs", "pfx", "splice", "ucn", "wmore",
     *(f"r_{r.name}" for r in RULES),
 )
 
@@ -230,10 +274,18 @@ def builder() -> ModelBuilder:
     x.value = {c: {x_(c): 1.0} for c in XFEATS}
     prev = pr.gather_head("the byte before it", pr.add(s, pr.const(-1.0)), "p_star", src="c_star")
     prev.value = {"c_star": {"p_star": 1.0}, "c_bs": {"p_bs": 1.0}, "c_exp": {"p_exp": 1.0},
-                  "Lnl": {"pLnl": 1.0}, "Lns": {"pLns": 1.0}}
+                  "c_slash": {"p_slash": 1.0}, "Lnl": {"pLnl": 1.0}, "Lns": {"pLns": 1.0}}
+    # Two and three bytes back: is the byte before the '/' that ends a '??/' (a trigraph backslash
+    # that splices the next newline)? Two ahead: '??=' (a directive), 'u8"' (a prefix), '??/'.
+    prev2 = pr.gather_head("two bytes before it", pr.add(s, pr.const(-2.0)), "pp_q", src="c_q")
+    prev3 = pr.gather_head("three bytes before it", pr.add(s, pr.const(-3.0)), "ppp_q", src="c_q")
     nxt = pr.gather_head("the byte after it", pr.add(s, pr.const(1.0)), "n_star", src="c_star")
-    nxt.value = {"c_star": {"n_star": 1.0}, "c_slash": {"n_slash": 1.0}, "c_digit": {"n_digit": 1.0}}
-    l3.heads += [x, prev, nxt]
+    nxt.value = {"c_star": {"n_star": 1.0}, "c_slash": {"n_slash": 1.0}, "c_digit": {"n_digit": 1.0},
+                 "c_dq": {"n_dq": 1.0}, "c_sq": {"n_sq": 1.0}, "c_8": {"n_8": 1.0}, "c_q": {"n_q": 1.0},
+                 "c_colon": {"n_colon": 1.0}, "c_nl": {"n_nl": 1.0}, "c_uU": {"n_uU": 1.0}}
+    nxt2 = pr.gather_head("two bytes after it", pr.add(s, pr.const(2.0)), "nn_dq", src="c_dq")
+    nxt2.value = {"c_dq": {"nn_dq": 1.0}, "c_eq": {"nn_eq": 1.0}, "c_slash": {"nn_slash": 1.0}}
+    l3.heads += [x, prev, prev2, prev3, nxt, nxt2]
     for j in range(MAX_KW + 1):  # offset j: the letters a keyword can have there, and "is it an identifier byte"
         h = pr.gather_head(f"byte {j} of the word (for keywords)", pr.add(s, pr.const(float(j))), f"id{j}", src="c_ident")
         h.value = {"c_ident": {f"id{j}": 1.0},
@@ -249,18 +301,44 @@ def builder() -> ModelBuilder:
     l3.units += pr.clamp01_units({"pLnl": 1.0, "pLns": -1.0, "one": 1.0}, {"linestart": 1.0})
     l3.units.append(pr.relu_unit({"x_pm": 1.0, "p_exp": 1.0, "one": -1.0}, {"pexp_pm": 1.0},
                                  "'+' or '-' right after e E p P (an exponent sign inside a number)"))
+    # Small facts the rules use, each an AND of 0/1 lookups:
+    l3.units += [
+        # p_bse: "the byte before acts as a backslash" (for splices): '\\', or the '/' of '??/'
+        pr.relu_unit({"p_bs": 1.0}, {"p_bse": 1.0}, "the byte before acts as a backslash: it is one"),
+        pr.relu_unit({"p_slash": 1.0, "pp_q": 1.0, "ppp_q": 1.0, "one": -2.0}, {"p_bse": 1.0},
+                     "the byte before acts as a backslash: it ends the trigraph '??/'"),
+        pr.relu_unit({"x_q": 1.0, "n_q": 1.0, "nn_slash": 1.0, "one": -2.0}, {"tri_bs": 1.0},
+                     "this byte starts the trigraph '??/' (a backslash)"),
+        pr.relu_unit({"x_LUu": 1.0, "n_dq": 1.0, "n_sq": 1.0, "one": -1.0}, {"pfx": 1.0},
+                     "L U or u right before a quote: a string or character prefix"),
+        pr.relu_unit({"x_u": 1.0, "n_8": 1.0, "nn_dq": 1.0, "one": -2.0}, {"pfx": 1.0}, "u8 right before '\"': a string prefix"),
+        # a line splice (backslash-newline, deleted in translation phase 2): either of its bytes.
+        # The newline case spells out "the byte before is '\\' or ends '??/'" instead of reading
+        # p_bse, because p_bse is computed in this same layer and a unit only sees earlier layers.
+        pr.relu_unit({"x_bs": 1.0, "n_nl": 1.0, "one": -1.0}, {"splice": 1.0, "wmore": 1.0},
+                     "a backslash before a newline (a line splice)"),
+        pr.relu_unit({"x_nl": 1.0, "p_bs": 1.0, "one": -1.0}, {"splice": 1.0, "wmore": 1.0},
+                     "a newline after a backslash (a line splice)"),
+        pr.relu_unit({"x_nl": 1.0, "p_slash": 1.0, "pp_q": 1.0, "ppp_q": 1.0, "one": -3.0}, {"splice": 1.0, "wmore": 1.0},
+                     "a newline after the trigraph '??/' (a line splice)"),
+        pr.relu_unit({"x_bs": 1.0, "n_uU": 1.0, "one": -1.0}, {"ucn": 1.0, "wmore": 1.0},
+                     "a backslash before u or U: a universal character name"),
+    ]
 
     # ---- Layer 4. MLP: the rules inside a token; and "outside any token" (norm).
     l4 = b.at(4)
     l4.units.append(pr.relu_unit({"x_ident": 1.0, "x_dot": 1.0, "pexp_pm": 1.0}, {"numcont": 1.0},
                                  "a pp-number continues: an identifier byte, '.', or an exponent sign"))
-    # norm: the previous letter ended a token, or a number / word just ended at this byte
+    # norm: the previous letter ended a token, or a number / word just ended at this byte. Each
+    # "ends here" part subtracts everything that would continue that token (the same conditions
+    # as its rules), so norm and the continuing rules are never both 1.
     l4.units += [
         pr.relu_unit({**{st(c): 1.0 for c in NORMAL_STATES}, "c_mark": 1.0}, {"norm": 1.0},
                      "outside any token: the previous letter ended one (or this is the first source byte)"),
-        pr.relu_unit({st("n"): 1.0, "x_ident": -1.0, "x_dot": -1.0, "pexp_pm": -1.0}, {"norm": 1.0},
+        pr.relu_unit({st("n"): 1.0, "x_ident": -1.0, "x_dot": -1.0, "pexp_pm": -1.0, "splice": -1.0}, {"norm": 1.0},
                      "outside any token: a number ends here"),
-        pr.relu_unit({st("i"): 1.0, st("k"): 1.0, "x_ident": -1.0}, {"norm": 1.0}, "outside any token: a word ends here"),
+        pr.relu_unit({st("i"): 1.0, st("k"): 1.0, "x_ident": -1.0, "wmore": -1.0}, {"norm": 1.0},
+                     "outside any token: a word ends here"),
         pr.relu_unit({"x_mark": 1.0}, {"r_end": 1.0}, "the source is used up: write the final newline"),
     ]
     for r in RULES:
