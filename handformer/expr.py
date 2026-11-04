@@ -55,11 +55,11 @@ COPY_LOGIT = cm.DIGIT_LOGIT
 DIMS = (
     "PM2_Lrp", "PM2_Lmul", "PM2_Ladd", "PM2_Lnd", "Lt_Lrp", "Lt_Lmul", "Lt_Ladd",
     "c_raw", "fc", "om", "fm", "oa", "fa", "c", "use_mul", "o",
-    "a_lo", "sb_x", "LopLe", "LopO", "e3", "cont_raw", "sa_x", "b_hi", "a_dot", "e1", "e2", "cont",
+    "a_lo", "sb_x", "LopLe", "LopO", "op_div", "e3", "cont_raw", "sa_x", "b_hi", "a_dot", "e1", "e2", "cont",
     "has_a", "rneg", "b_dot", "drop", "frac_a", "has_b", "prevA_unary", "Lnzr", "cancel", "frac_b",
     "found_nz", "pad_a_raw", "pad_b_raw", "pad_a", "pad_b", "f_res", "tzx",
     "inA", "inPA", "atOp", "inB", "inPB", "end2", "skipA", "skipB",
-    "tz", "src2", *(f"Y2_{d}" for d in NAMES.values()), "fp", "wd", "dotf",
+    "tz", "src2", *(f"Y2_{d}" for d in NAMES.values()), "fp", "til_line", "Lend", "wd", "dotf",
     "in1", "in12", "in123", "end4", "isSign", "isDot", "afterdot", "padzero", "src4",
     *(f"Y4_{d}" for d in NAMES.values()),
 )
@@ -69,7 +69,6 @@ LE: Form = {"F": 1.0, "one": -1.0}
 AF: Form = {"a_lo": 1.0, "sa_x": -1.0}  # byte before the signed operand a
 ND: Form = {"one": 1.0, "is_digit": -1.0, "is_dot": -1.0}  # not part of a number
 BSTART: Form = {"o": 1.0, "sb_x": 1.0}  # byte before b's digits (o, or b's sign)
-NOT_MUL: Form = {"one": 1.0, "use_mul": -1.0}
 
 
 def _copy_head(name: str, src: Form, prefix: str) -> HeadSpec:
@@ -100,7 +99,7 @@ def build(b: ModelBuilder) -> None:
     l5.heads += [
         pr.next_match_head("first ) after p", "PM_Lrp", "PM2_Lrp", {"is_rpar": 1.0},
                            {"Lt_Lrp": 1.0}, "c_raw", "fc"),
-        pr.next_match_head("first * after p", "PM_Lmul", "PM2_Lmul", {"is_star": 1.0},
+        pr.next_match_head("first * or / after p", "PM_Lmul", "PM2_Lmul", {"is_star": 1.0, "is_slash": 1.0},
                            {"Lt_Lmul": 1.0}, "om", "fm"),
         pr.next_match_head("first +- after p", "PM_Ladd", "PM2_Ladd",
                            {"is_plus": 1.0, "is_binminus": 1.0}, {"Lt_Ladd": 1.0}, "oa", "fa"),
@@ -123,6 +122,7 @@ def build(b: ModelBuilder) -> None:
         pr.gather_head("sign of b?", pr.add({"o": 1.0}, pr.const(1.0)), "sb_x", src="is_minus"),
         pr.gather_head("latest op at Le", LE, "LopLe", src="P"),
         pr.gather_head("latest op before o", pr.add({"o": 1.0}, pr.const(-1.0)), "LopO", src="P"),
+        pr.gather_head("redex is a division?", {"o": 1.0}, "op_div", src="is_slash"),
     ]
     l8.units += pr.clamp01_units({"p": 1.0, "Ls": -1.0}, {"e3": 1.0})
     l8.units += pr.clamp01_units({"LopLe": 1.0, "o": -1.0}, {"cont_raw": 1.0})
@@ -180,6 +180,10 @@ def build(b: ModelBuilder) -> None:
         pr.relu_unit({"frac_a": 1.0, "pad_a_raw": 1.0}, {"f_res": 1.0}),  # max(frac_a, frac_b)
     ]
     l14.units += pr.times_flag_units({"frac_b": 1.0, "pad_a_raw": -1.0}, {"use_mul": 1.0}, {"f_res": 1.0})
+    # a/b: the frame holds a*10^(frac_b+N) / b*10^frac_a, so the integer quotient has N fractional digits
+    l14.units += pr.times_flag_units({"frac_b": 1.0, "N": 1.0}, {"op_div": 1.0}, {"pad_a": 1.0})
+    l14.units += pr.times_flag_units({"frac_a": 1.0}, {"op_div": 1.0}, {"pad_b": 1.0})
+    l14.units += pr.times_flag_units({"N": 1.0, "frac_a": -1.0, "frac_b": -1.0}, {"op_div": 1.0}, {"f_res": 1.0})
 
     # frame copy segments, t = q - F
     t = {"pos": 1.0, "F": -1.0}
@@ -224,8 +228,12 @@ def build(b: ModelBuilder) -> None:
     l17 = b.at(17)
     l17.heads.append(_copy_head("frame copy", {"src2": 1.0}, "Y2"))
     l17.units += pr.times_flag_units({"f_res": 1.0, "tz": -1.0}, {"found_nz": 1.0}, {"fp": 1.0})
+    # the prompt line carries "~N" after the expression; the rewrite does not copy it
+    l17.units += pr.clamp01_units({"Ptil": 1.0, "Ls": -1.0}, {"til_line": 1.0})
 
     l18 = b.at(18)
+    l18.units.append(pr.relu_unit(LE, {"Lend": 1.0}))  # where the line's suffix copy stops
+    l18.units += pr.times_flag_units({"Ptil": 1.0, "F": -1.0, "one": 1.0}, {"til_line": 1.0}, {"Lend": 1.0})
     l18.units += [  # width of the zero-padded digit string: max(m', f'+1)
         pr.relu_unit({"fp": 1.0, "one": 1.0}, {"wd": 1.0}),
         pr.relu_unit(pr.add(mp, {"fp": -1.0}, pr.const(-1.0)), {"wd": 1.0}),
@@ -234,7 +242,7 @@ def build(b: ModelBuilder) -> None:
 
     n1 = pr.add(A, {"Ls": -1.0, "cancel": -1.0}, pr.const(-1.0))
     n2 = pr.add(rs, {"wd": 1.0, "dotf": 1.0})
-    n3 = pr.add(LE, neg(B), pr.const(-1.0))
+    n3 = pr.add({"Lend": 1.0}, neg(B), pr.const(-1.0))
     r = {"pos": 1.0, "Rb": -1.0}
     ur = pr.add(r, neg(n1))  # index inside the result segment
     v = pr.add(ur, neg(rs))  # index inside the number (after its sign)

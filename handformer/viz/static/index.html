@@ -81,10 +81,18 @@
         <button role="tab" data-map="step">This step · dims × layers</button>
         <button role="tab" data-map="attention">Attention · selected head</button>
         <button role="tab" data-map="mlp">MLP activations</button>
+        <button role="tab" data-map="weights">Raw weights</button>
       </nav>
       <span id="map-controls" class="map-controls">
         <label data-for="residual">after <select id="snapshot"></select></label>
         <label data-for="mlp">layer <select id="mlp-layer"></select></label>
+        <label data-for="weights">matrix <select id="w-kind">
+          <option value="embed">embedding</option><option value="unembed">unembedding</option>
+          <option value="wq">head W_Q</option><option value="wk">head W_K</option><option value="wov" selected>head W_OV</option>
+          <option value="w_in">MLP W_in</option><option value="w_out">MLP W_out</option></select></label>
+        <label data-for="weights">layer <select id="w-layer"></select></label>
+        <label data-for="weights">head <select id="w-head"></select></label>
+        <label data-for="weights"><input id="w-trim" type="checkbox" checked> hide all-zero rows/cols</label>
         <label data-for="attention">gamma <input id="gamma" type="range" min="0.2" max="1.5" step="0.05" value="0.5"></label>
       </span>
     </div>

@@ -97,7 +97,13 @@ class Head:
     name: str
     w_q: np.ndarray  # (d_model, d_head)
     w_k: np.ndarray  # (d_model, d_head)
-    w_ov: np.ndarray  # (d_model, d_model)
+    w_v: np.ndarray  # (d_model, d_value): one column per source dim the head moves
+    w_o: np.ndarray  # (d_value, d_model): where each moved value is written
+
+    @property
+    def w_ov(self) -> np.ndarray:
+        """The fused (d_model, d_model) value-output map, for inspection only."""
+        return self.w_v @ self.w_o
 
 
 @dataclass
@@ -159,10 +165,15 @@ class ModelBuilder:
                     raise ValueError(f"head {h.name}: query/key width mismatch")
                 w_q = np.stack([self._vec(f) for f in h.query], axis=1)
                 w_k = np.stack([self._vec(f) for f in h.key], axis=1)
-                w_ov = np.zeros((d, d))
-                for src, dst_form in h.value.items():
-                    w_ov[self.layout[src]] += self._vec(dst_form)
-                heads.append(Head(h.name, w_q, w_k, w_ov))
+                # Factored value/output (standard per-head d_value): W_V selects each
+                # source dim, W_O writes it. W_V @ W_O is the fused map; cost d*r, not d^2.
+                srcs = list(h.value)
+                w_v = np.zeros((d, len(srcs)))
+                w_o = np.zeros((len(srcs), d))
+                for c, src in enumerate(srcs):
+                    w_v[self.layout[src], c] = 1.0
+                    w_o[c] = self._vec(h.value[src])
+                heads.append(Head(h.name, w_q, w_k, w_v, w_o))
             w_in = np.zeros((d, len(spec.units)))
             w_out = np.zeros((len(spec.units), d))
             for i, u in enumerate(spec.units):
@@ -215,7 +226,7 @@ class Transformer:
         for layer in self.layers:
             mats += [layer.w_in, layer.w_out]
             for h in layer.heads:
-                mats += [h.w_q, h.w_k, h.w_ov]
+                mats += [h.w_q, h.w_k, h.w_v, h.w_o]
         return int(sum(np.count_nonzero(m) for m in mats))
 
     def positional(self, n: int) -> np.ndarray:
@@ -257,7 +268,7 @@ class Transformer:
                 attn = self.head_attention(x, h, causal)
                 if trace is not None:
                     trace.attention(li, hi, attn)
-                delta += attn @ (x @ h.w_ov)
+                delta += (attn @ (x @ h.w_v)) @ h.w_o
             x = x + delta
             if trace is not None:
                 trace.residual(f"{layer.name} attn", x)
@@ -324,7 +335,7 @@ class _DecodeCache:
                 scores -= scores.max()
                 attn = np.exp(scores)
                 attn /= attn.sum()
-                delta += (attn @ xs) @ h.w_ov
+                delta += ((attn @ xs) @ h.w_v) @ h.w_o
             x = x + delta
             if layer.w_in.shape[1]:
                 x = x + np.maximum(x @ layer.w_in, 0.0) @ layer.w_out

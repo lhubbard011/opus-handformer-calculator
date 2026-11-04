@@ -7,7 +7,7 @@ It never parses, routes or post-processes anything. In the weights:
   operator the current frame holds (``act_add`` / ``act_sub`` / ``act_mul``).
 * ``expr`` (layers 4-12): picks the redex by parentheses and precedence,
   copies it into a frame, and rewrites the line with the result.
-* operator circuits (layers 3-10): add / sub / mul, each with private
+* operator circuits (layers 3-12): add / sub / mul / div, each with private
   namespaced dims (``add.A``, ``mul.J``, ...), all computing on every input.
   Only their units that write output dims are gated by their ``act_*``
   flag (ReLU input shifted by ``-BIG*(1-act)``), so an inactive circuit adds
@@ -18,14 +18,15 @@ from __future__ import annotations
 
 import logging
 
-from . import addition, expr, frame, multiplication, subtraction
+from . import addition, division, expr, frame, multiplication, subtraction
 from . import common as cm
 from . import primitives as pr
 from .model import Form, HeadSpec, Layout, ModelBuilder, Transformer, UnitSpec
 
 log = logging.getLogger(__name__)
 
-CIRCUITS = {"add": addition.builder, "sub": subtraction.builder, "mul": multiplication.builder}
+CIRCUITS = {"add": addition.builder, "sub": subtraction.builder, "mul": multiplication.builder,
+            "div": division.builder}
 
 # Output dims written by operator circuits, and the byte each one emits.
 OP_OUTPUTS = {

@@ -235,8 +235,10 @@ innermost-first means a depth counter is never needed.
   `{dim: coefficient}` for queries, keys, value/output maps and MLP units, and
   turns them into dense matrices. `ModelBuilder.at(i)` places a sublayer at a
   fixed global depth, so independent circuits can share layers.
-- Each head stores a fused value/output matrix (`d × d`). That inflates the
-  dense size (see §14) but not the number of real parameters.
+- Each head stores a factored value/output map: `W_V` (d × r) selects the r
+  dimensions the head moves and `W_O` (r × d) writes them. Their product is the
+  fused map shown by the visualizer. Before this, a dense d × d map made every
+  head cost d² and the visualizer took 25–36 s per run; now it takes 0.4 s.
 
 ## 8. Sequence grammar
 
@@ -444,10 +446,10 @@ on the bounding byte, whose value is 0.
 | | |
 |---|---|
 | layers | 22 |
-| heads | 78 |
-| MLP units | 539 |
-| d_model | 302 |
-| nonzero parameters | 4,489 |
+| heads | 133 |
+| MLP units | 800 |
+| d_model | 458 |
+| nonzero parameters | 6,930 (0.5% of 1.37M stored cells) |
 
 The dense size is much larger, mostly zeros in the per-head `d×d` value/output
 matrices. A factored per-head value/output layout would shrink it without
@@ -486,8 +488,7 @@ changing the nonzero count.
 
 1. ~~Signed operands~~: done (§19).
 2. ~~Decimals~~: done (§20).
-3. **Division** (`/`) by long division: repeated subtraction lines reusing the
-   borrow and complement circuits, with precision from `~N` in the prompt.
+3. ~~Division~~: done (§21).
 4. **Integer powers** `a^n`: repeated multiplication frames (a negative n becomes division).
 5. **Square root**, digit by digit, by the subtraction-only (Jarvis) method.
 6. **Test tooling:** teacher-forced checks still run the full n² pass; long × / ÷ cases
@@ -589,3 +590,57 @@ Tests (`tests/test_decimal.py`):
 - random decimal trees.
 
 Every answer is also checked against exact `Fraction` arithmetic.
+
+## 21. Division
+
+```
+1/3~5=[100000/3=30,60,90,21,51,81,12,42,72,000010310310310310310;33333]0.33333
+22/7~10 → 3.1428571428      -7/2~1 → -3.5      12/4/3 → 1      2/3*3~4 → 1.9998
+```
+
+- **Syntax.** `expr~N=` gives every `/` N fractional digits, truncated toward
+  zero. Without `~N`, N = 0 (integer quotient). N is read from the prompt (up to
+  4 digits) by gathers in the frame locator, and the rewrite never copies
+  `~N` forward. `/` has the same precedence as `*`, left to right.
+- **Scaling in the frame copy.** a/b becomes `a·10^(frac_b+N) / b·10^frac_a`,
+  and the result scale is N. The existing padding and point-placement logic
+  handles it.
+- **Circuit (`division.py`).** A uniform grid with stride s = len(B)+2:
+  - rows 0–8 hold the multiples 1·B … 9·B (each the previous row plus B, with
+    addition's recovered carry);
+  - row 9 holds q₀ = 0 and the zero remainder;
+  - each row after that holds qᵢ, then Rᵢ = 10·R_{i−1} + aᵢ − qᵢ·B (with
+    subtraction's recovered borrow).
+
+  Row and column come from the floor-division head.
+- **qᵢ in one pass.** Each remainder digit, as it is written at column c,
+  compares itself with M_k[c] for k = 1..9, storing gt/lt flags (remainder
+  cells only). At the quotient-digit position, 9 latest-match heads find, for
+  each k, the most significant differing digit. When all upper digits agree
+  they fall back to the row start; then aᵢ vs M_k[0] = (k·b₀) mod 10 decides.
+  q = Σₖ [R′ ≥ M_k].
+- **Answer.** The q column is read from its first nonzero digit (newest-frame
+  earliest; a dummy at row 9 falls back to the last digit for q = 0), in
+  stride-s jumps using square-table products.
+- **Bug found while building it:** the row-start fallback cell compared its own
+  quotient digit and carried gt/lt flags, so "all equal" read as "greater".
+  The flags are now gated to remainder cells.
+- **Not supported:** division by zero (undefined output).
+
+Tests (`tests/test_division.py`): every a/b for a < 31 and b < 13 at N = 0 and
+3; signed and decimal operands at N = 0, 2, 5; long quotients (30÷3 digits,
+20÷6 with N = 4, 8÷2 with N = 12); random trees with `/`. All are checked
+against exact truncated rational arithmetic.
+
+## 22. Raw weights and export
+
+- **Visualizer:** Heatmaps → Raw weights shows any matrix with named rows and
+  columns, as float32 (the gating constants overflow float16), coloured by
+  sign·log(1+|w|).
+- **Export:** `python -m handformer.export weights.npz` writes every tensor plus
+  a JSON index of dimension, head and unit names.
+- **Density:** 6,930 nonzero of 1.37M stored cells (0.5%). The median residual
+  dimension has one writer and one reader, and the median MLP unit reads 5
+  dimensions. The sparsity is the price of one meaning per dimension. Planned
+  compaction: time-share the private dimensions of the mutually exclusive
+  operator circuits (about 458 → 280), and merge repeated building blocks.

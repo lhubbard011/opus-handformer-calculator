@@ -159,9 +159,9 @@ class Runner:
         expression = expression.replace(" ", "")
         if not expression:
             raise ValueError("empty expression")
-        bad = sorted({ch for ch in expression if ord(ch) not in cm.ALPHABET})
+        bad = sorted({ch for ch in expression if ord(ch) not in cm.ALPHABET and ch != "~"})
         if bad:
-            raise ValueError(f"unsupported characters: {''.join(bad)!r} (use digits, + - * ( ))")
+            raise ValueError(f"unsupported characters: {''.join(bad)!r} (use digits . + - * / ( ) and ~N)")
         prompt = arith.prompt(expression)
         t0 = time.perf_counter()
         budget = min(MAX_TOKENS - len(prompt), 4 * len(expression) ** 2 + 64)
@@ -263,7 +263,7 @@ class Runner:
             for hi, h in enumerate(layer.heads):
                 idx = rec.top_idx[(li, hi)][q]
                 w = rec.top_w[(li, hi)][q]
-                wrote = (w @ x_in[idx]) @ h.w_ov
+                wrote = ((w @ x_in[idx]) @ h.w_v) @ h.w_o
                 nz = np.flatnonzero(np.abs(wrote) > 1e-9)
                 heads.append({
                     "layer": li, "head": hi,
@@ -323,3 +323,55 @@ class Runner:
         scale = act.max(axis=1)
         safe = np.where(scale > 1e-9, scale, 1.0)
         return act / safe[:, None], {"layer": layer, "scale": scale.round(6).tolist()}
+
+    # ------------------------------------------------------------- raw weights
+
+    def weights(self, kind: str, layer: int | None, head: int | None, trim: bool) -> tuple[np.ndarray, dict]:
+        """One raw weight matrix with named rows/columns (exact float values).
+
+        kinds: embed (bytes x dims), unembed (dims x bytes), wq / wk (dims x head
+        cols), wov (dims x dims, fused value-output), w_in (dims x units),
+        w_out (units x dims). ``trim`` drops rows/columns that are all zero.
+        """
+        m = self.model
+        names = self.names
+        byte_labels = [repr(chr(i)) for i in range(256)]
+        if kind in ("embed", "unembed"):
+            mat = m.embed if kind == "embed" else m.unembed
+            rows, cols = (byte_labels, names) if kind == "embed" else (names, byte_labels)
+            title = "token embedding (byte -> residual dims)" if kind == "embed" else "unembedding (residual dims -> byte logits)"
+        else:
+            if layer is None or not 0 <= layer < len(m.layers):
+                raise ValueError(f"layer {layer} out of range")
+            lyr, spec = m.layers[layer], self.builder.layers[layer]
+            if kind in ("wq", "wk", "wov"):
+                if head is None or not 0 <= head < len(lyr.heads):
+                    raise ValueError(f"head {head} out of range in layer {layer}")
+                h = lyr.heads[head]
+                mat = {"wq": h.w_q, "wk": h.w_k, "wov": h.w_ov}[kind]
+                cols = names if kind == "wov" else [f"col{c}" for c in range(mat.shape[1])]
+                rows = names
+                title = f"L{layer + 1} {spec.heads[head].name}: {kind}"
+            elif kind in ("w_in", "w_out"):
+                units = [f"#{u} -> {form_str(us.write)}" for u, us in enumerate(spec.units)]
+                mat = lyr.w_in if kind == "w_in" else lyr.w_out
+                rows, cols = (names, units) if kind == "w_in" else (units, names)
+                title = f"L{layer + 1} MLP {kind}"
+            else:
+                raise ValueError(f"unknown weight kind {kind!r}")
+        r_idx = np.arange(mat.shape[0])
+        c_idx = np.arange(mat.shape[1])
+        if trim:
+            r_idx = np.flatnonzero(np.abs(mat).sum(axis=1) > 0)
+            c_idx = np.flatnonzero(np.abs(mat).sum(axis=0) > 0)
+        sub = mat[np.ix_(r_idx, c_idx)] if len(r_idx) and len(c_idx) else np.zeros((0, 0))
+        log.info("weights %s layer=%s head=%s: %s -> %s (trim=%s), nonzero=%d",
+                 kind, layer, head, mat.shape, sub.shape, trim, int(np.count_nonzero(mat)))
+        return sub, {
+            "title": title,
+            "rows": [rows[i] for i in r_idx],
+            "cols": [cols[i] for i in c_idx],
+            "full_shape": list(mat.shape),
+            "nonzero": int(np.count_nonzero(mat)),
+            "max_abs": float(np.abs(mat).max()) if mat.size else 0.0,
+        }

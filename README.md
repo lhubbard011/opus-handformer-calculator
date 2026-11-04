@@ -1,9 +1,10 @@
 # handformer
 
 A transformer that does arithmetic, with **every weight written by hand**.
-Nothing is trained. The tokenizer is raw bytes. One set of **4,489 hand-written
-weights** evaluates whole expressions with `+ − *`, unary minus, parentheses
-and precedence on signed decimal numbers of any length. The model writes its own working and its own answer;
+Nothing is trained. The tokenizer is raw bytes. One set of **6,930 hand-written
+weights** evaluates whole expressions with `+ − * /`, unary minus, parentheses
+and precedence on signed decimal numbers of any length, with division to a
+precision given in the prompt (`1/3~5` → `0.33333`). The model writes its own working and its own answer;
 the host only feeds bytes and stops at `\n`.
 
 ```
@@ -24,10 +25,10 @@ precedence, copies it into a frame, computes it, and writes the reduced line.
 
 | | |
 |---|---|
-| operators | `+`, `-`, `*`, unary minus, parentheses, precedence, left-to-right order |
+| operators | `+`, `-`, `*`, `/` (truncated to `~N` digits), unary minus, parentheses, precedence, left-to-right order |
 | operand length | arbitrary (tested to 300 digits for + and −, 25 for ×; designed for ~10⁶ positions) |
-| model | 22 layers, 78 attention heads, 539 MLP units, d_model 302 |
-| weights | 4,489 nonzero, every one from a documented formula over named residual dims |
+| model | 22 layers, 133 attention heads, 800 MLP units, d_model 458 |
+| weights | 6,930 nonzero (0.5% of stored cells), every one from a documented formula over named residual dims |
 | architecture | standard decoder-only transformer: causal multi-head attention + ReLU MLP; no LayerNorm, no biases |
 | host logic | none: no parsing, no routing, no reversing, no answer fix-up |
 
@@ -54,6 +55,8 @@ cd /home/lyle/a/alg
 - **Attention heads:** every head's read position and what it wrote, plus its hand-written score and value formulas.
 - **Residual stream:** the named dimensions, with which sublayer wrote each one.
 - **Active MLP units:** each unit that fired, with its formula.
+- **Raw weights:** every matrix (embedding, unembedding, W_Q/W_K/W_OV, MLP W_in/W_out)
+  as a labelled heatmap, exact values on hover.
 - **Heatmaps:**
   - residual stream (dims × positions, after any sublayer);
   - this step (dims × sublayers);
@@ -99,6 +102,10 @@ hook, so the visualizer shows exactly the computation the tests check.
   each operand's `.` and zero-pads the shorter fraction (`1.25+3.5` →
   `[125+350=…]`). The rewrite puts the point back: it strips trailing zeros,
   inserts `.` f digits from the right and left-pads (`0.1*0.2` → `0.02`).
+- **Division without trial subtraction.** Long division in a grid: rows of
+  the 9 multiples of the divisor, then quotient-digit + remainder rows. Each
+  remainder digit compares itself with all 9 multiples as it is written, and
+  9 latest-match heads pick each quotient digit in one pass.
 - **Complement during the copy.** For a negative difference, the model emits
   10ⁿ − D digit by digit while reading D out (9−d, 10−d or 0, depending on
   position), with no second pass.
@@ -158,7 +165,8 @@ handformer/
   common.py          byte embedding, operand addressing, mod-10 ramps
   frame.py           layers 1–4: unary vs binary '-', markers, frame flags, phases, sign-aware operator routing
   expr.py            layers 4–22: choose the sub-expression, copy it into the frame, rewrite the line
-  addition.py  subtraction.py  multiplication.py    operator circuits
+  addition.py  subtraction.py  multiplication.py  division.py    operator circuits
+  export.py          python -m handformer.export weights.npz: every tensor + a JSON index of names
   arith.py           merges everything into one model; solve()
   viz/               step-through visualizer (FastAPI + vanilla JS)
 tests/
@@ -166,6 +174,7 @@ tests/
   test_ops.py        every a op b for a, b < 40 and signed a, b in -12..12; long operands; edge cases
   test_expr.py       hand-picked and random expression trees; greedy decoding
   test_decimal.py    decimal literal pairs, formatting, long fractions, random decimal trees (exact)
+  test_division.py   small/long/signed/decimal quotients at several ~N; random trees with '/' (exact)
 DESIGN.md            full design: attention, residual stream, order of operations, every circuit
 ANSWER_FIRST.md      analysis: can the first emitted byte be the answer? (deferred)
 ```
@@ -183,12 +192,12 @@ sequence exactly. A separate test runs real cached greedy decoding.
 Not supported yet:
 - a prompt with no operator;
 - parentheses around a bare number;
-- division, powers and roots.
+- division by zero (undefined); powers and roots.
 
 Roadmap, in dependency order:
 1. ~~signed operands~~ (done);
 2. ~~decimals~~ (done);
-3. division with precision given in the prompt (`~N`);
+3. ~~division with precision given in the prompt (`~N`)~~ (done);
 4. integer powers;
 5. square root.
 

@@ -43,6 +43,20 @@ class MlpBody(BaseModel):
     layer: int
 
 
+class WeightsBody(BaseModel):
+    kind: str
+    layer: int | None = None
+    head: int | None = None
+    trim: bool = True
+
+
+def _binary_f32(arr: np.ndarray, meta: dict) -> Response:
+    """Exact weights: float32, because gating constants (1e6..1e13) overflow float16."""
+    data = np.ascontiguousarray(arr, dtype="<f4").tobytes()
+    meta = {**meta, "shape": list(arr.shape), "dtype": "float32"}
+    return Response(content=data, media_type="application/octet-stream", headers={"X-Meta": json.dumps(meta)})
+
+
 def _binary(arr: np.ndarray, meta: dict) -> Response:
     data = np.ascontiguousarray(arr, dtype="<f2").tobytes()
     meta = {**meta, "shape": list(arr.shape), "dtype": "float16"}
@@ -92,6 +106,10 @@ def create_app(runner: Runner) -> FastAPI:
     @app.post("/api/mlp")
     def mlp(body: MlpBody) -> Response:
         return _binary(*runner.mlp_map(body.run_id, body.layer))
+
+    @app.post("/api/weights")
+    def weights(body: WeightsBody) -> Response:
+        return _binary_f32(*runner.weights(body.kind, body.layer, body.head, body.trim))
 
     @app.get("/")
     def index() -> FileResponse:

@@ -47,7 +47,7 @@ async function api(path, body, binary = false) {
   if (binary) {
     const buf = await r.arrayBuffer();
     const meta = JSON.parse(r.headers.get("X-Meta"));
-    const data = decodeF16(buf);
+    const data = meta.dtype === "float32" ? new Float32Array(buf) : decodeF16(buf);
     const expected = meta.shape.reduce((a, b) => a * b, 1);
     if (data.length !== expected) throw new Error(`${path}: got ${data.length} values, expected ${expected}`);
     log(`${path} ${buf.byteLength} bytes shape=[${meta.shape}] in ${(performance.now() - t0).toFixed(0)}ms`);
@@ -407,6 +407,24 @@ async function renderMap(p) {
       valueText: (r, c) => `query ${r} ${charAt(r)} → key ${c} ${charAt(c)}\nweight ${(data[r * n + c] * 100).toFixed(3)}%`,
       onClick: (r) => goto(r),
     }, { q });
+  } else if (state.map === "weights") {
+    const kind = $("w-kind").value;
+    const body = { kind, trim: $("w-trim").checked };
+    if (!["embed", "unembed"].includes(kind)) body.layer = Number($("w-layer").value);
+    if (["wq", "wk", "wov"].includes(kind)) body.head = Number($("w-head").value);
+    const { key, meta, data } = await mapData("/api/weights", body);
+    const [rows, cols] = meta.shape;
+    const lmax = Math.log10(1 + meta.max_abs);
+    cap.textContent = `${meta.title}: ${meta.full_shape.join(" × ")} stored, ${meta.nonzero} nonzero` +
+      (body.trim ? `, showing ${rows} × ${cols} non-empty rows/cols` : "") +
+      " · colour = sign·log(1+|w|) (blue negative, orange positive); hover for exact values";
+    drawHeatmap(canvas, {
+      key, rows, cols,
+      get: (r, c) => data[r * cols + c],
+      norm: (v) => 0.5 + 0.5 * Math.sign(v) * Math.log10(1 + Math.abs(v)) / (lmax || 1), lut: DIV,
+      rowLabels: meta.rows,
+      valueText: (r, c) => `row ${meta.rows[r]}\ncol ${meta.cols[c]}\nw = ${data[r * cols + c]}`,
+    }, {});
   } else {
     const sel = $("mlp-layer");
     const layer = Number(sel.value);
@@ -462,7 +480,12 @@ function wire() {
     state.map = b.dataset.map;
     if (state.pos.has(state.q)) renderMap(state.pos.get(state.q));
   }));
-  for (const id of ["snapshot", "mlp-layer", "gamma"]) {
+  const fillHeads = () => {
+    const layer = state.info.layers[Number($("w-layer").value)];
+    $("w-head").replaceChildren(...layer.heads.map((h, i) => new Option(`${i}: ${h.name}`, i)));
+  };
+  $("w-layer").addEventListener("input", fillHeads);
+  for (const id of ["snapshot", "mlp-layer", "gamma", "w-kind", "w-layer", "w-head", "w-trim"]) {
     $(id).addEventListener("input", () => state.pos.has(state.q) && renderMap(state.pos.get(state.q)));
   }
   $("focus").addEventListener("change", () => state.run && goto(state.q));
@@ -483,6 +506,8 @@ async function main() {
   wire();
   try {
     state.info = await api("/api/info");
+    $("w-layer").replaceChildren(...state.info.layers.map((l) => new Option(`${l.index + 1}`, l.index)));
+    $("w-layer").dispatchEvent(new Event("input"));
     $("mlp-layer").replaceChildren(...state.info.layers
       .filter((l) => l.units.length).map((l) => new Option(`${l.index + 1}`, l.index)));
     log("model", state.info.d_model, "dims,", state.info.layers.length, "layers,", state.info.nonzero_params, "params");

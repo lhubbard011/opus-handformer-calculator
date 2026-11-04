@@ -12,7 +12,8 @@ Token embedding (one row per byte, all hand-set):
     is_lbr '['  opens a frame (one reduction step)
     is_rbr ']'  closes it
     is_lpar '(' is_rpar ')'   is_dot '.' (decimal point)
-    is_plus '+' is_minus '-' is_star '*'  is_opany: any of the three
+    is_plus '+' is_minus '-' is_star '*' is_slash '/'  is_opany: any of the four
+    is_tilde    '~' (precision marker in the prompt: <expr>~N=)
 """
 
 from __future__ import annotations
@@ -37,12 +38,13 @@ INPUT_DIMS = (
     "one", "pos", "pos2", "val", *(f"oh{d}" for d in range(10)),
     "is_digit", "nz", "n9", "is0", "is9", "is_bos",
     "is_eq", "is_semi", "is_lt", "is_comma", "is_bar", "is_lbr", "is_rbr",
-    "is_lpar", "is_rpar", "is_dot", "is_plus", "is_minus", "is_star", "is_opany",
+    "is_lpar", "is_rpar", "is_dot", "is_plus", "is_minus", "is_star", "is_slash", "is_opany",
+    "is_tilde",
 )
 
 # Bytes an expression line can contain, and the input dim that flags each.
 ALPHABET = {**{ord("0") + d: f"oh{d}" for d in range(10)},
-            ord("+"): "is_plus", ord("-"): "is_minus", ord("*"): "is_star",
+            ord("+"): "is_plus", ord("-"): "is_minus", ord("*"): "is_star", ord("/"): "is_slash",
             ord("("): "is_lpar", ord(")"): "is_rpar", ord("."): "is_dot"}
 
 
@@ -64,11 +66,12 @@ def embed(b: ModelBuilder) -> None:
         )
     single = {BOS: "is_bos", ord("="): "is_eq", WORK_END: "is_semi", COMMA: "is_comma",
               BAR: "is_bar", FRAME_OPEN: "is_lbr", FRAME_CLOSE: "is_rbr",
-              ord("("): "is_lpar", ord(")"): "is_rpar", ord("."): "is_dot"}
+              ord("("): "is_lpar", ord(")"): "is_rpar", ord("."): "is_dot", ord("~"): "is_tilde"}
     for byte, dim in single.items():
         b.embed_byte(byte, {dim: 1.0})
     b.embed_byte(WORK_END_NEG, {"is_semi": 1.0, "is_lt": 1.0})
-    for byte, dim in ((ord("+"), "is_plus"), (MINUS, "is_minus"), (ord("*"), "is_star")):
+    for byte, dim in ((ord("+"), "is_plus"), (MINUS, "is_minus"), (ord("*"), "is_star"),
+                      (ord("/"), "is_slash")):
         b.embed_byte(byte, {dim: 1.0, "is_opany": 1.0})
 
 

@@ -12,7 +12,7 @@ def unary(x: str, i: int) -> bool:
 
 
 def binary_op(x: str, i: int) -> bool:
-    return x[i] in "+*" or (x[i] == "-" and not unary(x, i))
+    return x[i] in "+*/" or (x[i] == "-" and not unary(x, i))
 
 
 def magnitude_body(a: str, op: str, b: str) -> tuple[str, str, int]:
@@ -34,6 +34,21 @@ def magnitude_body(a: str, op: str, b: str) -> tuple[str, str, int]:
     return ",".join(lines) + "|" + str(prod).zfill(la + lb)[::-1], ";", prod
 
 
+def division_body(a: str, b: str) -> tuple[str, int]:
+    """Long-division grid for magnitudes a / b (see handformer/division.py)."""
+    ia, ib, L = int(a), int(b), len(b)
+    rows = [str(k * ib).zfill(L + 1)[::-1] + "," for k in range(1, 10)]
+    rows.append("0" * (L + 2))
+    r, q = 0, 0
+    for digit in a:
+        r = 10 * r + int(digit)
+        qi = r // ib
+        r -= qi * ib
+        q = 10 * q + qi
+        rows.append(str(qi) + str(r).zfill(L + 1)[::-1])
+    return "".join(rows), q
+
+
 def working(a: str, op: str, b: str) -> str:
     """Frame body after '=' for signed operands: working, end byte, result.
 
@@ -43,6 +58,9 @@ def working(a: str, op: str, b: str) -> str:
     """
     sa, sb = a.startswith("-"), b.startswith("-")
     ma, mb = a.lstrip("-"), b.lstrip("-")
+    if op == "/":
+        work, v = division_body(ma, mb)
+        return work + ";" + ("-" if sa != sb and v else "") + str(v)
     if op == "*":
         work, end, v = magnitude_body(ma, "*", mb)
         neg = sa != sb
@@ -95,7 +113,7 @@ def step(x: str) -> tuple[str, str, bool]:
     p = x.rfind("(")
     c = x.find(")", p + 1) if p >= 0 else len(x)
     span = range(p + 1, c)
-    o = next((i for i in span if x[i] == "*"), None)
+    o = next((i for i in span if x[i] in "*/"), None)
     if o is None:
         o = next(i for i in span if x[i] in "+-" and binary_op(x, i))
     a_lo = max(i for i in range(-1, o) if i == -1 or not is_num(x[i]))
@@ -106,7 +124,10 @@ def step(x: str) -> tuple[str, str, bool]:
 
     ia, fa = split_decimal(a)
     ib, fb = split_decimal(b)
-    if op == "*":
+    if op == "/":  # a*10^(fb+N) / b*10^fa: the integer quotient has N fractional digits
+        f = PRECISION
+        ia, ib = ia + "0" * (fb + PRECISION), ib + "0" * fa
+    elif op == "*":
         f = fa + fb
     else:  # align the fractions: pad the shorter one with zeros
         f = max(fa, fb)
@@ -120,11 +141,20 @@ def step(x: str) -> tuple[str, str, bool]:
     if result.startswith("-") and lo >= 1 and unary(x, lo - 1):
         lo, result = lo - 1, result[1:]  # -(-v) == v
     more = sum(binary_op(x, i) for i in range(len(x))) >= 2
-    return f"[{ia}{op}{ib}={body}]", x[:lo] + result + x[hi + 1:], more
+    tail = x[hi + 1:].split("~")[0]  # the prompt's "~N" is not copied forward
+    return f"[{ia}{op}{ib}={body}]", x[:lo] + result + tail, more
+
+
+PRECISION = 0  # set per call by output()
 
 
 def output(expression: str) -> str:
-    """Everything the model writes after the prompt ``\\n<expression>=``."""
+    """Everything the model writes after the prompt ``\\n<expression>=``.
+
+    ``expression`` may end with ``~N``: N fractional digits for every '/'.
+    """
+    global PRECISION
+    PRECISION = int(expression.split("~")[1]) if "~" in expression else 0
     x, out = expression, []
     while True:
         frame, x, more = step(x)

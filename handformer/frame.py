@@ -49,17 +49,19 @@ MARKERS: dict[str, list[Form]] = {
     "E": [{"is_eq": 1.0}],
     "S": [{"is_semi": 1.0}],
     "R": [{"is_bar": 1.0}],
-    "P": [{"is_plus": 1.0}, {"is_star": 1.0}, BINMINUS],  # binary operators only
+    "P": [{"is_plus": 1.0}, {"is_star": 1.0}, {"is_slash": 1.0}, BINMINUS],  # binary operators only
     "Lg": [{"is_lpar": 1.0}, {"is_rbr": 1.0}],
     "Lrp": [{"is_rpar": 1.0}],
-    "Lmul": [{"is_star": 1.0}],
+    "Lmul": [{"is_star": 1.0}, {"is_slash": 1.0}],  # multiplicative: * and /
     "Ladd": [{"is_plus": 1.0}, BINMINUS],
     "Lnd": [{"one": 1.0, "is_digit": -1.0, "is_dot": -1.0}],  # not part of a number
     "Ldot": [{"is_dot": 1.0}],
     "Lnz": [{"nz": 1.0}],  # nonzero digit (trailing-zero count of a result)
+    "Ptil": [{"is_tilde": 1.0}],  # the prompt's precision marker (0 if absent)
 }
 NEXT_CLASSES = ("Lrp", "Lmul", "Ladd", "Lnd")  # classes searched with next_match
-OPS = {"add": "is_plus", "sub": "is_minus", "mul": "is_star"}
+OPS = {"add": "is_plus", "sub": "is_minus", "mul": "is_star", "div": "is_slash"}
+N_DIGITS = 4  # precision ~N supports N <= 9999
 
 DIMS = (
     "prev_digit", "prev_rpar", "is_unary", "is_binminus",
@@ -67,6 +69,7 @@ DIMS = (
     "open", "seen_eq", "seen_semi", "seen_bar",
     "Ls", "p", *(f"PM_{c}" for c in NEXT_CLASSES), *(f"typ_{op}" for op in OPS),
     "neg", "sa", "sb", "eff_sb", "PF2",
+    "f_E0", "E0", "has_til", *(f"tN{k}" for k in range(N_DIGITS)), *(f"Nd{k}" for k in range(N_DIGITS)), "N",
     *(f"act_{op}" for op in OPS), "phase1", "phase2", "phase4",
 )
 
@@ -94,8 +97,16 @@ def build(b: ModelBuilder) -> None:
         for k, match in enumerate(matches):
             l1.units += pr.latest_feature(match, f"f_{m}", bos=(k == 0))
 
+    # the prompt's '=' is the earliest '=' in the sequence
+    l1.units.append(pr.earliest_if({"is_eq": 1.0}, 1.0, "f_E0"))
+
     l2 = b.at(2)
     l2.heads += [pr.latest_head(f"latest {m}", f"f_{m}", m) for m in MARKERS]
+    l2.heads.append(pr.latest_head("prompt '='", "f_E0", "E0"))
+    # Precision N: the digits between '~' and the prompt's '=' (N <= 9999).
+    l2.units += pr.clamp01_units({"Ptil": 1.0}, {"has_til": 1.0})
+    for k in range(N_DIGITS):
+        l2.units.append(pr.relu_unit({"E0": 1.0, "Ptil": -1.0, "one": -1.0 - k}, {f"tN{k}": 1.0}))
     l2.units += pr.clamp01_units({"F": 1.0, "Rb": -1.0}, {"open": 1.0})
     for m, flag in (("E", "seen_eq"), ("S", "seen_semi"), ("R", "seen_bar")):
         l2.units += pr.clamp01_units({m: 1.0, "F": -1.0}, {flag: 1.0})
@@ -114,7 +125,10 @@ def build(b: ModelBuilder) -> None:
         pr.gather_head("borrow sign", {"S": 1.0}, "neg", src="is_lt"),
         pr.gather_head("sign of a", pr.add({"F": 1.0}, pr.const(1.0)), "sa", src="is_minus"),
         pr.gather_head("sign of b", pr.add({"P": 1.0}, pr.const(1.0)), "sb", src="is_minus"),
+        *(pr.gather_head(f"precision digit {k}", {"Ptil": 1.0, f"tN{k}": 1.0}, f"Nd{k}")
+          for k in range(N_DIGITS)),
     ]
+    l3.units += pr.times_flag_units({f"Nd{k}": 10.0 ** k for k in range(N_DIGITS)}, {"has_til": 1.0}, {"N": 1.0})
     # effective sign of b for + and -: a - b == a + (-b)
     l3.units += [
         pr.relu_unit({"sb": 1.0, "typ_sub": -1.0}, {"eff_sb": 1.0}),
@@ -135,4 +149,5 @@ def build(b: ModelBuilder) -> None:
         pr.relu_unit(pr.add(additive, {"sa": 1.0, "eff_sb": -1.0}, pr.const(-3.0)), {"act_sub": 1.0}),
         pr.relu_unit(pr.add(additive, {"sa": -1.0, "eff_sb": 1.0}, pr.const(-3.0)), {"act_sub": 1.0}),
         pr.relu_unit(pr.add(work, {"typ_mul": 1.0}, pr.const(-2.0)), {"act_mul": 1.0}),
+        pr.relu_unit(pr.add(work, {"typ_div": 1.0}, pr.const(-2.0)), {"act_div": 1.0}),
     ]
