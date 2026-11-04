@@ -8,7 +8,9 @@
 //
 // Every block expands into its attention and MLP sublayers, those into their heads and units
 // grouped by the code module that wrote them, and each head or unit into its formula and source
-// line. Lists render only when opened, so a 1,000-unit model stays light.
+// line. Lists render only when opened, so a 1,000-unit model stays light. Each head and unit has
+// the page's own knock-out button (hooks.koButton); refreshKnockouts keeps them in step with the
+// current knockout set after every run.
 
 const log = (...a) => console.log("[model-graph]", ...a);
 
@@ -166,7 +168,7 @@ function block(L, d, srcLinks, hooks) {
       for (const [m, list] of byModule(L.units)) {
         inner.append(lazy("mg-group", [el("span", "mg-mod", m), el("span", "mg-muted", `${list.length} unit${list.length > 1 ? "s" : ""} · lines ${lineRange(list)}`)], () => {
           const g = el("div", "mg-items");
-          for (const [u, i] of list) g.append(unitItem(u, i, srcLinks));
+          for (const [u, i] of list) g.append(unitItem(L, u, i, srcLinks, hooks));
           return g;
         }));
       }
@@ -178,10 +180,31 @@ function block(L, d, srcLinks, hooks) {
   return body;
 }
 
+/** A slot for the page's knock-out button of one head or unit (filled now and after every run). */
+function koSlot(hooks, kind, item, row) {
+  const slot = el("span", "mg-ko");
+  if (!hooks.koButton) return slot;
+  slot.dataset.kind = kind;
+  slot.dataset.item = JSON.stringify(item);
+  slot.append(hooks.koButton(kind, item));
+  row.classList.toggle("mg-off", !!hooks.koHas?.(kind, item));
+  return slot;
+}
+
+/** Re-make every knock-out button and mark what is knocked out (call after the set changes). */
+export function refreshKnockouts(root, hooks) {
+  for (const slot of root.querySelectorAll(".mg-ko[data-kind]")) {
+    const kind = slot.dataset.kind, item = JSON.parse(slot.dataset.item);
+    slot.replaceChildren(hooks.koButton(kind, item));
+    slot.closest(".mg-item")?.classList.toggle("mg-off", hooks.koHas(kind, item));
+  }
+}
+
 function headItem(L, h, i, srcLinks, hooks) {
   const it = el("details", "mg-item");
   const s = el("summary");
-  s.append(el("span", "mg-item-name", `head ${i} · ${h.name}`), srcLinks(h.src), el("span", "mg-muted", `writes ${h.writes.join(", ") || "nothing"}`));
+  s.append(el("span", "mg-item-name", `head ${i} · ${h.name}`), srcLinks(h.src), koSlot(hooks, "heads", [L.index, i], it),
+           el("span", "mg-muted", `writes ${h.writes.join(", ") || "nothing"}`));
   it.append(s);
   const body = el("div", "mg-formula");
   const score = h.query.map((q, k) => `(${q})·(${h.key[k]})`).join(" + ");
@@ -199,10 +222,11 @@ function headItem(L, h, i, srcLinks, hooks) {
   return it;
 }
 
-function unitItem(u, i, srcLinks) {
+function unitItem(L, u, i, srcLinks, hooks) {
   const it = el("details", "mg-item");
   const s = el("summary");
-  s.append(el("span", "mg-item-name", `unit ${i} → ${u.write}`), srcLinks(u.src), el("span", "mg-muted", u.label ? u.label.slice(0, 90) : ""));
+  s.append(el("span", "mg-item-name", `unit ${i} → ${u.write}`), srcLinks(u.src), koSlot(hooks, "units", [L.index, i], it),
+           el("span", "mg-muted", u.label ? u.label.slice(0, 90) : ""));
   it.append(s);
   const body = el("div", "mg-formula");
   body.append(el("div", "", `ReLU(${u.read}) → ${u.write}`), el("div", "mg-muted", u.doc));

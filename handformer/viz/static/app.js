@@ -6,7 +6,7 @@ import { decodeF16, SEQ, DIV } from "./render.js";
 import { drawHeatmap, attachHeatmapEvents, isTouch, showSheet, hideSheet, setTip, setRowNames } from "./heatmap.js";
 import { LocalApi } from "./local-api.js";
 import { drawGraph, drawOverview } from "./graph.js";
-import { renderModelGraph } from "./model-graph.js";
+import { renderModelGraph, refreshKnockouts } from "./model-graph.js";
 
 const $ = (id) => document.getElementById(id);
 // The input is a one-line box (calculator, Life) or a code box (C): read and write it through these.
@@ -392,7 +392,7 @@ async function loadInfo() {
   $("w-layer").dispatchEvent(new Event("input"));
   renderGraph();
   renderModelGraph($("model-graph"), state.info, {
-    srcLinks,
+    srcLinks, koButton, koHas,
     onHead: (layer, head) => { // the head's attention pattern in the heatmap panel
       state.head = [layer, head];
       document.querySelector('[data-map="attention"]').click();
@@ -468,6 +468,7 @@ async function toggleKnockout(kind, item) {
 }
 
 function renderKnockouts() {
+  refreshKnockouts($("model-graph"), { koButton, koHas }); // the model graph's buttons follow the set
   const bar = $("ko-bar");
   if (!koCount() || !state.run) { bar.hidden = true; bar.replaceChildren(); return; }
   bar.hidden = false;
