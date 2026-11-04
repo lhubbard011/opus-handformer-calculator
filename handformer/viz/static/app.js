@@ -1007,12 +1007,15 @@ async function tryIt(cfg) {
 }
 
 // ------------------------------------------------------------------ pinning
-// Up to two panels can be pinned directly under the sequence slider, so their views sit next
-// to the controls that change the step: e.g. the Step panel beside a heatmap while scrubbing.
-// Pinning a third sends the oldest back. The choice is a per-viewer convenience, remembered in
-// this browser only.
+// Up to three panels can be pinned directly under the sequence slider, so their views sit next
+// to the controls that change the step: e.g. a heatmap with the Step panel and the heads beside
+// it. Big panels (heatmaps, circuit graph) get their own column; the smaller ones stack in a
+// column next to them, or sit side by side when no big panel is pinned (wide screens; narrow
+// screens stack everything). Pinning a fourth sends the oldest back. The choice is a per-viewer
+// convenience, remembered in this browser only.
 const PIN_KEY = "handviz.pinned";
-const MAX_PINS = 2;
+const MAX_PINS = 3;
+const BIG_PANELS = new Set(["p-maps", "p-graph"]);
 const pinHome = new Map(); // panel id -> placeholder comment marking its usual place
 let pins = []; // pinned panel ids, oldest first
 
@@ -1031,7 +1034,7 @@ function pinOne(id) {
   const home = document.createComment(`home of ${id}`);
   panel.replaceWith(home);
   pinHome.set(id, home);
-  $("pinned").append(panel);
+  $(BIG_PANELS.has(id) ? "pinned-big" : "pinned-small").append(panel);
   panel.classList.add("is-pinned");
   panel.querySelector(".pin").textContent = "✕ unpin";
   pins.push(id);
@@ -1043,8 +1046,12 @@ function togglePin(id, { ids = null, scroll = true } = {}) {
   else if (pins.includes(id)) unpinOne(id);
   else pinOne(id);
   const slot = $("pinned");
+  const nBig = pins.filter((x) => BIG_PANELS.has(x)).length, nSmall = pins.length - nBig;
   slot.hidden = !pins.length;
-  slot.classList.toggle("two", pins.length === 2);
+  slot.dataset.layout = nBig && nSmall ? "big+small" : nBig ? "big" : "small";
+  $("pinned-small").style.setProperty("--n", String(Math.max(1, nSmall)));
+  $("pinned-big").hidden = !nBig;
+  $("pinned-small").hidden = !nSmall;
   try { pins.length ? localStorage.setItem(PIN_KEY, JSON.stringify(pins)) : localStorage.removeItem(PIN_KEY); }
   catch { /* private mode */ }
   log("pinned", pins.join(", ") || "nothing");

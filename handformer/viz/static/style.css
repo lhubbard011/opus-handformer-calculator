@@ -234,12 +234,17 @@ button.try { font-size: 11px; padding: 1px 8px; margin-left: 4px; border-color: 
 @media (max-width: 700px) { .guide { margin: 8px; } .guide-table td:first-child { white-space: normal; } }
 /* pinned panel: directly under the sequence slider, full width */
 .pinned { padding: 8px 16px 0; }
-.pinned > .panel { margin: 0; border-color: var(--accent); }
+.pin-col > .panel { margin: 0; border-color: var(--accent); }
 button.pin { font-size: 11px; padding: 1px 6px; border-color: var(--border); }
 .panel.is-pinned button.pin { border-color: var(--accent); color: var(--accent); }
 @media (max-width: 700px) { .pinned { padding: 8px 8px 0; } }
 .pinned { display: flex; flex-direction: column; gap: 10px; }
+.pin-col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.pin-col[hidden] { display: none; }
 @media (min-width: 1400px) {
-  .pinned.two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+  /* big panel in its own column, the small ones stacked beside it */
+  .pinned[data-layout="big+small"] { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); align-items: start; }
+  /* only small panels: side by side */
+  .pinned[data-layout="small"] #pinned-small { display: grid; grid-template-columns: repeat(var(--n), minmax(0, 1fr)); align-items: start; }
 }
 .pinned[hidden] { display: none; }
