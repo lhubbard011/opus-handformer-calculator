@@ -251,7 +251,7 @@ class Runner:
             "name": "handformer",
             "model": self.spec.key, "title": self.spec.title, "marks": list(self.spec.marks),
             "default_input": self.spec.default_input, "input_hint": self.spec.input_hint,
-            "multiline": self.spec.multiline,
+            "multiline": self.spec.multiline, "node_names": dict(self.spec.node_names),
             "models": {k: m.title for k, m in MODELS.items()},
             "model_id": self.model_id,
             "d_model": len(self.layout),

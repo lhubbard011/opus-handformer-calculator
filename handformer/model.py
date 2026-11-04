@@ -406,50 +406,52 @@ class Transformer:
 
 
 class _DecodeCache:
-    """Per-layer residual inputs and per-head keys for incremental decoding.
+    """Per-head keys and values for incremental decoding.
 
     ``step`` runs one new position q through the same layers as ``residual``:
-    it stores the layer input ``x_in[l][q]`` and key ``keys[l][h][q] = x W_K``,
-    then attends with q's query over the cached keys 0..q and forms values as
-    ``(attn @ x_in[l][:q+1]) @ W_V @ W_O`` (the same product as ``residual``,
-    associated differently). Exact, not approximate: under the causal mask an
-    earlier position's layer inputs never depend on later tokens, so caching
-    them changes nothing. Cost per token is O(q * d) instead of a full rerun.
-    Storage starts at ``capacity`` positions and doubles when full (``_grow``).
+    it stores each head's key ``keys[l][h][q] = x W_K`` and value
+    ``vals[l][h][q] = x W_V``, then attends with q's query over the cached keys
+    0..q and adds ``(attn @ vals[l][h][:q+1]) @ W_O`` (the same product as
+    ``residual``, associated differently). Exact, not approximate: under the
+    causal mask an earlier position's layer inputs never depend on later tokens,
+    so caching them changes nothing. Cost per token is O(q * (d_head + d_value))
+    per head: values are 1-14 columns wide where the residual is hundreds, which
+    matters for the parser's long outputs. Storage starts at ``capacity``
+    positions and doubles when full (``_grow``).
     """
 
     def __init__(self, model: Transformer, capacity: int) -> None:
         self.m = model
-        d = len(model.layout)
         self.n = 0
-        self.x_in = [np.zeros((capacity, d)) for _ in model.layers]
+        self.cap = capacity
         self.keys = [[np.zeros((capacity, h.w_k.shape[1])) for h in layer.heads] for layer in model.layers]
+        self.vals = [[np.zeros((capacity, h.w_v.shape[1])) for h in layer.heads] for layer in model.layers]
 
     def _grow(self) -> None:
         """Double the capacity (amortised O(1) per token)."""
-        for li in range(len(self.x_in)):
-            self.x_in[li] = np.concatenate([self.x_in[li], np.zeros_like(self.x_in[li])])
+        for li in range(len(self.keys)):
             self.keys[li] = [np.concatenate([k, np.zeros_like(k)]) for k in self.keys[li]]
-        log.debug("decode cache grown to %d positions", len(self.x_in[0]))
+            self.vals[li] = [np.concatenate([v, np.zeros_like(v)]) for v in self.vals[li]]
+        self.cap *= 2
+        log.debug("decode cache grown to %d positions", self.cap)
 
     def step(self, token: int) -> np.ndarray:
         """Append one token; return its next-byte logits."""
-        if self.n == len(self.x_in[0]):
+        if self.n == self.cap:
             self._grow()
         m, q = self.m, self.n
         x = m.embed[token] + m.positional(q + 1)[q]
         for li, layer in enumerate(m.layers):
-            self.x_in[li][q] = x
-            xs = self.x_in[li][: q + 1]
             delta = np.zeros_like(x)
             for hi, h in enumerate(layer.heads):
-                k = self.keys[li][hi]
+                k, v = self.keys[li][hi], self.vals[li][hi]
                 k[q] = x @ h.w_k
+                v[q] = x @ h.w_v
                 scores = k[: q + 1] @ (x @ h.w_q)
                 scores -= scores.max()
                 attn = np.exp(scores)
                 attn /= attn.sum()
-                delta += ((attn @ xs) @ h.w_v) @ h.w_o
+                delta += (attn @ v[: q + 1]) @ h.w_o
             x = x + delta
             if layer.w_in.shape[1]:
                 x = x + np.maximum(x @ layer.w_in, 0.0) @ layer.w_out

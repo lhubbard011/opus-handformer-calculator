@@ -190,6 +190,25 @@ class TestWebParity(unittest.TestCase):
         bad = self.node([["/api/run", {"expression": "int\x01x;"}]], c_dir)
         self.assertIn("unsupported characters", bad[0]["error"])
 
+    def test_parse_matches(self):
+        """The parser: same records, step values and traces in both engines, and a knockout of the stack head."""
+        p_dir = self.tmp / "parse"
+        export_web.export(p_dir, "parse")
+        r = Runner("parse")
+        for src, ko in (("i(x){x+1;} e ;", None), ("{ x; }}", None), ("w(x) x;", {"heads": [[5, 0]]})):
+            with self.subTest(src=src, ko=ko):
+                py = r.run(src, ko)
+                q = len(py["chars"]) - 30
+                req = [["/api/run", {"expression": src, **({"knockout": ko} if ko else {})}],
+                       ["/api/position", {"run_id": "$run", "q": q}]]
+                js = self.node(req, p_dir)
+                self.assertNotIn("error", js[0], js[0])
+                self.assertEqual(js[0]["chars"], py["chars"])
+                for a, b in zip(js[0]["steps"], py["steps"]):
+                    self.assertEqual(a["pred"], b["pred"])
+                    close_dict(a["v"], b["v"], "parse step")
+                close(js[1]["values"], r.position(py["run_id"], q)["values"], f"parse values q={q}")
+
     def test_weights_match(self):
         r = self.runner
         cases = [("embed", None, None), ("unembed", None, None), ("wq", 4, 0), ("wk", 2, 1), ("wov", 7, 2),

@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from .. import arith, common as cm, csyntax, expr, frame, life
+from .. import arith, common as cm, cparse, csyntax, expr, frame, life
 
 CALC_MARKS = ("Ls", "F", "p", "c", "o", "a_lo", "b_hi", "E", "S", "Rb", "P", "R")
 CALC_SUMMARY = (*CALC_MARKS, "phase1", "phase2", "phase4", "act_add", "act_sub", "act_mul", "act_div", "act_pow",
@@ -68,6 +68,7 @@ class ModelDef:
     prompt_end: str = "="  # the byte that ends the prompt
     max_input: int = 400
     multiline: bool = False  # the page shows a code box instead of a one-line input
+    node_names: tuple[tuple[str, str], ...] = ()  # parser: node code -> name (the page's tree view)
 
 
 C_SAMPLE = """#include <stdio.h>
@@ -85,6 +86,10 @@ int main(void) {
 """
 C_SUMMARY = ("E", *(f"r_{r.name}" for r in csyntax.RULES), "r_end", "kw", "norm")
 
+PARSE_MARKS = ("E", "Lsep", "la_pos", "mpos")
+PARSE_SUMMARY = (*PARSE_MARKS, "first", "isclose", *(f"r_{r.name}" for r in cparse.circuit.rules(cparse.TABLE)))
+PARSE_MAX_INPUT = 80  # about 140 output bytes per token: 80 bytes of source is ~10k bytes of records
+
 MODELS = {
     "calc": ModelDef("calc", "calculator", arith.builder, _calc_prompt, _calc_category, CALC_MARKS, CALC_SUMMARY,
                      {}, 3000, "2+3*(4-1)", "an expression: + - * / ^ ( ), decimals, ~N for division precision",
@@ -101,4 +106,11 @@ MODELS = {
                   "".join(sorted(csyntax.circuit.ALLOWED)), csyntax.circuit.CHARS_HINT, csyntax.circuit.PATTERN,
                   csyntax.circuit.PATTERN_ERROR, strip_spaces=False, prompt_end="\x03",
                   max_input=csyntax.circuit.MAX_SOURCE, multiline=True),
+    "parse": ModelDef("parse", "parser (stage 1: toy C)", cparse.builder, cparse.prompt, cparse.circuit.category,
+                      PARSE_MARKS, PARSE_SUMMARY, cparse.circuit.docs(cparse.TABLE), PARSE_MAX_INPUT * 140 + 64,
+                      "i(x){x+1;} e ;",
+                      "toy C: { } ( ) ; + x 1, i=if e=else w=while; the model writes one record per parser action",
+                      "".join(chr(c) for c in range(32, 127)) + "\t\n", "(printable ASCII)", r"\S",
+                      "empty source", strip_spaces=False, prompt_end="\x03", max_input=PARSE_MAX_INPUT,
+                      node_names=tuple(cparse.toy.NAMES.items())),
 }

@@ -4,7 +4,7 @@ In any Markdown file, write a reference with an empty or any text:
 
     [](src:add.carry)        a named location from docs/links.toml
     [](src:dim:inB)          where a residual dim is written (from the model itself)
-    [](src:dim:c:r_str)      the same for another model's dim (calc, life, c: handformer/viz/models.py)
+    [](src:dim:c:r_str)      the same for another model's dim (calc, life, c, parse: handformer/viz/models.py)
 
 and run
 
@@ -33,7 +33,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 MAP = ROOT / "docs" / "links.toml"
-DOCS = ("README.md", "DESIGN.md", "HELLO.md", "LIFE.md", "CSYNTAX.md")
+DOCS = ("README.md", "DESIGN.md", "HELLO.md", "LIFE.md", "CSYNTAX.md", "CPARSE.md", "docs/PARSER_DESIGN.md")
 
 log = logging.getLogger("doclinks")
 

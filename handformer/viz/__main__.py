@@ -14,7 +14,7 @@ log = logging.getLogger("handformer.viz")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Step-through visualizer for the hand-written transformers (calculator, Game of Life)")
+    parser = argparse.ArgumentParser(description="Step-through visualizer for the hand-written transformers (calculator, Game of Life, C highlighter, parser)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8768)
     parser.add_argument("--log-level", default="INFO")

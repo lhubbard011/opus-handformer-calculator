@@ -1069,3 +1069,21 @@ are their group minus their siblings, so exactly one rule dim is 1 at every byte
 one AND unit per C11 keyword over gathered letters at the word's first byte. Because the start
 byte is a newline like those in the source, the "no match yet" fallback of its landmark tags is a
 position test (ReLU(1 − pos)) instead of `is_bos`.
+
+## 33. A fourth model: a parser (`handformer/cparse/`, `CPARSE.md`, `docs/PARSER_DESIGN.md`)
+
+An LL(1) parser for a C-shaped toy grammar, stage 1 of a C89 syntax checker. A grammar is data
+(EBNF bodies); `grammar.py` compiles it to minimal automata whose states are the items, and to
+an LL(1) table; `circuit.py` turns any table into weights. The output is one fixed-width record
+per action (action, symbol, depth, pointer, item, return item), because depth and input position
+are counts and attention cannot count: each step gathers the previous record's fields at fixed
+offsets from the latest `|`. The lookahead is a forward search (`next_match_head`: the token
+start whose previous token start is the pointer). One rule per table entry and one default per
+item (close or error) fire as AND units, exactly one per byte. A close pops the stack with one
+head: the latest open record whose depth equals the current depth, found by the score
+A·(d² − (d_k − d)²) + C·pos over keys that are the `|` of open records (gated depth, depth² and
+position), exact for depth ≤ 999 and sequences ≤ 10⁵ bytes. The byte to write is a code in the dim
+`out` (each field a gated sum: the rule's constant or a digit chosen by its flags, digits of
+depth ± 1 and of the lookahead position by `floor_div_head`); the unembedding is the quadratic
+K·(2·b·out − b²), so the nearest byte code wins. Decoding caches each head's values (x·W_V) as the
+JS engine does, which the parser's long outputs need.

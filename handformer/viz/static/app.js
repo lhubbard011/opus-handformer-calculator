@@ -28,6 +28,7 @@ const MARK_LABELS_BY = {
   calc: { Ls: "Ls", F: "[", p: "p", c: "c", o: "o", a_lo: "a_lo", b_hi: "b_hi", E: "=", S: ";", Rb: "]" },
   life: { C: ":", cell: "cell", nb: "nb" },
   c: { E: "end", src: "src" },
+  parse: { E: "end", Lsep: "rec", la_pos: "next", mpos: "pop" },
 };
 
 const state = {
@@ -104,7 +105,7 @@ function focusSet() {
   if (s.phase === "op" && s.op) set.add(s.op);
   return set;
 }
-const focused = (circuit) => !$("focus").checked || state.model === "c" || focusSet().has(circuit);
+const focused = (circuit) => !$("focus").checked || ["c", "parse"].includes(state.model) || focusSet().has(circuit);
 
 // One tooltip for every element carrying data-tip (list rows, tags, bytes, controls).
 function wireTips() {
@@ -259,8 +260,41 @@ function summarizeC(run, q, raw) {
   return { q, phase: C_CLASS[p] || "punct", op: null, pred: p, explain, marks: { E, src }, rule: fired[0] };
 }
 
+// Parser: which field of which record is being written, and the one rule that fired. A record is
+// 20 bytes at fixed offsets (handformer/cparse/circuit.py); Lsep is the '|' that ends the previous one.
+const REC = 20;
+const REC_FIELD = ["the action", "the symbol", "a space", "the depth", "the depth", "the depth", "a space", "the pointer",
+  "the pointer", "the pointer", "the pointer", "a space", "the item", "the item", "the item", "a space",
+  "the return item", "the return item", "the return item", "the record's end '|'"];
+const REC_ACT = { O: "open", T: "token", C: "close", "!": "error" };
+function summarizeParse(run, q, raw) {
+  const v = raw.v, r = Math.round, p = raw.pred;
+  if (q < run.prompt_len - 1) return { q, phase: "prompt", op: null, pred: p, explain: "Part of the source you gave: input, not predicted.", marks: {} };
+  const E = r(v.E), L = r(v.Lsep), o = q - L, n = (L - E) / REC + 1, la = r(v.la_pos);
+  const fired = Object.keys(v).filter((k) => k.startsWith("r_") && v[k] > 0.5);
+  const doc = (k) => (dimDoc(k)?.doc || k).replace(/\.$/, "");
+  const act = o === 0 ? p : run.chars[L + 1];
+  const halt = o === 0 && p === "\n";
+  const phase = halt ? "halt" : REC_ACT[act] || "token";
+  const rule = fired.length === 1 ? doc(fired[0]) : `rules ${fired.join(", ") || "(none)"}`;
+  const tok = la < E ? JSON.stringify(run.chars[la]) : la === E ? "the end ($)" : "nothing";
+  const marks = { E, Lsep: L, la_pos: la };
+  let explain;
+  if (halt) explain = `${rule}.`;
+  else {
+    explain = `Record ${n}, offset ${o}: writing ${REC_FIELD[o]} (${JSON.stringify(p)}). ${rule}. Lookahead: ${tok}` +
+      (la < E ? ` at ${la}.` : ".");
+    if (v.isclose > 0.5) {
+      marks.mpos = r(v.mpos);
+      explain += ` The stack head found the open record ending at ${r(v.mpos)} (the latest open at this depth): its return item is the parent's next item.`;
+    }
+  }
+  return { q, phase, op: null, pred: p, explain, marks, rule: fired[0] };
+}
+
 const summarizeStep = (run, q, raw) => (state.model === "life" ? summarizeLife(run, q, raw)
-  : state.model === "c" ? summarizeC(run, q, raw) : summarize(run, q, raw));
+  : state.model === "c" ? summarizeC(run, q, raw) : state.model === "parse" ? summarizeParse(run, q, raw)
+  : summarize(run, q, raw));
 const phaseClass = (s) => (s.phase === "op" ? `ph-${s.op || "prompt"}` : `ph-${s.phase}`);
 
 // ------------------------------------------------------------------ runs
@@ -270,6 +304,8 @@ const GRAPH_CIRCUITS = {
          ["add", "add"], ["sub", "sub"], ["mul", "mul"], ["div", "div"], ["pow", "pow"]],
   life: [["life", "game of life"]],
   c: [["rules", "the rules"], ["lookups", "lookups"], ["keywords", "keywords"], ["landmarks", "landmarks"]],
+  parse: [["rules", "the rules"], ["stack", "the stack search"], ["lookahead", "the lookahead"],
+          ["record", "record fields"], ["landmarks", "landmarks"]],
 };
 
 /** Show the parts of the page that belong to the current model (legend, guide, graph menu, input hint). */
@@ -321,6 +357,13 @@ function answerOf(run) {
   if (state.model === "c") {
     const written = run.chars.length - run.prompt_len - (run.finished ? 1 : 0), source = run.prompt_len - 2;
     return `${written} of ${source} source bytes classified` + (run.finished ? "" : " (did not finish)");
+  }
+  if (state.model === "parse") {
+    const recs = parseRecords(run.chars, run.prompt_len - 1, run.chars.length - 1);
+    const last = recs[recs.length - 1];
+    const verdict = !run.finished ? "did not finish" : last?.act === "!" ? `syntax error at ${last.ptr}`
+      : last?.act === "C" && last.depth === 0 ? "parsed" : "stopped early";
+    return `${recs.length} records · ${verdict}`;
   }
   const raw = state.model === "life" ? (text.trim().split("=").filter(Boolean).pop() || "").split(":").pop()
     : text.split("]").pop().trim();
@@ -672,6 +715,89 @@ function renderCode() {
   }
 }
 
+// ------------------------------------------------------------------ parse tree view
+/** The complete records in chars (E = the end marker's position) whose '|' is at or before ``upto``. */
+function parseRecords(chars, E, upto) {
+  const out = [];
+  for (let s = E + 1; s + REC - 1 <= upto && chars[s + REC - 1] === "|"; s += REC) {
+    const t = chars.slice(s, s + REC).join("");
+    out.push({ start: s, act: t[0], sym: t[1], depth: +t.slice(3, 6), ptr: +t.slice(7, 11), item: +t.slice(12, 15),
+      ret: t.slice(16, 19) === "..." ? null : +t.slice(16, 19) });
+  }
+  return out;
+}
+// The tree spelled by the records written so far (display only: the model's own text). The node
+// being opened or closed now is outlined; the source shows consumed tokens and the lookahead.
+function renderTree() {
+  const panel = $("p-tree");
+  panel.hidden = state.model !== "parse";
+  if (panel.hidden || !state.run) return;
+  const run = state.run, q = state.q, E = run.prompt_len - 1, s = run.steps[q];
+  const names = state.info.node_names || {};
+  const recs = parseRecords(run.chars, E, q + 1);
+  const last = recs[recs.length - 1];
+  // source: consumed (up to the last record's pointer), the lookahead outlined
+  const src = $("tree-src");
+  src.replaceChildren();
+  const done = last && last.act !== "!" ? last.ptr : 0;
+  for (let i = 1; i < E; i++) {
+    const sp = document.createElement("span");
+    sp.textContent = run.chars[i];
+    sp.className = i <= done ? "t-done" : "later";
+    if (i === s.marks?.la_pos) sp.classList.add("now");
+    if (last?.act === "!" && i === last.ptr) sp.classList.add("t-bad");
+    sp.dataset.tip = `source byte ${i} ${JSON.stringify(run.chars[i])}` + (i <= done ? " (consumed)" : "") +
+      (i === s.marks?.la_pos ? "\nthe lookahead: the first token after the pointer" : "");
+    src.append(sp);
+  }
+  // tree
+  const view = $("tree-view");
+  view.replaceChildren();
+  const stack = [view];
+  const nowStart = s.marks?.Lsep !== undefined ? s.marks.Lsep + 1 : -1; // the record being written starts here
+  for (const rc of recs) {
+    const parent = stack[stack.length - 1];
+    if (rc.act === "O") {
+      const node = document.createElement("div");
+      node.className = "tnode";
+      const head = document.createElement("span");
+      head.className = "thead";
+      head.textContent = `${rc.sym} ${names[rc.sym] || ""}`;
+      head.dataset.tip = `node ${rc.sym} (${names[rc.sym] || "?"}), opened by the record at ${rc.start} (depth ${rc.depth}, ` +
+        `continues at item ${rc.ret} when it closes)\n(click to step to that record)`;
+      head.addEventListener("click", () => goto(rc.start - 1));
+      node.append(head);
+      parent.append(node);
+      stack.push(node);
+    } else if (rc.act === "C") {
+      const node = stack.pop();
+      if (node && node !== view) node.classList.add("closed");
+    } else if (rc.act === "T") {
+      const t = document.createElement("span");
+      t.className = "ttok";
+      t.textContent = rc.sym === "$" ? "$" : rc.sym;
+      t.dataset.tip = `token ${JSON.stringify(rc.sym)} at source byte ${rc.ptr}, consumed by the record at ${rc.start}`;
+      t.addEventListener("click", () => goto(rc.start - 1));
+      parent.append(t);
+    } else {
+      const t = document.createElement("span");
+      t.className = "ttok t-bad";
+      t.textContent = `syntax error at ${rc.ptr}`;
+      parent.append(t);
+    }
+  }
+  // the innermost open node is where the next record acts
+  const cur = stack[stack.length - 1];
+  if (cur !== view) cur.classList.add("open-now");
+  const wrote = run.chars.slice(nowStart, q + 2).join("");
+  $("tree-caption").textContent = s.phase === "prompt" ? "" : `· record so far: ${JSON.stringify(wrote)}` + (s.rule ? ` · rule ${s.rule.slice(2)}` : "");
+  const now = view.querySelector(".open-now > .thead") || view.lastElementChild;
+  if (now) {
+    const r = now.getBoundingClientRect(), rv = view.getBoundingClientRect();
+    if (r.top < rv.top || r.bottom > rv.bottom) view.scrollTop += r.top - rv.top - rv.height / 2;
+  }
+}
+
 function renderStep() {
   const run = state.run;
   const s = run.steps[state.q];
@@ -680,6 +806,7 @@ function renderStep() {
   $("explain").textContent = s.explain;
   renderBoard();
   renderCode();
+  renderTree();
   $("explain").style.borderLeftColor = getComputedStyle(document.documentElement)
     .getPropertyValue(`--${phaseClass(s)}`) || "var(--accent)";
   const m = $("marks");
@@ -1515,7 +1642,7 @@ async function main() {
   if (matchMedia("(max-width: 700px)").matches) $("map-howto").open = false; // long on a phone; one tap opens it
   try {
     const v = readHash();
-    if (["calc", "life", "c"].includes(v.m)) state.model = v.m;
+    if (Object.keys(MARK_LABELS_BY).includes(v.m)) state.model = v.m;
     await loadInfo();
     applyModelChrome();
     if (!v.e) setInput(state.info.default_input);

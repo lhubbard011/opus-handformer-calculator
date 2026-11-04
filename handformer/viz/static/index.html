@@ -9,8 +9,8 @@
 <body>
   <header class="topbar">
     <div class="brand">handformer <span class="brand-sub">visualizer</span></div>
-    <select id="model-sel" aria-label="Model" data-tip="Which hand-written model to look at. Both are built with the same engine and primitives, and every view below works for either.">
-      <option value="calc">calculator</option><option value="life">game of life</option><option value="c">C syntax highlighter</option>
+    <select id="model-sel" aria-label="Model" data-tip="Which hand-written model to look at. All are built with the same engine and primitives, and every view below works for each.">
+      <option value="calc">calculator</option><option value="life">game of life</option><option value="c">C syntax highlighter</option><option value="parse">parser (stage 1)</option>
     </select>
     <form id="expr-form" class="prompt">
       <input id="expr-input" type="text" value="2+3*(4-1)" spellcheck="false" autocomplete="off" aria-label="Expression">
@@ -46,6 +46,10 @@
         <span class="lg ph-number" data-tip="A number (pp-number: digits, letters, '.', exponent signs).">number</span><span class="lg ph-string" data-tip="A string literal, its escapes and quotes.">string</span>
         <span class="lg ph-char" data-tip="A character constant.">char</span><span class="lg ph-comment" data-tip="A block or line comment.">comment</span>
         <span class="lg ph-preproc" data-tip="A preprocessing directive: a line starting with '#'.">directive</span><span class="lg ph-punct" data-tip="A punctuator or operator.">punct</span>
+      </span>
+      <span class="legend" data-model="parse" hidden>
+        <span class="lg ph-open" data-tip="A record that opens a node: the rule for (item, lookahead) says this token starts a child.">open</span><span class="lg ph-token" data-tip="A record that consumes the lookahead token.">token</span>
+        <span class="lg ph-close" data-tip="A record that closes a node: the parent's item comes from the open record at this depth (the stack search).">close</span><span class="lg ph-error" data-tip="A syntax error record: no rule continues with this token.">error</span>
       </span>
       <span class="legend" data-model="life" hidden>
         <span class="lg ph-prompt" data-tip="The count and the starting grid you typed.">prompt</span><span class="lg ph-cell" data-tip="A cell of the next generation, from the rule: born with 3 live neighbours, survives with 2 or 3.">cell</span>
@@ -151,6 +155,13 @@
     <div class="panel-title" data-tip="The source coloured by the state letters the model has written so far. The outlined byte is the one being classified now; click any byte to step to it.">Code
       <span class="muted small" id="code-caption"></span></div>
     <pre id="code-view" class="code-view"></pre>
+  </section>
+
+  <section id="p-tree" data-pin="Tree" class="panel wide tree-panel" hidden>
+    <div class="panel-title" data-tip="The parse tree spelled by the records the model has written so far, and the source with the consumed tokens and the lookahead (outlined). The node the next record acts in is outlined; click a node or token to step to its record.">Tree
+      <span class="muted small" id="tree-caption"></span></div>
+    <pre id="tree-src" class="code-view tree-src"></pre>
+    <div id="tree-view" class="tree-view"></div>
   </section>
 
   <section id="p-board" data-pin="Board" class="panel wide board-panel" hidden>
