@@ -3,7 +3,7 @@
 // is the computation at position q that produced byte q+1.
 
 import { decodeF16, SEQ, DIV } from "./render.js";
-import { drawHeatmap, attachHeatmapEvents } from "./heatmap.js";
+import { drawHeatmap, attachHeatmapEvents, isTouch, showSheet, hideSheet } from "./heatmap.js";
 import { LocalApi } from "./local-api.js";
 
 const $ = (id) => document.getElementById(id);
@@ -84,19 +84,32 @@ const focused = (circuit) => !$("focus").checked || focusSet().has(circuit);
 // One tooltip for every element carrying data-tip (list rows, tags, bytes, controls).
 function wireTips() {
   const tip = $("tooltip");
+  // Touch: tapping anything with an explanation shows it (and still does the tap's
+  // normal action); tapping the explanation or anywhere else closes it.
+  let touchAt = 0;
+  document.addEventListener("pointerdown", (e) => { if (e.pointerType !== "mouse") touchAt = Date.now(); }, true);
+  const touching = () => Date.now() - touchAt < 1000;
+  document.addEventListener("click", (e) => {
+    if (!touching() || e.target.closest("canvas")) return;
+    const el = e.target.closest("[data-tip]");
+    if (el && !e.target.closest("#tooltip")) showSheet(tip, el.dataset.tip);
+    else hideSheet(tip);
+  });
   document.addEventListener("mouseover", (e) => {
+    if (touching()) return;
     const el = e.target.closest("[data-tip]");
     if (!el || e.target.closest("canvas")) return;
     tip.textContent = el.dataset.tip;
     tip.hidden = false;
   });
   document.addEventListener("mousemove", (e) => {
-    if (tip.hidden || e.target.closest("canvas")) return;
+    if (touching() || tip.hidden || e.target.closest("canvas")) return;
     const pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
     tip.style.left = `${Math.min(e.clientX + pad, innerWidth - w - 8)}px`;
     tip.style.top = `${Math.min(e.clientY + pad, innerHeight - h - 8)}px`;
   });
   document.addEventListener("mouseout", (e) => {
+    if (touching()) return;
     if (e.target.closest("[data-tip]") && !e.relatedTarget?.closest?.("[data-tip]")) tip.hidden = true;
   });
 }
@@ -508,13 +521,15 @@ const HOWTO = {
   },
 };
 
+const TOUCH_HINT = "On a touch screen, <b>tap</b> a cell to read it and tap the same cell again to do its click action; swipe sideways to scroll the map.";
+
 function renderHowto() {
   const h = HOWTO[state.map];
   const list = (items) => `<ul>${items.map((t) => `<li>${t}</li>`).join("")}</ul>`;
   $("map-howto-body").innerHTML = h ? `<div class="howto-grid">
       <div><h4>What you see</h4>${list(h.see)}</div>
       <div><h4>How to read it</h4>${list(h.read)}</div>
-      <div><h4>Try this</h4>${list(h.try)}</div></div>` : "";
+      <div><h4>Try this</h4>${list(isTouch() ? [...h.try, TOUCH_HINT] : h.try)}</div></div>` : "";
 }
 
 async function renderMap(p) {
@@ -670,8 +685,22 @@ function wire() {
   });
 }
 
+/** Phones: the step controls are a fixed bottom bar; keep its height in --bar-h for padding. */
+function trackBar() {
+  const bar = document.querySelector(".controls");
+  const set = () => {
+    const fixed = getComputedStyle(bar).position === "fixed";
+    document.documentElement.style.setProperty("--bar-h", fixed ? `${bar.offsetHeight}px` : "0px");
+  };
+  new ResizeObserver(set).observe(bar);
+  window.addEventListener("resize", set);
+  set();
+}
+
 async function main() {
   wire();
+  trackBar();
+  if (matchMedia("(max-width: 700px)").matches) $("map-howto").open = false; // long on a phone; one tap opens it
   try {
     await loadInfo();
     setStatus(`${state.info.layers.length} layers · d_model ${state.info.d_model} · ${state.info.nonzero_params} hand-written params`);

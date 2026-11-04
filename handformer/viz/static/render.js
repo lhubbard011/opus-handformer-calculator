@@ -79,8 +79,10 @@ export function matrixBitmap(rows, cols, get, norm, lut) {
 }
 
 // Size a canvas for CSS pixels × devicePixelRatio and return a context in CSS-pixel units.
+const MAX_CANVAS_PIXELS = 16e6; // iOS Safari refuses larger canvases (blank map)
+
 export function setupCanvas(canvas, cssW, cssH) {
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = Math.min(window.devicePixelRatio || 1, Math.sqrt(MAX_CANVAS_PIXELS / Math.max(1, cssW * cssH)));
   canvas.style.width = `${cssW}px`;
   canvas.style.height = `${cssH}px`;
   canvas.width = Math.max(1, Math.round(cssW * dpr));

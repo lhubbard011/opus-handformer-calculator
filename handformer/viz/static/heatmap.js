@@ -3,15 +3,21 @@
 import { matrixBitmap, setupCanvas, lutCss } from "./render.js";
 
 const GUTTER = 128; // px reserved for row labels
+// Touch screens: cells at least this big (the map scrolls sideways inside its panel).
+const TOUCH_COL = 8, TOUCH_ROW = 5, TOUCH_MAX_W = 4000;
+export const isTouch = () => matchMedia("(pointer: coarse)").matches;
 
 // spec: { key, rows, cols, get(r,c) -> raw, norm(raw) -> [0,1], lut, rowLabels[], groups[{row,label}],
 //         colLabel(c), valueText(r,c), onClick(r,c), square }
 // view: { q } current query position (column, or row for attention)
 export function drawHeatmap(canvas, spec, view) {
   const wrap = canvas.parentElement;
-  const cssW = Math.max(240, wrap.clientWidth - 2);
+  const touch = isTouch();
+  let cssW = Math.max(240, wrap.clientWidth - 2);
+  if (touch && spec.cols) cssW = Math.max(cssW, GUTTER + Math.min(TOUCH_MAX_W, spec.cols * TOUCH_COL));
   const plotW = cssW - GUTTER;
-  const rowH = spec.square ? plotW / spec.cols : Math.max(3, Math.min(12, 560 / Math.max(1, spec.rows)));
+  const rowH = spec.square ? plotW / spec.cols
+    : Math.max(touch ? TOUCH_ROW : 3, Math.min(12, 560 / Math.max(1, spec.rows)));
   const plotH = spec.square ? plotW : rowH * spec.rows;
   const cssH = Math.max(40, plotH + 18);
   const ctx = setupCanvas(canvas, cssW, cssH);
@@ -86,7 +92,13 @@ export function attachHeatmapEvents(canvas, tooltip) {
     if (x < 0 || y < 0 || x >= g.plotW || y >= g.plotH) return null;
     return [Math.floor(y / g.rowH), Math.floor(x / g.colW)];
   };
+  // Touch: the first tap on a cell shows its readout, a second tap on the same cell
+  // does what a mouse click does. Compatibility mouse events after a touch are ignored.
+  let touchAt = 0, tapped = null;
+  canvas.addEventListener("pointerdown", (e) => { if (e.pointerType !== "mouse") touchAt = Date.now(); });
+  const touching = () => Date.now() - touchAt < 1000;
   canvas.addEventListener("mousemove", (e) => {
+    if (touching()) return;
     const rc = cell(e);
     if (!rc) { tooltip.hidden = true; return; }
     const { spec } = canvas._geom;
@@ -96,11 +108,35 @@ export function attachHeatmapEvents(canvas, tooltip) {
     tooltip.style.left = `${e.clientX + 14}px`;
     tooltip.style.top = `${e.clientY + 10}px`;
   });
-  canvas.addEventListener("mouseleave", () => { tooltip.hidden = true; });
+  canvas.addEventListener("mouseleave", () => { if (!touching()) tooltip.hidden = true; });
   canvas.addEventListener("click", (e) => {
     const rc = cell(e);
+    if (touching()) {
+      if (!rc) { tapped = null; hideSheet(tooltip); return; }
+      const key = `${canvas._geom.spec.key}:${rc}`;
+      if (tapped !== key) {
+        tapped = key;
+        showSheet(tooltip, canvas._geom.spec.valueText(...rc) + (canvas._geom.spec.onClick ? "\n\n(tap the same cell again to jump there)" : ""));
+        return;
+      }
+      tapped = null;
+      hideSheet(tooltip);
+    }
     if (rc && canvas._geom.spec.onClick) canvas._geom.spec.onClick(...rc);
   });
+}
+
+/** Touch tooltip: docked above the bottom step bar instead of following a cursor. */
+export function showSheet(tooltip, text) {
+  tooltip.textContent = text;
+  tooltip.classList.add("sheet");
+  tooltip.style.left = tooltip.style.top = "";
+  tooltip.hidden = false;
+}
+
+export function hideSheet(tooltip) {
+  tooltip.hidden = true;
+  tooltip.classList.remove("sheet");
 }
 
 export { lutCss };

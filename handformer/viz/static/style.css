@@ -137,3 +137,46 @@ input[type=text], select {
   border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; font: 12px/1.45 var(--sans); white-space: pre-wrap; max-width: min(440px, calc(100vw - 24px)); box-shadow: 0 6px 24px rgba(0,0,0,.45);
 }
 .row.dim { opacity: .35; }
+
+/* ---------- touch and small screens: same features, laid out for a phone ---------- */
+:root { --bar-h: 0px; }
+.map-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.tooltip.sheet {
+  left: 8px; right: 8px; top: auto; bottom: calc(var(--bar-h) + 8px + env(safe-area-inset-bottom));
+  max-width: none; max-height: 45vh; overflow-y: auto; pointer-events: auto; font-size: 13px;
+}
+@media (pointer: coarse) {
+  button, select { min-height: 36px; }
+  .chip { min-width: 22px; padding: 4px; }
+  .row { padding: 5px 4px; }
+}
+@media (max-width: 700px) {
+  html, body { font-size: 14px; }
+  body { padding-bottom: calc(var(--bar-h) + env(safe-area-inset-bottom)); }
+  input[type=text], select { font-size: 16px; } /* below 16px iOS zooms the page on focus */
+  .topbar { padding: 8px 10px; gap: 8px; }
+  .prompt { flex-basis: 100%; }
+  .status { flex-basis: 100%; }
+  .controls {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; justify-content: center;
+    padding: 6px 8px calc(6px + env(safe-area-inset-bottom)); background: var(--panel);
+    border-top: 1px solid var(--border); box-shadow: 0 -4px 16px rgba(0,0,0,.4);
+  }
+  .controls label { font-size: 12px; }
+  .sequence { padding: 8px 10px; }
+  .legend { width: 100%; }
+  .token-strip { font-size: 14px; max-height: 200px; }
+  .grid { padding: 8px; gap: 8px; }
+  .panel.wide { margin: 0 8px 10px; }
+  .scroll { max-height: 55vh; }
+  .head-row { grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; }
+  .head-row .wrote { grid-column: 1 / -1; white-space: normal; overflow-wrap: anywhere; padding-left: 8px; }
+  .dim-row { grid-template-columns: minmax(0, 1fr) 84px 64px; }
+  .unit-row { grid-template-columns: 44px 64px minmax(0, 1fr); }
+  .unit-row .f { overflow-wrap: anywhere; }
+  .map-controls { flex-wrap: wrap; width: 100%; }
+  .howto-grid { font-size: 13px; }
+}
+@media (max-width: 380px) {
+  .marks { grid-template-columns: repeat(2, 1fr); }
+}
