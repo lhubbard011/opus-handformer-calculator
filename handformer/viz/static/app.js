@@ -3,7 +3,7 @@
 // is the computation at position q that produced byte q+1.
 
 import { decodeF16, SEQ, DIV } from "./render.js";
-import { drawHeatmap, attachHeatmapEvents, isTouch, showSheet, hideSheet } from "./heatmap.js";
+import { drawHeatmap, attachHeatmapEvents, isTouch, showSheet, hideSheet, setTip } from "./heatmap.js";
 import { LocalApi } from "./local-api.js";
 import { drawGraph, drawOverview } from "./graph.js";
 
@@ -97,14 +97,14 @@ function wireTips() {
   document.addEventListener("click", (e) => {
     if (!touching() || e.target.closest("canvas")) return;
     const el = e.target.closest("[data-tip]");
-    if (el && !e.target.closest("#tooltip")) showSheet(tip, el.dataset.tip);
+    if (el && !e.target.closest("#tooltip")) showSheet(tip, el.dataset.tip, el.dataset.tipPtr || "");
     else hideSheet(tip);
   });
   document.addEventListener("mouseover", (e) => {
     if (touching()) return;
     const el = e.target.closest("[data-tip]");
     if (!el || e.target.closest("canvas")) return;
-    tip.textContent = el.dataset.tip;
+    setTip(tip, el.dataset.tip, el.dataset.tipPtr || "");
     tip.hidden = false;
   });
   document.addEventListener("mousemove", (e) => {
@@ -239,9 +239,10 @@ function renderKnockouts() {
   lbl.className = "ko-label";
   lbl.textContent = "Knocked out:";
   bar.append(lbl);
-  for (const [l, h] of state.ko.heads) add(`L${l + 1} ${headSpec(l, h)?.name}`, "heads", [l, h], "This head still attends but writes nothing.");
-  for (const [l, u] of state.ko.units) add(`L${l + 1} unit #${u}`, "units", [l, u], state.info.layers[l].units[u]?.doc || "");
-  for (const d of state.ko.dims) add(d, "dims", d, `Nothing writes ${d}: it stays 0 everywhere.`);
+  // tooltip = the part's own description, then what the knockout does to it
+  for (const [l, h] of state.ko.heads) add(`L${l + 1} ${headSpec(l, h)?.name}`, "heads", [l, h], `${headSpec(l, h)?.doc || ""}\n\n${KO_NOTE.heads}`);
+  for (const [l, u] of state.ko.units) add(`L${l + 1} unit #${u}`, "units", [l, u], `${state.info.layers[l].units[u]?.doc || ""}\n\n${KO_NOTE.units}`);
+  for (const d of state.ko.dims) add(d, "dims", d, `${dimDoc(d)?.doc || ""}\n\n${KO_NOTE.dims}`);
   const got = answerOf(state.run), want = state.baseline.get(state.run.expression);
   const res = document.createElement("span");
   res.className = "ko-result" + (!state.running && want !== undefined && got !== want ? " changed" : "");
@@ -256,6 +257,14 @@ function renderKnockouts() {
   });
   bar.append(res, clear);
 }
+
+// What a knockout does to each kind of part, appended under the part's own description.
+const KO_NOTE = {
+  heads: "⊘ Knocked out in this run: it still attends, but its output is zeroed, so it writes nothing.",
+  units: "⊘ Knocked out in this run: it still fires, but its output is zeroed, so it adds nothing.",
+  dims: "⊘ Knocked out in this run: every write into it is zeroed, so it stays 0 at every position.",
+};
+const withKo = (kind, item, tip) => (koHas(kind, item) ? `${tip}\n\n${KO_NOTE[kind]}` : tip);
 
 /** A small "knock out / restore" button for the detail panels. */
 function koButton(kind, item) {
@@ -363,7 +372,7 @@ function renderStrip() {
   for (const [dim, label] of Object.entries(MARK_LABELS)) {
     const at = step.marks[dim];
     if (step.phase === "prompt" || step.phase === "open") break;
-    if (at >= 0 && at < run.chars.length) (marks[at] ||= []).push(label);
+    if (at >= 0 && at < run.chars.length) (marks[at] ||= []).push({ dim, label });
   }
   const srcs = new Set();
   const p = state.pos.get(q);
@@ -384,15 +393,18 @@ function renderStrip() {
     el.textContent = showChar(c);
     el.dataset.tip = `position ${i}: "${showChar(c)}"\n` + (i >= run.prompt_len
       ? `Written by the model at step ${i - 1} (${producer.phase}${producer.op ? ", " + producer.op + " calculator" : ""}).`
-      : "Part of the prompt you typed.") + (marks[i] ? `\nPointers to it right now: ${marks[i].join(", ")}` : "") +
-      "\n(click to step to this position)";
+      : "Part of the prompt you typed.") + "\n(click to step to this position)";
+    if (marks[i]) {  // the pointers drawn above this byte, spelled out (orange, like the tags)
+      el.dataset.tipPtr = "Pointers here at this step:\n" + marks[i].map(({ dim, label }) =>
+        `▲ ${label}${label !== dim ? ` (${dim})` : ""}: ${dimDoc(dim)?.doc || ""}`).join("\n");
+    }
     if (marks[i]) {
       const tags = document.createElement("span");
       tags.className = "tags";
-      marks[i].forEach((m) => {
+      marks[i].forEach(({ label }) => {
         const t = document.createElement("span");
         t.className = "tag";
-        t.textContent = m;
+        t.textContent = label;
         tags.appendChild(t);
       });
       el.appendChild(tags);
@@ -462,11 +474,12 @@ function renderHeads(p) {
     }
     const [k, w] = h.top[0];
     const row = document.createElement("div");
-    row.className = "row head-row";
+    row.className = "row head-row" + (koHas("heads", [h.layer, h.head]) ? " ko" : "");
     if (state.head && state.head[0] === h.layer && state.head[1] === h.head) row.classList.add("sel");
     const wrote = Object.entries(h.wrote).map(([d, v]) => `${d}=${fmt(v)}`).join(" ");
     row.dataset.tip = `layer ${h.layer + 1} · ${spec.name}\n${spec.doc}\n\nAt this step it reads position ${k} ("${showChar(state.run.chars[k])}") with ${(w * 100).toFixed(1)}% of its attention.` +
       (wrote ? `\nIt adds: ${wrote}` : "") + srcText(spec.src) + "\n(click for its formulas, source line and full attention pattern)";
+    row.dataset.tip = withKo("heads", [h.layer, h.head], row.dataset.tip);
     row.innerHTML = `<span>${spec.name}</span><span class="num">← ${k} ${showChar(state.run.chars[k])} ${w < 0.999 ? (w * 100).toFixed(0) + "%" : ""}</span><span class="wrote">${wrote}</span>`;
     row.addEventListener("click", () => {
       state.head = [h.layer, h.head];
@@ -528,8 +541,9 @@ function renderDims(p) {
     let written = 0;
     for (let s = 1; s < vals.length; s++) if (Math.abs(vals[s] - vals[s - 1]) > 1e-9) { written = s; break; }
     const row = document.createElement("div");
-    row.className = "row dim-row" + (state.openDim === d.name ? " sel" : "");
+    row.className = "row dim-row" + (state.openDim === d.name ? " sel" : "") + (koHas("dims", d.name) ? " ko" : "");
     row.dataset.tip = `${d.name} = ${fmt(final)}\n${d.doc}\n\nwritten by: ${d.written_by}\nread by: ${d.read_by}${srcText(d.src)}\n(click to see how it changes layer by layer)`;
+    row.dataset.tip = withKo("dims", d.name, row.dataset.tip);
     row.innerHTML = `<span>${d.name}</span><span class="num">${fmt(final)}</span><span class="muted small">${written ? labels[written] : "embed"}</span>`;
     row.addEventListener("click", () => {
       state.openDim = state.openDim === d.name ? null : d.name;
@@ -567,8 +581,9 @@ function renderUnits(p) {
       lastLayer = u.layer;
     }
     const row = document.createElement("div");
-    row.className = "row unit-row";
+    row.className = "row unit-row" + (koHas("units", [u.layer, u.unit]) ? " ko" : "");
     row.dataset.tip = `layer ${u.layer + 1} · unit #${u.unit}\n${spec.doc}\n\nReLU(${spec.read})\n= ${fmt(u.pre)} at this step → adds to ${spec.write}${srcText(spec.src)}`;
+    row.dataset.tip = withKo("units", [u.layer, u.unit], row.dataset.tip);
     row.innerHTML = `<span class="muted">#${u.unit}</span><span class="num">${fmt(u.pre)}</span><span class="f">ReLU(<b>${spec.read}</b>) → ${spec.write} </span>`;
     row.querySelector(".f").append(srcLinks(spec.src), koButton("units", [u.layer, u.unit]));
     el.appendChild(row);
@@ -848,6 +863,10 @@ function wire() {
   };
   $("w-layer").addEventListener("input", fillHeads);
   $("g-circuit").addEventListener("input", renderGraph);
+  document.querySelectorAll("#guide .try").forEach((b) => {
+    b.dataset.tip = "Set the visualizer up to show this (runs an example and opens the right view).";
+    b.addEventListener("click", () => tryIt(JSON.parse(b.dataset.try)).catch((e) => setStatus(e.message, true)));
+  });
   const pickHead = (layer, head) => {
     state.head = [layer, head];
     if (!state.pos.has(state.q)) return;
@@ -863,6 +882,15 @@ function wire() {
   }
   $("focus").addEventListener("change", () => state.run && goto(state.q));
   window.addEventListener("resize", () => state.pos.has(state.q) && renderMap(state.pos.get(state.q)));
+  // The overview fits the panel width (stages spread, or stacked on narrow screens): redraw it on resize.
+  let graphW = 0, graphTimer = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(graphTimer);
+    graphTimer = setTimeout(() => {
+      const w = $("graph").clientWidth;
+      if (w !== graphW && $("g-circuit").value === "all") { graphW = w; renderGraph(); }
+    }, 150);
+  });
   attachHeatmapEvents($("map"), $("tooltip"));
   $("show-zero").addEventListener("change", () => state.pos.has(state.q) && renderDims(state.pos.get(state.q)));
   document.addEventListener("keydown", (e) => {
@@ -900,6 +928,42 @@ function renderGraph() {
     "laid out by the layer that first writes each value (blue: an attention head moves it, orange: an MLP unit " +
     "computes it). Faded names come from other circuits. one, pos and pos² feed almost everything and are left out. " +
     "Hover an edge to see which heads or units it stands for.";
+}
+
+/** "Try it" buttons in the guide: set up an expression, step, map, head or knockout to show one idea. */
+async function tryIt(cfg) {
+  log("guide: try", JSON.stringify(cfg));
+  if (cfg.circuit) { $("g-circuit").value = cfg.circuit; renderGraph(); }
+  if (cfg.expr) {
+    $("expr-input").value = cfg.expr;
+    state.ko = { heads: [], units: [], dims: [] };
+    if (cfg.knockOutWriters) { // every unit of that layer that writes the named value
+      state.ko.units = state.info.layers[cfg.layer].units.map((u, i) => (u.writes.includes(cfg.knockOutWriters) ? [cfg.layer, i] : null))
+        .filter(Boolean);
+    }
+    await runExpression(cfg.expr);
+    if (cfg.phase) {
+      const q = state.run.steps.findIndex((s) => s.phase === cfg.phase);
+      if (q >= 0) await goto(q);
+    }
+  }
+  if (cfg.head) {
+    for (const L of state.info.layers) {
+      const h = L.heads.findIndex((x) => x.name === cfg.head);
+      if (h >= 0) { state.head = [L.index, h]; break; }
+    }
+  }
+  if (cfg.mlpLayer !== undefined) $("mlp-layer").value = cfg.mlpLayer;
+  if (cfg.map) {
+    document.querySelectorAll("[data-map]").forEach((x) => x.classList.toggle("active", x.dataset.map === cfg.map));
+    state.map = cfg.map;
+  }
+  if (state.pos.has(state.q)) {
+    const p = state.pos.get(state.q);
+    renderHeads(p); renderHeadDetail(p); await renderMap(p);
+  }
+  const target = cfg.scroll ? $(cfg.scroll) : cfg.map ? $("map") : $("tokens");
+  target?.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 /** Phones: the step controls are a fixed bottom bar; keep its height in --bar-h for padding. */

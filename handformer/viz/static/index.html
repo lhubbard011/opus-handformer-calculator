@@ -48,6 +48,84 @@
     <input id="scrubber" type="range" min="0" max="0" value="0" aria-label="Step">
   </section>
 
+  <details id="guide" class="howto guide">
+    <summary>Guide: the landmarks and tricks this model uses, and how to see each one here</summary>
+    <div class="guide-body">
+      <p>Every weight is written by hand, so every value has one meaning. The model works in
+        <b>steps</b>: at <code>=</code> it opens a frame <code>[</code>, copies the piece it will solve next,
+        works it out, closes with <code>]</code>, and writes the simpler line. Each byte it writes is one pass
+        through all 22 layers. Use <b>Step ▶</b> (or ← →) to walk through them.</p>
+
+      <h4>Landmarks (the orange tags above the bytes)</h4>
+      <p>A landmark is a <b>position</b> the model keeps as a number. The tags show where each one points at
+        the current step; hover or tap a byte to read them, or see them all in the <b>Pointers</b> box.</p>
+      <table class="guide-table">
+        <tr><td><code>Ls</code></td><td>start of the line being reduced (the <code>]</code> before it)</td></tr>
+        <tr><td><code>[</code> F · <code>]</code> Rb · <code>=</code> E · <code>;</code> S</td><td>latest
+          <code>[</code>, <code>]</code>, <code>=</code>, and <code>;</code>/<code>&lt;</code>: together they say which
+          job the model is doing (open a step, copy, calculate, rewrite)</td></tr>
+        <tr><td><code>p</code> · <code>c</code></td><td>the innermost group: its <code>(</code> (or the line start) and
+          the first <code>)</code> after it</td></tr>
+        <tr><td><code>o</code></td><td>the operator solved next: latest <code>^</code>, else first <code>*</code>
+          <code>/</code>, else first <code>+</code> <code>−</code> — that is the precedence rule</td></tr>
+        <tr><td><code>a_lo</code> · <code>b_hi</code></td><td>the bytes just outside the two numbers around
+          <code>o</code>: they fence the piece that is copied into the step</td></tr>
+      </table>
+      <p><b>How it finds the latest X:</b> an MLP unit tags every X byte with <code>2·(position+1)</code>; an attention
+        head scores keys by that tag, so the newest X wins and the head copies its position. The start byte scores 1,
+        so "none yet" reads position 0.
+        <button class="try" data-try='{"expr":"2+3*(4-1)","phase":"copy","map":"attention","head":"latest F"}'>show the staircase</button>
+        In the attention map the blue line climbs to each new <code>[</code> and stays there.</p>
+
+      <h4>Tricks with attention</h4>
+      <ul>
+        <li><b>Exact lookup:</b> the score −30·(key − t)² peaks at one position t that this byte computed, so the head
+          reads exactly that byte (a digit of an operand, the byte to copy).
+          <button class="try" data-try='{"expr":"47+38","phase":"op","map":"attention","head":"add:a_i"}'>see a_i read digit i of a</button></li>
+        <li><b>Forward search:</b> causal attention can only look back, yet <code>c</code> needs the first <code>)</code>
+          <i>after</i> p. Each byte stores where the previous match was; the target is the one match whose stored
+          pointer equals the latest match at p.
+          <button class="try" data-try='{"expr":"(1+2)*(3+4)","phase":"copy","map":"attention","head":"first ) after p"}'>see it</button></li>
+        <li><b>Products from a table of squares:</b> reading <code>pos²</code> at position x gives x², and
+          x·y = ((x+y)² − x² − y²)/2. Multiplication uses this to find where each line of working starts.</li>
+        <li><b>Division by attention:</b> <code>floor(x/s)</code> is the one position k where s·k is closest below x;
+          one head finds it.
+          <button class="try" data-try='{"expr":"123*45","phase":"op","map":"attention","head":"mul:j = floor(x/s)"}'>see j = floor(x/s)</button></li>
+      </ul>
+
+      <h4>Tricks with MLP units</h4>
+      <ul>
+        <li><b>Exact yes/no steps:</b> a pair of ReLUs makes clamp(4·(x − ½), 0, 1). For a whole-number input that is
+          exactly 0 or 1, even with ¼ of noise, so flags can safely switch other units on and off.
+          <button class="try" data-try='{"expr":"47+38","phase":"op","map":"mlp","mlpLayer":3}'>see the carry steps fire</button></li>
+        <li><b>Gating, not dispatch:</b> every calculator runs at every byte; its outputs are silenced
+          (−10⁶ on their input) unless its <code>act_…</code> flag is 1. <b>Focus active circuit</b> hides the
+          silenced ones; untick it to see all 147 heads.</li>
+        <li><b>The carry is recovered, never stored:</b> carry = [y ≥ 10] + [y = 9 and the previous output digit is 0].
+          The working is written least-significant digit first so the carry can be read back.
+          <button class="try" data-try='{"expr":"99999+1","phase":"op"}'>watch a carry chain</button></li>
+      </ul>
+
+      <h4>The written text is the memory</h4>
+      <p>Within one byte, everything happens in the residual stream. Across bytes, the only memory is the text: the
+        parser copies the piece into the frame, the calculator reads those bytes and writes its result, and the
+        rewrite copies the result back into the line. The parser and the calculators share no values at all.
+        <button class="try" data-try='{"circuit":"all","scroll":"graph"}'>see how the circuits connect</button></p>
+
+      <h4>Check an explanation yourself</h4>
+      <ul>
+        <li><b>Knock out</b> a head, unit or value (buttons on the selected head, an opened value, every active unit)
+          and re-run: if it matters, the answer changes.
+          <button class="try" data-try='{"expr":"47+38","phase":"op","knockOutWriters":"add.carry","layer":3}'>knock out the carry</button>
+          (47+38 becomes 75: the carry from 7+8 is gone).</li>
+        <li><b>View source</b> (<code>file.py:line ↗</code> links) opens the Python line that wrote any head, unit or
+          value; <b>Raw weights</b> shows the numbers themselves.</li>
+        <li><b>Hover anything</b> (tap on a phone) for what it means; every heatmap has a "How to use this map" box.</li>
+      </ul>
+    </div>
+  </details>
+
+
   <main class="grid">
     <section class="panel">
       <div class="panel-title" data-tip="What the model is doing at the selected character, in plain words.">Step</div>

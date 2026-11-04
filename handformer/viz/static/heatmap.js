@@ -155,9 +155,20 @@ export function attachHeatmapEvents(canvas, tooltip) {
   });
 }
 
-/** Touch tooltip: docked above the bottom step bar instead of following a cursor. */
-export function showSheet(tooltip, text) {
+/** Tooltip text plus an optional orange section (the pointers on a byte, as drawn above it). */
+export function setTip(tooltip, text, extra = "") {
   tooltip.textContent = text;
+  if (extra) {
+    const s = document.createElement("span");
+    s.className = "tip-ptr";
+    s.textContent = `\n\n${extra}`;
+    tooltip.append(s);
+  }
+}
+
+/** Touch tooltip: docked above the bottom step bar instead of following a cursor. */
+export function showSheet(tooltip, text, extra = "") {
+  setTip(tooltip, text, extra);
   tooltip.classList.add("sheet");
   tooltip.style.left = tooltip.style.top = "";
   tooltip.hidden = false;

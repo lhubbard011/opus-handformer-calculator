@@ -169,35 +169,69 @@ export function drawOverview(container, info) {
   const t0 = performance.now();
   const { nodes, layers, edges } = overviewGraph(info);
   container.replaceChildren();
-  const BOX_W = 170, BOX_H = 46, GAP_X = 120, GAP_Y = 16, TOP = 30;
+  // Wide screens: stages left to right. Narrow (phones): one column of full-width boxes, value
+  // arrows curving down the right edge and the text flow down the left, so nothing scrolls sideways.
+  // The stages need 5 boxes and 4 gaps of at least 40 px; below that, the stacked layout.
+  const avail = container.clientWidth - 18; // leave room for the panel's own scrollbar
+  const narrow = avail < PAD * 2 + 5 * 170 + 4 * 40;
+  const BOX_H = 46, nL = info.layers.length, ROW = 20;
+  const GAP_X = narrow ? 0 : Math.min(160, (avail - PAD * 2 - 5 * 170) / 4); // spread to fill the panel
   const pos = {};
-  const colH = Math.max(...STAGES.map((col) => col.length * (BOX_H + GAP_Y)));
-  STAGES.forEach((col, ci) => {
-    const h = col.length * (BOX_H + GAP_Y) - GAP_Y;
-    col.forEach((c, ri) => {
-      pos[c] = { x: PAD + ci * (BOX_W + GAP_X), y: TOP + (colH - h) / 2 + ri * (BOX_H + GAP_Y) };
+  let BOX_W, TOP, flowH, width, LABEL, CELL, valuePath, textPath;
+  if (narrow) {
+    const W = Math.max(260, container.clientWidth - 18), ARC = 56, LEFT = 22, GAP_Y = 14; // room for its scrollbar
+    TOP = 44; BOX_W = W - PAD * 2 - ARC - LEFT;
+    const order = STAGES.flat();
+    order.forEach((c, i) => { pos[c] = { x: PAD + LEFT, y: TOP + i * (BOX_H + GAP_Y), i }; });
+    flowH = TOP + order.length * (BOX_H + GAP_Y);
+    width = W; LABEL = 92; CELL = Math.max(9, (W - PAD * 2 - LABEL) / nL);
+    valuePath = (a, b) => {
+      const x = a.x + BOX_W, off = Math.min(ARC - 6, 12 + 8 * Math.abs(b.i - a.i));
+      return `M${x},${a.y + BOX_H / 2} C${x + off},${a.y + BOX_H / 2} ${x + off},${b.y + BOX_H / 2} ${x},${b.y + BOX_H / 2}`;
+    };
+    textPath = (a, b) => {
+      const x = a.x, off = Math.min(LEFT - 2, 6 + 3 * Math.abs(b.i - a.i));
+      return `M${x},${a.y + BOX_H / 2} C${x - off},${a.y + BOX_H / 2} ${x - off},${b.y + 12} ${x},${b.y + 12}`;
+    };
+  } else {
+    const GAP_Y = 16;
+    TOP = 30; BOX_W = 170;
+    const colH = Math.max(...STAGES.map((col) => col.length * (BOX_H + GAP_Y)));
+    STAGES.forEach((col, ci) => {
+      const h = col.length * (BOX_H + GAP_Y) - GAP_Y;
+      col.forEach((c, ri) => {
+        pos[c] = { x: PAD + ci * (BOX_W + GAP_X), y: TOP + (colH - h) / 2 + ri * (BOX_H + GAP_Y) };
+      });
     });
-  });
-  pos.parser.y = TOP - 6; // above the frame → calculator flows: the parser does not feed them values
-  const flowH = TOP + colH + 10;
-  const nL = info.layers.length, CELL = 34, ROW = 20, LABEL = 110;
-  const stripTop = flowH + 40;
-  const width = Math.max(PAD * 2 + STAGES.length * (BOX_W + GAP_X), PAD * 2 + LABEL + nL * CELL);
+    pos.parser.y = TOP - 6; // above the frame → calculator flows: the parser does not feed them values
+    flowH = TOP + colH + 10;
+    LABEL = 110; CELL = Math.max(9, Math.min(44, (avail - PAD * 2 - LABEL) / nL));
+    width = Math.max(avail, PAD * 2 + STAGES.length * BOX_W + 4 * GAP_X);
+    valuePath = (a, b) => {
+      if (b.x > a.x) {
+        const x1 = a.x + BOX_W, y1 = a.y + BOX_H / 2, x2 = b.x, y2 = b.y + BOX_H / 2;
+        return `M${x1},${y1} C${x1 + GAP_X / 2},${y1} ${x2 - GAP_X / 2},${y2} ${x2},${y2}`;
+      }
+      const x1 = a.x + BOX_W / 2, y1 = a.y + BOX_H, x2 = b.x + BOX_W / 2, y2 = b.y + BOX_H; // same column: loop below
+      return `M${x1},${y1} C${x1},${y1 + 60} ${x2},${y2 + 60} ${x2},${y2}`;
+    };
+    textPath = (a, b) => {
+      const x1 = a.x + BOX_W, y1 = a.y + BOX_H / 2, x2 = b.x, y2 = b.y + 10;
+      return `M${x1},${y1} C${x1 + GAP_X / 2},${y1} ${x2 - GAP_X / 2},${y2} ${x2},${y2}`;
+    };
+  }
+  const stripTop = flowH + (narrow ? 46 : 40);
   const height = stripTop + 22 + CALCS.length * ROW + 30;
   const svg = el("svg", { width, height, viewBox: `0 0 ${width} ${height}`, class: "graph overview" });
-  svg.append(el("text", { x: PAD, y: 16, class: "g-col" },
-    "who feeds whom: solid arrows carry residual values (width = how many); dashed ones go through the text"));
+  const title = narrow ? ["solid (right): residual values passed", "dashed (left): through the written text"]
+    : ["who feeds whom: solid arrows carry residual values (width = how many); dashed ones go through the text"];
+  title.forEach((t, i) => svg.append(el("text", { x: PAD, y: 16 + i * 14, class: "g-col" }, t)));
 
   const maxDims = Math.max(...edges.map((e) => e.dims.length));
   const gEdges = el("g");
   for (const e of edges.sort((a, b) => b.dims.length - a.dims.length)) {
-    const a = pos[e.from], b = pos[e.to];
-    const fwd = b.x > a.x;
-    const x1 = fwd ? a.x + BOX_W : a.x + BOX_W / 2, y1 = fwd ? a.y + BOX_H / 2 : a.y + BOX_H;
-    const x2 = fwd ? b.x : b.x + BOX_W / 2, y2 = fwd ? b.y + BOX_H / 2 : b.y + BOX_H;
-    const d = fwd ? `M${x1},${y1} C${x1 + GAP_X / 2},${y1} ${x2 - GAP_X / 2},${y2} ${x2},${y2}`
-      : `M${x1},${y1} C${x1},${y1 + 60} ${x2},${y2 + 60} ${x2},${y2}`; // same column or backwards: loop below
-    const w = 1 + 7 * Math.sqrt(e.dims.length / maxDims);
+    const d = valuePath(pos[e.from], pos[e.to]);
+    const w = 1 + (narrow ? 4 : 7) * Math.sqrt(e.dims.length / maxDims);
     const p = el("path", { d, class: "g-flow", "stroke-width": w.toFixed(1) });
     p.dataset.tip = `${CIRCUIT_NAME[e.from]} → ${CIRCUIT_NAME[e.to]}: ${e.dims.length} value(s)\n` +
       e.dims.slice(0, 40).join(", ") + (e.dims.length > 40 ? ", …" : "");
@@ -208,24 +242,25 @@ export function drawOverview(container, info) {
   // model writes (the copied sub-expression in the frame; the result bytes the rewrite copies back).
   const gText = el("g");
   for (const c of STAGES[3]) {
-    const a = pos.parser, b = pos[c];
-    const x1 = a.x + BOX_W, y1 = a.y + BOX_H / 2, x2 = b.x, y2 = b.y + 10;
-    const p = el("path", { d: `M${x1},${y1} C${x1 + GAP_X / 2},${y1} ${x2 - GAP_X / 2},${y2} ${x2},${y2}`, class: "g-text" });
+    const p = el("path", { d: textPath(pos.parser, pos[c]), class: "g-text" });
     p.dataset.tip = `parser ⇄ ${c}, through the written text (no shared values):\n` +
       `· the parser copies the chosen sub-expression into the frame as bytes; ${c} reads those bytes\n` +
       `· ${c} writes its result as bytes; the parser's rewrite copies them into the next line`;
     gText.append(p);
   }
   svg.append(gText);
-  svg.append(el("text", { x: pos.parser.x + 8, y: pos.parser.y + BOX_H + 14, class: "g-box-sub" },
-    "dashed → calculators: through the written text"));
+  if (!narrow) {
+    svg.append(el("text", { x: pos.parser.x + 8, y: pos.parser.y + BOX_H + 14, class: "g-box-sub" },
+      "dashed → calculators: through the written text"));
+  }
   for (const [c, n] of Object.entries(nodes)) {
     const { x, y } = pos[c];
     const g = el("g", { class: `g-box g-box-${c}`, transform: `translate(${x},${y})` });
     g.append(el("rect", { width: BOX_W, height: BOX_H, rx: 6 }));
     g.append(el("text", { x: 8, y: 18, class: "g-box-title" }, CIRCUIT_NAME[c]));
-    const stats = c === "input" ? `${n.dims} values from the byte and its position`
-      : c === "output" ? `${n.dims} votes, read by the unembedding`
+    const stats = c === "input" ? (narrow ? `${n.dims} values: byte + position` : `${n.dims} values from the byte and its position`)
+      : c === "output" ? (narrow ? `${n.dims} votes → unembedding` : `${n.dims} votes, read by the unembedding`)
+      : narrow ? `${n.heads} heads · ${n.units} units`
       : `${n.heads} heads · ${n.units} units · ${n.dims} own values`;
     g.append(el("text", { x: 8, y: 36, class: "g-box-sub" }, stats));
     const ins = edges.filter((e) => e.to === c), outs = edges.filter((e) => e.from === c);
@@ -236,9 +271,13 @@ export function drawOverview(container, info) {
   }
 
   // layer strip: which circuits own heads (blue) and units (orange) at each layer
-  svg.append(el("text", { x: PAD, y: stripTop - 12, class: "g-col" },
-    "working together in depth: heads (blue) and MLP units (orange) per layer; every position runs every layer"));
-  for (let l = 0; l < nL; l++) svg.append(el("text", { x: PAD + LABEL + l * CELL + 4, y: stripTop + 6, class: "g-col" }, `L${l + 1}`));
+  const stripTitle = narrow ? ["heads (blue) and units (orange)", "per layer, L1–L22"]
+    : ["working together in depth: heads (blue) and MLP units (orange) per layer; every position runs every layer"];
+  stripTitle.forEach((t, i) => svg.append(el("text", { x: PAD, y: stripTop - 12 - (stripTitle.length - 1 - i) * 14, class: "g-col" }, t)));
+  const every = CELL >= 26 ? 1 : CELL >= 13 ? 2 : 5; // layer labels that fit
+  for (let l = 0; l < nL; l++) {
+    if (l % every === 0) svg.append(el("text", { x: PAD + LABEL + l * CELL + (every === 1 ? 4 : 0), y: stripTop + 6, class: "g-col" }, `L${l + 1}`));
+  }
   const maxH = Math.max(...CALCS.flatMap((c) => layers[c].map((v) => v.heads)), 1);
   const maxU = Math.max(...CALCS.flatMap((c) => layers[c].map((v) => v.units)), 1);
   CALCS.forEach((c, r) => {

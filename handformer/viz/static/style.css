@@ -216,3 +216,19 @@ svg.graph { display: block; font: 10px var(--mono); }
 .g-h { fill: var(--accent-2); } .g-u { fill: #ff8a65; }
 .g-text { fill: none; stroke: var(--ph-rewrite); stroke-width: 1.5; stroke-dasharray: 5 4; opacity: .8; } .g-text:hover { stroke-width: 3; }
 .status, .ko-bar, .ko-result { overflow-wrap: anywhere; min-width: 0; }
+.row.ko > span:first-child { color: #ff8a65; text-decoration: line-through; }
+.row.ko > span:first-child::before { content: "⊘ "; text-decoration: none; display: inline-block; }
+.tooltip .tip-ptr { color: var(--accent); }
+/* pointer tags above a byte: separate pills, so "Ls" "p" never read as "Lsp" */
+.chip .tags { gap: 2px; }
+.chip .tag { background: #2b2414; border: 1px solid #5a4520; padding: 0 3px; border-radius: 3px; }
+.guide { margin: 8px 16px; }
+.guide-body { font-size: 13px; line-height: 1.55; max-width: 980px; }
+.guide-body h4 { margin: 14px 0 4px; }
+.guide-body p, .guide-body ul { margin: 4px 0; }
+.guide-body code { font-family: var(--mono); color: var(--accent); }
+.guide-table { border-collapse: collapse; margin: 4px 0; }
+.guide-table td { padding: 2px 10px 2px 0; vertical-align: top; }
+.guide-table td:first-child { white-space: nowrap; font-family: var(--mono); }
+button.try { font-size: 11px; padding: 1px 8px; margin-left: 4px; border-color: var(--accent); color: var(--accent); }
+@media (max-width: 700px) { .guide { margin: 8px; } .guide-table td:first-child { white-space: normal; } }
