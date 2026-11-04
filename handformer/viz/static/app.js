@@ -1755,6 +1755,72 @@ const PIN_KEY = "handviz.pinned";
 // columns the viewer picks); the big ones take two columns on wide screens.
 const BIG_PANELS = new Set(["p-maps", "p-graph", "p-model", "p-code", "p-tree", "p-board"]);
 const PIN_COLS_KEY = "handviz.pincols";
+const PIN_W_KEY = "handviz.pinwidths"; // panel id -> width (px) the viewer dragged it to
+const PIN_MIN_W = 240;
+
+function pinWidths() {
+  try { return JSON.parse(localStorage.getItem(PIN_W_KEY) || "{}") || {}; } catch { return {}; }
+}
+function savePinWidth(id, w) {
+  try {
+    const all = pinWidths();
+    if (w === null) delete all[id]; else all[id] = w;
+    Object.keys(all).length ? localStorage.setItem(PIN_W_KEY, JSON.stringify(all)) : localStorage.removeItem(PIN_W_KEY);
+  } catch { /* private mode: not remembered */ }
+}
+/** A pinned panel's width: px (fixed, flex 0 0) or null (its usual basis: grows to fill its row). */
+function setPinWidth(panel, w) {
+  if (w === null) { panel.classList.remove("pin-sized"); panel.style.removeProperty("--w"); return; }
+  const max = $("pinned-grid").clientWidth;
+  panel.style.setProperty("--w", `${Math.round(Math.min(max, Math.max(PIN_MIN_W, w)))}px`);
+  panel.classList.add("pin-sized");
+}
+/** The drag handle on a pinned panel's right edge: wider or narrower; double-click or Enter resets. */
+function pinEdge(panel) {
+  const edge = document.createElement("div");
+  edge.className = "pin-edge";
+  edge.tabIndex = 0;
+  edge.setAttribute("role", "separator");
+  edge.setAttribute("aria-orientation", "vertical");
+  edge.setAttribute("aria-label", `Resize the width of ${panel.dataset.pin}`);
+  edge.dataset.tip = "Drag to make this pinned panel wider or narrower (the others reflow). Double-click (or Enter) for its usual width; arrow keys work too.";
+  const done = () => {
+    const w = panel.classList.contains("pin-sized") ? parseFloat(panel.style.getPropertyValue("--w")) : null;
+    savePinWidth(panel.id, w);
+    log("pinned", panel.id, w === null ? "back to its usual width" : `${w}px wide`);
+    if (state.pos.has(state.q)) renderMap(state.pos.get(state.q)); // canvases size to their panel
+    renderGraph();
+  };
+  let drag = null;
+  edge.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    drag = { x: e.clientX, w: panel.getBoundingClientRect().width };
+    edge.setPointerCapture(e.pointerId);
+    edge.classList.add("dragging");
+    document.body.classList.add("resizing-x");
+    e.preventDefault();
+  });
+  edge.addEventListener("pointermove", (e) => { if (drag) setPinWidth(panel, drag.w + e.clientX - drag.x); });
+  const stop = () => {
+    if (!drag) return;
+    drag = null;
+    edge.classList.remove("dragging");
+    document.body.classList.remove("resizing-x");
+    done();
+  };
+  edge.addEventListener("pointerup", stop);
+  edge.addEventListener("pointercancel", stop);
+  edge.addEventListener("dblclick", () => { setPinWidth(panel, null); done(); });
+  edge.addEventListener("keydown", (e) => {
+    const w = panel.getBoundingClientRect().width;
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") setPinWidth(panel, w + (e.key === "ArrowRight" ? KEY_STEP : -KEY_STEP));
+    else if (e.key === "Enter") setPinWidth(panel, null);
+    else return;
+    e.preventDefault();
+    done();
+  });
+  return edge;
+}
 const pinHome = new Map(); // panel id -> placeholder comment marking its usual place
 let pins = []; // pinned panel ids, oldest first
 
@@ -1763,6 +1829,8 @@ function unpinOne(id) {
   pinHome.get(id).replaceWith(panel);
   pinHome.delete(id);
   panel.classList.remove("is-pinned", "pin-big");
+  panel.querySelector(":scope > .pin-edge")?.remove();
+  setPinWidth(panel, null); // back home it takes its usual layout (the width stays remembered for next time)
   panel.querySelector(".pin").textContent = "📌";
   pins = pins.filter((x) => x !== id);
 }
@@ -1775,6 +1843,9 @@ function pinOne(id) {
   $("pinned-grid").append(panel);
   panel.classList.add("is-pinned");
   panel.classList.toggle("pin-big", BIG_PANELS.has(id));
+  panel.append(pinEdge(panel));
+  const w = pinWidths()[id];
+  if (typeof w === "number") setPinWidth(panel, w);
   panel.querySelector(".pin").textContent = "✕ unpin";
   pins.push(id);
 }
