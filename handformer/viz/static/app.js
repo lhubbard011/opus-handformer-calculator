@@ -338,6 +338,17 @@ async function switchModel(key, input = null) {
   await runExpression(getInput());
 }
 
+/** Fill the model drop-down from models.yaml (server /api/models; static site data/models.json); returns the keys. */
+async function loadModels() {
+  const url = window.HANDFORMER_STATIC !== undefined ? `${window.HANDFORMER_STATIC}models.json` : "/api/models";
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`could not load the model list from ${url} (${r.status})`);
+  const { models } = await r.json();
+  $("model-sel").replaceChildren(...models.map(([key, title]) => new Option(title, key)));
+  log("models offered:", models.map(([key]) => key).join(", "));
+  return models.map(([key]) => key);
+}
+
 async function loadInfo() {
   state.info = await api("/api/info");
   log("model", state.info.model_id, state.info.d_model, "dims,", state.info.layers.length, "layers");
@@ -1606,7 +1617,7 @@ function readHash() {
     else if (t[0] === "d") ko.dims.push(t.slice(1));
   }
   const head = /^(\d+)\.(\d+)$/.exec(h.get("head") || "");
-  return { m: h.get("m") || "calc", e: h.get("e"), q: num("q"), map: h.get("map"), head: head ? [Number(head[1]), Number(head[2])] : null,
+  return { m: h.get("m"), e: h.get("e"), q: num("q"), map: h.get("map"), head: head ? [Number(head[1]), Number(head[2])] : null,
            ml: num("ml"), snap: num("snap"), g: h.get("g"), pins: (h.get("pins") || "").split(",").filter(Boolean),
            ko, diff: h.get("diff") !== "0", any: h.toString().length > 0 };
 }
@@ -1642,7 +1653,10 @@ async function main() {
   if (matchMedia("(max-width: 700px)").matches) $("map-howto").open = false; // long on a phone; one tap opens it
   try {
     const v = readHash();
-    if (Object.keys(MARK_LABELS_BY).includes(v.m)) state.model = v.m;
+    const offered = await loadModels();
+    const want = v.m || "calc"; // links leave out m for the calculator
+    state.model = offered.includes(want) ? want : offered[0]; // a model that is not offered opens the default
+    if (v.m && v.m !== state.model) log("link names model", v.m, "which is not offered; showing", state.model);
     await loadInfo();
     applyModelChrome();
     if (!v.e) setInput(state.info.default_input);

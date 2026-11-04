@@ -18,7 +18,7 @@ jobs:
         with: { python-version: "3.13" }
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
-      - run: pip install numpy==2.5.4
+      - run: pip install numpy==2.5.4 pyyaml==6.0.3  # pyyaml: handformer/viz/models.yaml
       - name: parity (in-page model == Python model)
         run: python -m tests.test_web
       - run: python tools/build_site.py site

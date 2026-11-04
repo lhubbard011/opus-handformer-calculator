@@ -169,6 +169,10 @@ Each circuit is a short list of named heads and units, placed at fixed layers wi
 
 `python -m handformer.viz` serves a step-through view on port 8768.
 
+`handformer/viz/models.yaml` lists which models the drop-down offers, in order; the public site
+builds the same list. It currently shows only the calculator. Add `life`, `c` or `parse` to bring
+those back.
+
 - **Step through every byte the model writes** with ← →, play, or by clicking a byte.
 - **Sequence strip:** each byte is coloured by the phase that wrote it (open, copy, add, sub, mul, rewrite). The step's pointers are tagged above it.
 - **Step panel:** a plain-language reading of the step and the top logits.
@@ -380,6 +384,7 @@ handformer/
   csyntax/           a C syntax highlighter: the lexer as a rule table (see CSYNTAX.md)
   cparse/            a parser: grammar.py (grammar -> LL(1) table), circuit.py (table -> weights), toy.py (see CPARSE.md)
   viz/models.py      the visualizer's model registry (calculator, game of life, C highlighter, parser)
+  viz/models.yaml    which of them the drop-down offers
   viz/static/engine.js     in-browser forward pass (sparse float64) + compact trace
   viz/static/local-api.js  the server's /api/* answered in the page (static site)
   viz/static/graph.js      circuit dataflow graphs, generated from the specs

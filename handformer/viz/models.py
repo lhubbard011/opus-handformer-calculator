@@ -5,10 +5,17 @@ for its own dims. Display and input framing only; nothing here touches a weight.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
+import yaml
+
 from .. import arith, common as cm, cparse, csyntax, expr, frame, life
+
+log = logging.getLogger(__name__)
+SHOWN_FILE = Path(__file__).with_name("models.yaml")  # which models the drop-down offers
 
 CALC_MARKS = ("Ls", "F", "p", "c", "o", "a_lo", "b_hi", "E", "S", "Rb", "P", "R")
 CALC_SUMMARY = (*CALC_MARKS, "phase1", "phase2", "phase4", "act_add", "act_sub", "act_mul", "act_div", "act_pow",
@@ -114,3 +121,18 @@ MODELS = {
                       "empty source", strip_spaces=False, prompt_end="\x03", max_input=PARSE_MAX_INPUT,
                       node_names=tuple(cparse.toy.NAMES.items())),
 }
+
+
+def shown(path: Path = SHOWN_FILE) -> tuple[str, ...]:
+    """The model keys the visualizer offers, in menu order (models.yaml ``shown``). The first is the default."""
+    data = yaml.safe_load(path.read_text())
+    keys = data.get("shown") if isinstance(data, dict) else None
+    if not isinstance(keys, list) or not keys or not all(isinstance(k, str) for k in keys):
+        raise ValueError(f"{path}: 'shown' must be a non-empty list of model keys (one of {', '.join(MODELS)})")
+    unknown = [k for k in keys if k not in MODELS]
+    if unknown:
+        raise ValueError(f"{path}: unknown model(s) {', '.join(unknown)} (one of {', '.join(MODELS)})")
+    if len(set(keys)) != len(keys):
+        raise ValueError(f"{path}: a model is listed twice in 'shown'")
+    log.info("visualizer shows %d of %d models: %s", len(keys), len(MODELS), ", ".join(keys))
+    return tuple(keys)

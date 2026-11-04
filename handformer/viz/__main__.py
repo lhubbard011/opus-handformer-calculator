@@ -6,7 +6,7 @@ import logging
 
 import uvicorn
 
-from .models import MODELS
+from .models import shown
 from .runner import Runner
 from .server import create_app
 
@@ -24,7 +24,7 @@ def main() -> None:
         level=args.log_level.upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    runners = {key: Runner(key) for key in MODELS}  # the calculator and Game of Life
+    runners = {key: Runner(key) for key in shown()}  # models.yaml: the drop-down, in menu order
     app = create_app(runners)
     log.info("serving on http://%s:%d", args.host, args.port)
     # log_config=None: uvicorn's loggers propagate to the root config above instead of installing their own.

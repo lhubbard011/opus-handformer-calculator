@@ -16,7 +16,7 @@ jobs:
         with: { python-version: "3.13" }
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
-      - run: pip install numpy==2.5.4 safetensors==0.8.0  # safetensors: test_export checks the official reader
+      - run: pip install numpy==2.5.4 safetensors==0.8.0 pyyaml==6.0.3  # safetensors: test_export checks the official reader; pyyaml: handformer/viz/models.yaml
       - run: python -m tests.${{ matrix.suite }}
         env: { OPENBLAS_NUM_THREADS: "1" }
   standalone:

@@ -77,7 +77,8 @@ def _binary(arr: np.ndarray, meta: dict) -> Response:
 
 
 def create_app(runners: dict[str, Runner]) -> FastAPI:
-    """One app for every model; each request names its model (default: the calculator)."""
+    """One app for the models in ``runners`` (menu order); each request names its model (default: the first)."""
+    default = next(iter(runners))
 
     def pick(model: str) -> Runner:
         if model not in runners:
@@ -103,9 +104,14 @@ def create_app(runners: dict[str, Runner]) -> FastAPI:
             )
         return response
 
+    @app.get("/api/models")
+    def models() -> dict:
+        """The drop-down: [key, title] per model, in menu order (models.yaml)."""
+        return {"models": [[k, r.spec.title] for k, r in runners.items()]}
+
     @app.get("/api/info")
-    def info(model: str = "calc") -> dict:
-        return pick(model).info()
+    def info(model: str | None = None) -> dict:
+        return pick(model or default).info()
 
     @app.post("/api/run")
     def run(body: RunBody) -> dict:

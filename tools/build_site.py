@@ -4,8 +4,9 @@
 
 OUT_DIR/index.html          the visualizer page, flagged to run the model locally
 OUT_DIR/static/*            the same frontend files the Python server serves
-OUT_DIR/data/model.json     every nonzero weight (tools/export_web.py)
-OUT_DIR/data/info.json      names, meanings and formulas (= server /api/info)
+OUT_DIR/data/<model>/       model.json (every nonzero weight, tools/export_web.py) + info.json (= server
+                            /api/info), for each model in handformer/viz/models.yaml
+OUT_DIR/data/models.json    the drop-down (= server /api/models)
 OUT_DIR/handformer-weights.npz   raw weights download (handformer/export.py)
 OUT_DIR/handformer-weights.safetensors   the same weights as one safetensors file
 
@@ -15,6 +16,7 @@ with any static file server (`python -m http.server -d site`).
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import shutil
 import sys
@@ -25,7 +27,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 import export_web  # noqa: E402
 from handformer import export as npz_export  # noqa: E402
-from handformer.viz.models import MODELS  # noqa: E402
+from handformer.viz.models import MODELS, shown  # noqa: E402
 
 log = logging.getLogger("build_site")
 STATIC = ROOT / "handformer" / "viz" / "static"
@@ -45,8 +47,11 @@ def build(out: Path) -> None:
         raise RuntimeError(f"index.html no longer contains {anchor!r}; update build_site.py")
     (out / "index.html").write_text(html.replace(anchor, FLAG + "  " + anchor))
     (out / ".nojekyll").write_text("")  # serve files as-is
-    for key in MODELS:  # data/calc/, data/life/: model.json + info.json each
+    keys = shown()  # models.yaml: only these are offered, so only these are exported
+    for key in keys:  # data/calc/, data/life/, ...: model.json + info.json each
         export_web.export(out / "data" / key, key)
+    menu = {"models": [[k, MODELS[k].title] for k in keys]}  # = the server's /api/models
+    (out / "data" / "models.json").write_text(json.dumps(menu))
     npz_export.export(out / "handformer-weights.npz")
     npz_export.export(out / "handformer-weights.safetensors")
     files = sorted(p for p in out.rglob("*") if p.is_file())

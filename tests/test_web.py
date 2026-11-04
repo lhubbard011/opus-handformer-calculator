@@ -19,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
+from handformer.viz import models
 from handformer.viz.runner import Runner
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -226,6 +227,27 @@ class TestWebParity(unittest.TestCase):
         js = self.node([["/api/run", {"expression": "2+x"}], ["/api/run", {"expression": "="}]])
         self.assertIn("unsupported characters: 'x'", js[0]["error"])
         self.assertIn("empty expression", js[1]["error"])
+
+
+class TestModelsFile(unittest.TestCase):
+    """handformer/viz/models.yaml: which models the drop-down offers (server and static site)."""
+
+    def test_repo_file_is_valid(self):
+        keys = models.shown()
+        self.assertTrue(keys)
+        self.assertTrue(set(keys) <= set(models.MODELS))
+
+    def test_bad_files_are_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "models.yaml"
+            for text, why in [("shown: []\n", "non-empty"), ("shown: [calc, nope]\n", "unknown model"),
+                              ("shown: [calc, calc]\n", "twice"), ("calc\n", "non-empty")]:
+                with self.subTest(text=text):
+                    path.write_text(text)
+                    with self.assertRaisesRegex(ValueError, why):
+                        models.shown(path)
+            path.write_text("shown:\n  - parse\n  - calc\n")
+            self.assertEqual(models.shown(path), ("parse", "calc"))
 
 
 if __name__ == "__main__":

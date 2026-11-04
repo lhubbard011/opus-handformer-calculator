@@ -1,0 +1,5 @@
+# Which models the visualizer's drop-down offers, in menu order. The first is the default.
+# Read by the local server (python -m handformer.viz) and the site build (tools/build_site.py).
+# Keys: calc (calculator), life (game of life), c (C syntax highlighter), parse (parser, stage 1).
+shown:
+  - calc
