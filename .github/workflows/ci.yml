@@ -1,0 +1,31 @@
+# Every test suite, the JS-vs-Python parity check, and the numpy-only proof run.
+name: tests
+on:
+  push:
+  pull_request:
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [test_ops, test_expr, test_decimal, test_division, test_power, test_web]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - run: pip install numpy==2.5.4
+      - run: python -m tests.${{ matrix.suite }}
+        env: { OPENBLAS_NUM_THREADS: "1" }
+  standalone:
+    # The exported arrays alone (no handformer import) compute the answers.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - run: pip install numpy==2.5.4
+      - run: python -m handformer.export weights.npz
+      - run: python tools/run_weights.py weights.npz "2+3*(4-1)" "-12.5*3-4" "355/113~6" "2^10"

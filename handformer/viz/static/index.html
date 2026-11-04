@@ -4,21 +4,21 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>handformer visualizer</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="static/style.css">
 </head>
 <body>
   <header class="topbar">
     <div class="brand">handformer <span class="brand-sub">visualizer</span></div>
     <form id="expr-form" class="prompt">
       <input id="expr-input" type="text" value="2+3*(4-1)" spellcheck="false" autocomplete="off" aria-label="Expression">
-      <button type="submit" class="primary">Run</button>
+      <button type="submit" class="primary" data-tip="Run the expression through the model and record every internal value.">Run</button>
     </form>
     <div class="controls">
-      <button id="btn-first" title="First step (Home)">⏮</button>
-      <button id="btn-back" title="Step back (←)">◀</button>
-      <button id="btn-step" title="Step forward (→)">Step ▶</button>
-      <button id="btn-play" title="Play (space)">Play</button>
-      <label title="Show only the circuits that are active at this step"><input id="focus" type="checkbox" checked> focus active circuit</label>
+      <button id="btn-first" data-tip="Go to the first step: the '=' at the end of your prompt.">⏮</button>
+      <button id="btn-back" data-tip="One character back (← key).">◀</button>
+      <button id="btn-step" data-tip="One character forward (→ key).">Step ▶</button>
+      <button id="btn-play" data-tip="Step through automatically (space bar).">Play</button>
+      <label data-tip="Hide the parts of the model that are switched off at this step, so only the relevant notes and units are listed."><input id="focus" type="checkbox" checked> focus active circuit</label>
       <label>speed
         <select id="speed">
           <option value="900">slow</option>
@@ -36,10 +36,11 @@
       <span id="step-label" class="muted"></span>
       <span class="spacer"></span>
       <span class="legend">
-        <span class="lg ph-prompt">prompt</span><span class="lg ph-open">open [</span>
-        <span class="lg ph-copy">copy redex</span><span class="lg ph-add">add</span>
-        <span class="lg ph-sub">sub</span><span class="lg ph-mul">mul</span>
-        <span class="lg ph-rewrite">rewrite</span>
+        <span class="lg ph-prompt" data-tip="Characters you typed.">prompt</span><span class="lg ph-open" data-tip="The model opens a working step with '['.">open [</span>
+        <span class="lg ph-copy" data-tip="The model copies the piece it chose to solve next (innermost brackets first, then ^, then × ÷, then + −).">copy redex</span><span class="lg ph-add" data-tip="Written by the addition calculator (inside a step).">add</span>
+        <span class="lg ph-sub" data-tip="Written by the subtraction calculator.">sub</span><span class="lg ph-mul" data-tip="Written by the multiplication calculator.">mul</span>
+        <span class="lg ph-div" data-tip="Written by the division calculator.">div</span><span class="lg ph-pow" data-tip="Written by the power step (it writes the next expansion).">pow</span>
+        <span class="lg ph-rewrite" data-tip="The model rewrites the line with the solved piece replaced by its answer.">rewrite</span>
       </span>
     </div>
     <div id="tokens" class="token-strip"></div>
@@ -48,25 +49,25 @@
 
   <main class="grid">
     <section class="panel">
-      <div class="panel-title">Step</div>
+      <div class="panel-title" data-tip="What the model is doing at the selected character, in plain words.">Step</div>
       <div id="explain" class="explain"></div>
-      <div class="panel-title">Next byte <span class="muted small">top logits</span></div>
+      <div class="panel-title" data-tip="The model's scores for the next character. The highest score is written.">Next byte <span class="muted small">top logits</span></div>
       <div id="logits" class="logits"></div>
-      <div class="panel-title">Pointers <span class="muted small">shared dims at this step</span></div>
+      <div class="panel-title" data-tip="Where the model thinks the important landmarks are right now. Each number is a position in the sequence; hover one for its meaning.">Pointers <span class="muted small">shared dims at this step</span></div>
       <div id="marks" class="marks"></div>
-      <div class="panel-title">Selected head</div>
+      <div class="panel-title" data-tip="The hand-written formulas of the attention head you clicked.">Selected head</div>
       <div id="head-detail" class="detail muted">click a head</div>
     </section>
 
     <section class="panel">
-      <div class="panel-title">Attention heads
+      <div class="panel-title" data-tip="Every attention head at this step: where it looked (← position) and what it wrote. Hover a row for what that head does.">Attention heads
         <input id="head-filter" class="filter" type="text" placeholder="filter (e.g. mul, latest)" spellcheck="false">
       </div>
       <div id="heads" class="scroll"></div>
     </section>
 
     <section class="panel">
-      <div class="panel-title">Residual stream
+      <div class="panel-title" data-tip="Every note the model keeps about this character. Hover a row for its meaning and which layers write and read it.">Residual stream
         <input id="dim-filter" class="filter" type="text" placeholder="filter dims" spellcheck="false">
         <label class="small"><input id="show-zero" type="checkbox"> zeros</label>
       </div>
@@ -77,11 +78,11 @@
   <section class="panel wide">
     <div class="panel-title">Heatmaps
       <nav class="tabs" role="tablist">
-        <button role="tab" data-map="residual" class="active">Residual stream</button>
-        <button role="tab" data-map="step">This step · dims × layers</button>
-        <button role="tab" data-map="attention">Attention · selected head</button>
-        <button role="tab" data-map="mlp">MLP activations</button>
-        <button role="tab" data-map="weights">Raw weights</button>
+        <button role="tab" data-map="residual" class="active" data-tip="Every note (rows) at every character (columns). Brighter = bigger value; each row is scaled on its own.">Residual stream</button>
+        <button role="tab" data-map="step" data-tip="One character's notes after each layer, so you can see which layer wrote each one.">This step · dims × layers</button>
+        <button role="tab" data-map="attention" data-tip="For the selected head: which earlier character (column) each character (row) read from.">Attention · selected head</button>
+        <button role="tab" data-map="mlp" data-tip="How strongly each calculating unit (rows) fired at each character (columns), for one layer.">MLP activations</button>
+        <button role="tab" data-map="weights" data-tip="The hand-written numbers themselves, labelled by what they connect.">Raw weights</button>
       </nav>
       <span id="map-controls" class="map-controls">
         <label data-for="residual">after <select id="snapshot"></select></label>
@@ -97,17 +98,21 @@
       </span>
     </div>
     <div id="map-caption" class="muted small"></div>
+    <details id="map-howto" class="howto" open>
+      <summary>How to use this map</summary>
+      <div id="map-howto-body"></div>
+    </details>
     <div class="map-wrap"><canvas id="map"></canvas></div>
   </section>
 
   <section class="panel wide">
-    <div class="panel-title">Active MLP units <span class="muted small">ReLU(read) → write, at this step</span>
+    <div class="panel-title" data-tip="The small calculating units that fired at this character. Hover one for what it computes.">Active MLP units <span class="muted small">ReLU(read) → write, at this step</span>
       <input id="unit-filter" class="filter" type="text" placeholder="filter (e.g. carry, D3)" spellcheck="false">
     </div>
     <div id="units" class="scroll units"></div>
   </section>
 
   <div id="tooltip" class="tooltip" hidden></div>
-  <script type="module" src="/static/app.js"></script>
+  <script type="module" src="static/app.js"></script>
 </body>
 </html>

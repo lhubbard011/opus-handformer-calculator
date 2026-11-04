@@ -18,12 +18,8 @@ from . import arith
 log = logging.getLogger("handformer.export")
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(prog="python -m handformer.export")
-    ap.add_argument("out", nargs="?", default="weights.npz")
-    args = ap.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-
+def export(out: Path) -> None:
+    """Write ``out`` (.npz) and its ``.json`` index."""
     builder = arith.builder()
     model = builder.build()
     arrays = {"embed": model.embed, "unembed": model.unembed}
@@ -38,13 +34,21 @@ def main() -> None:
         arrays[f"L{li + 1}.w_out"] = layer.w_out
         index["layers"].append(entry)
 
-    out = Path(args.out)
     np.savez_compressed(out, **arrays)
     side = out.with_suffix(".json")
     side.write_text(json.dumps(index, indent=1))
     total = sum(a.size for a in arrays.values())
     nonzero = sum(int(np.count_nonzero(a)) for a in arrays.values())
     log.info("wrote %s (%d arrays, %d entries, %d nonzero) and %s", out, len(arrays), total, nonzero, side)
+
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(prog="python -m handformer.export")
+    ap.add_argument("out", nargs="?", default="weights.npz")
+    args = ap.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    export(Path(args.out))
 
 
 if __name__ == "__main__":

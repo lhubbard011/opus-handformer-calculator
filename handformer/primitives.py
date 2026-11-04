@@ -113,9 +113,12 @@ def latest_feature(match: Form, dst: str, bos: bool = True) -> list[UnitSpec]:
     factor 2 keeps a matching BOS (2+1) strictly below a match at position 1
     (4); without it they tie and attention averages them.
     """
-    units = [UnitSpec(read=add({"pos": 1.0}, const(1.0 - BIG), scale(match, BIG)), write={dst: 2.0})]
+    units = [UnitSpec(read=add({"pos": 1.0}, const(1.0 - BIG), scale(match, BIG)), write={dst: 2.0},
+                      label=f"landmark tag for '{dst}': writes 2·(position+1) on a matching byte, so a "
+                            "'latest' head can find the most recent one")]
     if bos:  # add the fallback once per class, not once per match form
-        units.append(UnitSpec(read={"is_bos": 1.0}, write={dst: 1.0}))
+        units.append(UnitSpec(read={"is_bos": 1.0}, write={dst: 1.0},
+                              label=f"fallback for '{dst}': the start byte scores 1, so 'no match yet' reads position 0"))
     return units
 
 
@@ -129,6 +132,8 @@ def newest_frame_earliest(predicates: Form, required: float, frame: str, dst: st
     return UnitSpec(
         read=add({frame: BIG, "pos": -1.0}, scale(predicates, BIG_SQ), const(-BIG_SQ * required)),
         write={dst: 1.0},
+        label=f"'earliest in this frame' tag for '{dst}': newer frames score higher, earlier positions "
+              "within a frame score higher",
     )
 
 
@@ -185,6 +190,7 @@ def pos_if(predicates: Form, required: float, dst: str) -> UnitSpec:
     return UnitSpec(
         read=add({"pos": 1.0}, scale(predicates, BIG), const(-BIG * required)),
         write={dst: 1.0},
+        label=f"position tag for '{dst}': writes this byte's position when all its conditions hold, else 0",
     )
 
 
@@ -196,20 +202,24 @@ def earliest_if(predicates: Form, required: float, dst: str) -> UnitSpec:
     return UnitSpec(
         read=add({"pos": -1.0}, scale(predicates, BIG), const(-BIG * (required - 1.0))),
         write={dst: 1.0},
+        label=f"'earliest' tag for '{dst}': earlier matching positions score higher",
     )
 
 
 def times_flag_units(x: Form, flag: Form, write: Form) -> list[UnitSpec]:
     """``write * x * flag`` for a 0/1 ``flag`` and signed ``|x| < BIG``."""
     off = add(scale(flag, -BIG), const(BIG))  # BIG * (1 - flag)
+    names = ", ".join(write)
     return [
-        UnitSpec(read=add(x, scale(off, -1.0)), write=dict(write)),
-        UnitSpec(read=add(scale(x, -1.0), scale(off, -1.0)), write=scale(write, -1.0)),
+        UnitSpec(read=add(x, scale(off, -1.0)), write=dict(write),
+                 label=f"select into {names}: passes the value through only when the flag is 1 (positive part)"),
+        UnitSpec(read=add(scale(x, -1.0), scale(off, -1.0)), write=scale(write, -1.0),
+                 label=f"select into {names}: passes the value through only when the flag is 1 (negative part)"),
     ]
 
 
-def relu_unit(x: Form, write: Form) -> UnitSpec:
-    return UnitSpec(read=dict(x), write=dict(write))
+def relu_unit(x: Form, write: Form, label: str = "") -> UnitSpec:
+    return UnitSpec(read=dict(x), write=dict(write), label=label)
 
 
 STEP_SLOPE = 4.0  # robust steps are exact for inputs within +-1/4 of an integer
@@ -223,18 +233,24 @@ def clamp01_units(x: Form, write: Form) -> list[UnitSpec]:
     output. Exact flags matter because flags gate selects that scale by BIG.
     """
     z = add(scale(x, STEP_SLOPE), const(-STEP_SLOPE / 2.0))
+    names = ", ".join(write)
     return [
-        UnitSpec(read=z, write=dict(write)),
-        UnitSpec(read=add(z, const(-1.0)), write=scale(write, -1.0)),
+        UnitSpec(read=z, write=dict(write), label=f"yes/no test into {names}: rises from 0 to 1 as the input passes 1/2"),
+        UnitSpec(read=add(z, const(-1.0)), write=scale(write, -1.0),
+                 label=f"yes/no test into {names}: caps the answer at exactly 1 (input at or above 3/4)"),
     ]
 
 
 def hat_units(x: Form, center: float, write: Form) -> list[UnitSpec]:
     """``write * [x == center]`` for (near-)integer x: step(x >= c) - step(x >= c+1)."""
-    return [
+    units = [
         *clamp01_units(add(x, const(-(center - 1.0))), write),
         *clamp01_units(add(x, const(-center)), scale(write, -1.0)),
     ]
+    names = ", ".join(write)
+    for u, part in zip(units, ("on at ≥ c", "on at ≥ c", "off again at ≥ c+1", "off again at ≥ c+1")):
+        u.label = f"equality test into {names}: 1 exactly when the input equals {center:g} ({part})"
+    return units
 
 
 def gated(x: Form, gate: Form, on_when: float = 1.0) -> Form:

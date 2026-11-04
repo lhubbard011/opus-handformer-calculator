@@ -62,9 +62,11 @@ class _Namespace:
 
     def unit(self, u: UnitSpec) -> UnitSpec:
         read, write = self.form(u.read), self.form(u.write)
+        label = u.label
         if any(d in OP_OUTPUTS or d in expr.OUT_DIMS for d in write):
             read = pr.gated(read, {f"act_{self.ns}": 1.0}, 1.0)
-        return UnitSpec(read=read, write=write)
+            label = (label + "; " if label else "") + f"silenced unless the {self.ns} calculator is switched on"
+        return UnitSpec(read=read, write=write, label=label)
 
 
 def builder() -> ModelBuilder:

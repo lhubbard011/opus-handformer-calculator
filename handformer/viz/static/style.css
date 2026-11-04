@@ -15,6 +15,8 @@
   --ph-sub: #c792ea;
   --ph-mul: #ff8a65;
   --ph-rewrite: #4fd1c5;
+  --ph-div: #f0d060;
+  --ph-pow: #e07bd0;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
@@ -77,6 +79,8 @@ input[type=text], select {
 .ph-add { border-bottom-color: var(--ph-add); } .lg.ph-add { background: var(--ph-add); }
 .ph-sub { border-bottom-color: var(--ph-sub); } .lg.ph-sub { background: var(--ph-sub); }
 .ph-mul { border-bottom-color: var(--ph-mul); } .lg.ph-mul { background: var(--ph-mul); }
+.ph-div { border-bottom-color: var(--ph-div); } .lg.ph-div { background: var(--ph-div); }
+.ph-pow { border-bottom-color: var(--ph-pow); } .lg.ph-pow { background: var(--ph-pow); }
 .ph-rewrite { border-bottom-color: var(--ph-rewrite); } .lg.ph-rewrite { background: var(--ph-rewrite); }
 #scrubber { width: 100%; margin-top: 18px; }
 
@@ -120,8 +124,16 @@ input[type=text], select {
 .map-controls label.on { display: flex; }
 .map-wrap { width: 100%; margin-top: 6px; }
 .map-wrap canvas { display: block; cursor: crosshair; }
+.howto { margin: 8px 0 4px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; }
+.howto summary { cursor: pointer; font-weight: 600; color: var(--accent); }
+.howto-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 20px; margin-top: 8px; font-size: 13px; line-height: 1.5; }
+@media (max-width: 1000px) { .howto-grid { grid-template-columns: 1fr; } }
+.howto h4 { margin: 0 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.howto ul { margin: 0; padding-left: 18px; }
+.howto li { margin: 2px 0; }
+.howto b { color: var(--text); }
 .tooltip {
   position: fixed; z-index: 10; pointer-events: none; background: #000; color: var(--text);
-  border: 1px solid var(--border); border-radius: 4px; padding: 4px 6px; font: 11px/1.35 var(--mono); white-space: pre;
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; font: 12px/1.45 var(--sans); white-space: pre-wrap; max-width: min(440px, calc(100vw - 24px)); box-shadow: 0 6px 24px rgba(0,0,0,.45);
 }
 .row.dim { opacity: .35; }

@@ -79,10 +79,15 @@ class HeadSpec:
 
 @dataclass
 class UnitSpec:
-    """One MLP hidden unit: ``out += ReLU(read(x)) * write``."""
+    """One MLP hidden unit: ``out += ReLU(read(x)) * write``.
+
+    ``label`` says what the unit computes (set by the primitive that built it);
+    it is documentation only and never reaches the weights.
+    """
 
     read: Form
     write: Form
+    label: str = ""
 
 
 @dataclass

@@ -119,5 +119,7 @@ def ramp_mod10_units(x: Form, lo: int, hi: int, gate: Form | None, on_when: floa
             read = pr.gated(read, gate, on_when)
         write = {d: w for d, w in coefs[c].items() if w != 0.0}
         if write:
-            units.append(UnitSpec(read=read, write=write))
+            units.append(UnitSpec(read=read, write=write,
+                                  label=f"digit ramp at {c}: part of 'last digit of x' (x mod 10) for x in "
+                                        f"{lo}..{hi}; neighbouring ramps combine into one bump per value"))
     return units

@@ -470,7 +470,7 @@ changing the nonzero count.
   - edge cases: zeros, leading zeros, long carry and borrow chains.
 - `tests/test_expr.py`: hand-picked expressions, plus random expression trees
   up to depth 4 with parentheses, precedence and left-to-right order.
-- Run all: `../.venv/bin/python -m unittest discover -s tests -t .`
+- Run all: `python -m unittest discover -s tests -t .`
 - The test harness recomputes full n² attention with no caching, which limits
   how long the tested × cases can be. The weights themselves are not limited
   this way.

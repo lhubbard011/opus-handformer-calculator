@@ -21,6 +21,7 @@ import numpy as np
 
 from .. import arith, common as cm, expr, frame
 from ..model import Form, Tracer
+from .glossary import describe_dim, describe_head
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ TOP_LOGITS = 5
 
 # Shared dims shown on the sequence strip as pointers for the selected step.
 MARK_DIMS = ("Ls", "F", "p", "c", "o", "a_lo", "b_hi", "E", "S", "Rb", "P", "R")
-SUMMARY_DIMS = (*MARK_DIMS, "phase1", "phase2", "phase4", "act_add", "act_sub", "act_mul",
+SUMMARY_DIMS = (*MARK_DIMS, "phase1", "phase2", "phase4", "act_add", "act_sub", "act_mul", "act_div", "act_pow",
                 "open", "seen_eq", "seen_semi", "seen_bar", "drop", "cont", "end2", "end4",
                 "in1", "in12", "in123", "src4", "neg", "use_mul")
 
@@ -99,7 +100,7 @@ class _Recorder(Tracer):
 
     def attention(self, layer: int, head: int, attn: np.ndarray) -> None:
         k = min(TOP_KEYS, attn.shape[1])
-        idx = np.argsort(-attn, axis=1)[:, :k]
+        idx = np.argsort(-attn, axis=1, kind="stable")[:, :k]  # ties: earlier key first
         self.top_idx[(layer, head)] = idx
         self.top_w[(layer, head)] = np.take_along_axis(attn, idx, axis=1)
 
@@ -125,38 +126,82 @@ class Runner:
         self.layout = self.model.layout
         self.names = self.layout.names
         self.runs: OrderedDict[str, Run] = OrderedDict()
+        # Identifies this exact model, so a page loaded against an older server can tell.
+        self.model_id = (f"d{len(self.layout)}-L{len(self.model.layers)}-h{sum(len(l.heads) for l in self.model.layers)}"
+                         f"-u{sum(l.w_in.shape[1] for l in self.model.layers)}-nz{self.model.nonzero_params()}")
         log.info("model built in %.2fs: %d layers, d_model=%d, %d nonzero params",
                  time.perf_counter() - t0, len(self.model.layers), len(self.layout),
                  self.model.nonzero_params())
 
     # ------------------------------------------------------------- static info
 
+    def _wiring(self) -> dict[str, dict[str, list[str]]]:
+        """For every dim: which sublayers write it and which read it (from the weight specs)."""
+        wires = {n: {"writers": [], "readers": []} for n in self.names}
+        def note(dim, role, where):
+            lst = wires[dim][role]
+            if where not in lst:
+                lst.append(where)
+        for n in cm.INPUT_DIMS:
+            note(n, "writers", "the position features" if n in ("pos", "pos2") else "the byte embedding")
+        for li, spec in enumerate(self.builder.layers):
+            for h in spec.heads:
+                where = f"L{li + 1} head '{h.name}'"
+                for f in [*h.query, *h.key]:
+                    for d in f:
+                        note(d, "readers", where)
+                for src, dst in h.value.items():
+                    note(src, "readers", where)
+                    for d in dst:
+                        note(d, "writers", where)
+            for u in spec.units:
+                where = f"L{li + 1} MLP"
+                for d in u.read:
+                    note(d, "readers", where)
+                for d in u.write:
+                    note(d, "writers", where)
+        return wires
+
+    @staticmethod
+    def _summ(items: list[str], limit: int = 4) -> str:
+        if not items:
+            return "nothing"
+        more = len(items) - limit
+        return ", ".join(items[:limit]) + (f" and {more} more" if more > 0 else "")
+
     def info(self) -> dict:
+        wires = self._wiring()
         layers = []
         for li, spec in enumerate(self.builder.layers):
             heads = [{
                 "name": h.name,
+                "doc": describe_head(h),
                 "circuit": _circuit([d for f in h.value.values() for d in f],
                                     [d for f in h.query for d in f]),
                 "query": [form_str(f) for f in h.query],
                 "key": [form_str(f) for f in h.key],
                 "value": {src: form_str(dst) for src, dst in h.value.items()},
             } for h in spec.heads]
-            units = [{"read": form_str(u.read), "write": form_str(u.write),
+            units = [{"read": form_str(u.read), "write": form_str(u.write), "label": u.label,
+                      "doc": u.label or ("Writes " + "; ".join(f"{d}: {describe_dim(d) or 'working value'}"
+                                                              for d in u.write)),
                       "circuit": _circuit(list(u.write), list(u.read))} for u in spec.units]
             layers.append({"index": li, "name": spec.name, "heads": heads, "units": units})
         return {
             "name": "handformer",
+            "model_id": self.model_id,
             "d_model": len(self.layout),
             "nonzero_params": self.model.nonzero_params(),
-            "dims": [{"name": n, "cat": _category(n)} for n in self.names],
+            "dims": [{"name": n, "cat": _category(n), "doc": describe_dim(n),
+                      "written_by": self._summ(wires[n]["writers"]), "read_by": self._summ(wires[n]["readers"])}
+                     for n in self.names],
             "layers": layers,
         }
 
     # ------------------------------------------------------------- runs
 
     def run(self, expression: str) -> dict:
-        expression = expression.replace(" ", "")
+        expression = expression.replace(" ", "").removesuffix("=")  # the page adds the '=' itself
         if not expression:
             raise ValueError("empty expression")
         bad = sorted({ch for ch in expression if ord(ch) not in cm.ALPHABET and ch != "~"})
@@ -179,12 +224,13 @@ class Runner:
         log.info("run %s %r: %d bytes generated in %.2fs, traced in %.2fs, finished=%s",
                  run.run_id, expression, len(tokens) - len(prompt), t1 - t0, t2 - t1, finished)
         return {
+            "model_id": self.model_id,
             "run_id": run.run_id,
             "expression": expression,
             "chars": [chr(t) for t in tokens],
             "prompt_len": run.prompt_len,
             "finished": finished,
-            "steps": [self._summary(run, q) for q in range(len(tokens))],
+            "steps": [self._step(run, q) for q in range(len(tokens))],
             "snapshots": [label for label, _ in rec.snapshots],
         }
 
@@ -197,58 +243,11 @@ class Runner:
     def _val(self, run: Run, q: int, dim: str) -> float:
         return float(run.rec.snapshots[-1][1][q, self.layout[dim]])
 
-    def _summary(self, run: Run, q: int) -> dict:
-        v = {d: self._val(run, q, d) for d in SUMMARY_DIMS}
-        pred = int(np.argmax(run.logits[q]))
-        if q < run.prompt_len - 1:
-            phase, op = "prompt", None
-        elif v["phase1"] > 0.5:
-            phase, op = "open", None
-        elif v["phase2"] > 0.5:
-            phase, op = "copy", None
-        elif v["open"] > 0.5:
-            phase = "op"
-            op = next((o for o in ("add", "sub", "mul") if v[f"act_{o}"] > 0.5), None)
-        else:
-            phase, op = "rewrite", None
-        return {
-            "q": q,
-            "phase": phase,
-            "op": op,
-            "pred": chr(pred),
-            "explain": self._explain(run, q, phase, op, v),
-            "marks": {d: round(v[d]) for d in MARK_DIMS},
-        }
-
-    def _char(self, run: Run, pos: float) -> str:
-        i = int(round(pos))
-        return repr(chr(run.tokens[i])) if 0 <= i < len(run.tokens) else "?"
-
-    def _explain(self, run: Run, q: int, phase: str, op: str | None, v: dict) -> str:
-        """Plain-language reading of the residual dims at q (display only)."""
-        if phase == "prompt":
-            return "prompt byte (given, not predicted)"
-        redex = (f"redex: operator {self._char(run, v['o'])} at {round(v['o'])}, "
-                 f"operands ({round(v['a_lo'])}, {round(v['b_hi'])}), group ({round(v['p'])}, {round(v['c'])})"
-                 + (", parentheses dropped" if v["drop"] > 0.5 else ""))
-        if phase == "open":
-            # parser dims here still describe the previous step; only '[' is emitted
-            return "line ends with '=' and no frame is open: open a frame '['"
-        if phase == "copy":
-            if v["end2"] > 0.5:
-                return "redex fully copied: write the frame's '='. " + redex
-            src = round(v["a_lo"] + 1 + q - v["F"])
-            return f"copying the redex: byte {src} {self._char(run, src)}. " + redex
-        if phase == "op":
-            sub = "answer" if v["seen_semi"] > 0.5 else (
-                "collect" if op == "mul" and v["seen_bar"] > 0.5 else "working")
-            return f"{op} circuit active ({sub} phase) inside frame at {round(v['F'])}"
-        r = round(q - v["Rb"])
-        if v["end4"] > 0.5:
-            return f"rewrite done (r={r}): " + ("another operator remains, write '='"
-                                                if v["cont"] > 0.5 else "no operator left, write '\\n'")
-        region = "prefix" if v["in1"] > 0.5 else "result" if v["in12"] > 0.5 else "suffix"
-        return f"rewrite r={r}: {region}, copy byte {round(v['src4'])} {self._char(run, v['src4'])}"
+    def _step(self, run: Run, q: int) -> dict:
+        """Raw per-step values; the page turns them into phase, explanation and pointer tags."""
+        x = run.rec.snapshots[-1][1][q]
+        return {"pred": chr(int(np.argmax(run.logits[q]))),
+                "v": {d: round(float(x[self.layout[d]]), 6) for d in SUMMARY_DIMS}}
 
     def position(self, run_id: str, q: int) -> dict:
         run = self._get(run_id)
@@ -259,11 +258,15 @@ class Runner:
 
         heads = []
         for li, layer in enumerate(self.model.layers):
-            x_in = rec.snapshots[2 * li][1]  # residual entering layer li
+            x_in = rec.snapshots[2 * li][1][: q + 1]  # residual entering layer li, keys 0..q
             for hi, h in enumerate(layer.heads):
                 idx = rec.top_idx[(li, hi)][q]
                 w = rec.top_w[(li, hi)][q]
-                wrote = ((w @ x_in[idx]) @ h.w_v) @ h.w_o
+                # Exactly what this head added at q: its full attention row, not just the top keys.
+                scores = (x_in @ h.w_k) @ (x_in[q] @ h.w_q)
+                attn = np.exp(scores - scores.max())
+                attn /= attn.sum()
+                wrote = ((attn @ x_in) @ h.w_v) @ h.w_o
                 nz = np.flatnonzero(np.abs(wrote) > 1e-9)
                 heads.append({
                     "layer": li, "head": hi,
@@ -279,6 +282,7 @@ class Runner:
         top = np.argsort(-run.logits[q])[:TOP_LOGITS]
         log.info("position %s q=%d: %d heads, %d active units", run_id, q, len(heads), len(units))
         return {
+            "model_id": self.model_id,
             "q": q,
             "values": values.round(9).tolist(),
             "heads": heads,
