@@ -32,6 +32,8 @@ const MARK_LABELS_BY = {
   life: { C: ":", cell: "cell", nb: "nb" },
   c: { E: "end", src: "src" },
   parse: { E: "end", M: "lex end", Lsep: "rec", la_pos: "next", mpos: "pop" },
+  lm: {},
+  lmt: {},
 };
 
 const state = {
@@ -108,7 +110,7 @@ function focusSet() {
   if (s.phase === "op" && s.op) set.add(s.op);
   return set;
 }
-const focused = (circuit) => !$("focus").checked || ["c", "parse"].includes(state.model) || focusSet().has(circuit);
+const focused = (circuit) => !$("focus").checked || ["c", "parse", "lm", "lmt"].includes(state.model) || focusSet().has(circuit);
 
 // One tooltip for every element carrying data-tip (list rows, tags, bytes, controls).
 function wireTips() {
@@ -326,8 +328,47 @@ function summarizeParse(run, q, raw) {
   return { q, phase, op: null, pred: p, explain, marks, rule: fired[0] };
 }
 
+// Language model: the next byte is predicted from the current byte (its bigram row) plus at most one
+// conditional head, the one for the current byte, which read the byte before it (handformer/lm).
+/** What was written after position q: the drawn byte when sampling (often not the most likely). */
+function drawnNote(run, q, p) {
+  const w = run.chars[q + 1];
+  if (!run.sample || q < run.prompt_len - 1 || w === undefined) return { pred: p, note: "" };
+  return w === p ? { pred: w, note: " Sampled: the draw landed on the most likely byte." }
+    : { pred: w, note: ` Sampled: the draw picked ${JSON.stringify(w)}; the most likely byte was ${JSON.stringify(p)}.` };
+}
+
+function summarizeLM(run, q, raw) {
+  const { pred: p, note } = drawnNote(run, q, raw.pred), names = state.info.byte_names || {};
+  const cur = run.chars[q], prev = run.chars[q - 1];
+  const show = (c) => (c === "\n" ? "'\\n'" : JSON.stringify(c));
+  const phase = q < run.prompt_len - 1 ? "prompt" : "token";
+  if (q === 0) return { q, phase: "prompt", op: null, pred: p, explain: "The sink byte that starts every window: conditional heads attend here when their condition fails. Its prediction is not used.", marks: {} };
+  const dim = names[cur] !== undefined && names[prev] !== undefined ? `p_${names[cur]}_${names[prev]}` : null;
+  const seen = dim && dimDoc(dim);
+  const head = `the head "previous byte, when the current byte is ${show(cur)}"`;
+  const via = q < 2 ? "There is no byte before it in this window (only the sink), so the bigram row alone predicts."
+    : seen ? `${head} read ${show(prev)} into ${dim}, whose votes turn that row into the trigram: P(next | ${show(prev)}, ${show(cur)}).`
+    : `The pair ${show(prev)} then ${show(cur)} never occurred in training, so ${head} has nothing to add: the bigram row alone predicts.`;
+  const verb = phase === "prompt" ? `Your text, byte ${q} ${show(cur)}: the model still predicts what comes next (here, the next byte of your text).`
+    : `Writing after ${show(cur)}.`;
+  return { q, phase, op: null, pred: p, explain: `${verb} The current byte's bigram row gives the base prediction; ${via}${note}`, marks: {} };
+}
+
+// The trained reference: nothing in it has a name, so the step says only what is known for sure.
+function summarizeTrained(run, q, raw) {
+  const { pred: p, note } = drawnNote(run, q, raw.pred), cur = run.chars[q];
+  const phase = q < run.prompt_len - 1 ? "prompt" : "token";
+  const explain = `${phase === "prompt" ? "Your text" : "Writing after"} ${JSON.stringify(cur)}. A trained model: its 128 ` +
+    "dims are learned blends with no assigned meanings, so there is no rule to name here. Its 4 heads' attention shows " +
+    "where it looks (inside a word: the last bytes; after a space: often far back); compare the same text in the hand-built model." + note;
+  return { q, phase, op: null, pred: p, explain, marks: {} };
+}
+
 const summarizeStep = (run, q, raw) => (state.model === "life" ? summarizeLife(run, q, raw)
   : state.model === "c" ? summarizeC(run, q, raw) : state.model === "parse" ? summarizeParse(run, q, raw)
+  : state.model === "lm" ? summarizeLM(run, q, raw)
+  : state.model === "lmt" ? summarizeTrained(run, q, raw)
   : summarize(run, q, raw));
 const phaseClass = (s) => (s.phase === "op" ? `ph-${s.op || "prompt"}` : `ph-${s.phase}`);
 
@@ -340,6 +381,8 @@ const GRAPH_CIRCUITS = {
   c: [["rules", "the rules"], ["lookups", "lookups"], ["keywords", "keywords"], ["landmarks", "landmarks"]],
   parse: [["rules", "the rules"], ["stack", "the stack search"], ["lookahead", "the lookahead"],
           ["record", "record fields"], ["landmarks", "landmarks"]],
+  lm: [["heads", "the conditional heads"], ["bigram", "the bigram path"]],
+  lmt: [["learned", "the learned dims"]],
 };
 
 /** Show the parts of the page that belong to the current model (legend, guide, graph menu, input hint). */
@@ -355,10 +398,20 @@ function applyModelChrome() {
   $("code-input").hidden = !info.multiline;
   inputBox().placeholder = info.input_hint;
   inputBox().dataset.tip = `Input for the ${info.title}: ${info.input_hint}.`;
+  $("decode-ctl").hidden = !info.sampling; // greedy or sampled: only for the language models
   document.title = `handformer · ${info.title}`;
 }
 
 /** Switch the page to another model and run its default (or given) input. */
+/** The decoding the controls ask for: {temperature, seed} to sample, or null for greedy (and for
+ *  every model that decodes greedily only). */
+function decodeSample() {
+  if (!state.info?.sampling || $("decode").value !== "sample") return null;
+  const temperature = Math.min(5, Math.max(0.05, Number($("temp").value) || 1));
+  const seed = Math.min(0xFFFFFFFF, Math.max(0, Math.floor(Number($("seed").value) || 0)));
+  return { temperature, seed };
+}
+
 async function switchModel(key, input = null) {
   if (key === state.model && state.info) return;
   log("switching model", state.model, "->", key);
@@ -410,6 +463,11 @@ function answerOf(run) {
   if (state.model === "c") {
     const written = run.chars.length - run.prompt_len - (run.finished ? 1 : 0), source = run.prompt_len - 2;
     return `${written} of ${source} source bytes classified` + (run.finished ? "" : " (did not finish)");
+  }
+  if (state.model === "lm" || state.model === "lmt") { // the continuation it wrote
+    const raw = text.slice(run.prompt_len);
+    const a = [...raw].map((c) => (c === "\n" ? "⏎" : c >= " " && c <= "~" ? c : "·")).join("");
+    return (a.length > 60 ? `${a.slice(0, 60)}…` : a) + (run.finished ? "" : " (cut off)");
   }
   if (state.model === "parse") {
     const recs = parseRecords(run.chars, run.chars.length - 1);
@@ -533,10 +591,12 @@ async function runExpression(expression, keepStep = null, { maxNew = null } = {}
   state.running = true;
   try {
     const ko = koCount() ? JSON.parse(JSON.stringify(state.ko)) : null; // the set this request was made with
-    const body = { expression, ...(ko ? { knockout: ko } : {}), ...(maxNew ? { max_new: maxNew } : {}) };
+    const sample = decodeSample(); // language models: the seeded draw (null: greedy)
+    const body = { expression, ...(ko ? { knockout: ko } : {}), ...(maxNew ? { max_new: maxNew } : {}),
+      ...(sample ? { sample } : {}) };
     const run = await api("/api/run", body);
     if (ko && !state.baseline.has(run.expression)) {
-      const normal = await api("/api/run", { expression }); // also the difference view's comparison run
+      const normal = await api("/api/run", { expression, ...(sample ? { sample } : {}) }); // the comparison run, same draws
       state.base = normal;
       state.baseline.set(run.expression, answerOf(normal));
     } else if (!ko) {
@@ -567,7 +627,8 @@ async function runExpression(expression, keepStep = null, { maxNew = null } = {}
       (koCount() ? ` · ${koCount()} part(s) knocked out` : "") +
       (run.unknown_chars ? ` · fed bytes it has no input features for (${JSON.stringify(run.unknown_chars)}): ` +
         "they reach the model as just the constant 'one', so this is what the weights do with them" : "") +
-      (cutOff ? ` · cut off after ${written} bytes: it never wrote its final newline` : ""));
+      (cutOff ? ` · cut off after ${written} bytes: it never wrote its final newline` : "") +
+      (run.sample ? ` · sampled at temperature ${run.sample.temperature}, seed ${run.sample.seed}` : ""));
     if (cutOff && run.budget < run.max_budget) { // let it keep going: a question of memory, not of hiding anything
       const more = Math.min(run.max_budget, 2 * run.budget);
       const b = document.createElement("button");
@@ -969,10 +1030,32 @@ function renderHeadDetail(p) {
   const score = spec.query.map((qf, i) => `(${qf})·key[${spec.key[i]}]`).join("\n     + ");
   const value = Object.entries(spec.value).map(([src, dst]) => `${src} → ${dst}`).join("\n       ");
   const top = h.top.map(([k, w]) => `${k} ${JSON.stringify(state.run.chars[k])} ${(w * 100).toFixed(2)}%`).join(", ");
-  const wrote = Object.entries(h.wrote).map(([d, v]) => `${d} += ${fmt(v)}`).join("\n       ") || "(nothing)";
-  el.textContent = `L${layer + 1} ${spec.name}\nscore = ${score}\nvalue: ${value}\nreads: ${top}\nwrote: ${wrote}\nsource: `;
+  const writes = Object.entries(h.wrote).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
+  const brief = writes.slice(0, HEAD_WRITES_SHOWN).map(([d, v]) => `${d} += ${fmt(v)}`).join("\n       ") || "(nothing)";
+  const more = writes.length > HEAD_WRITES_SHOWN ? `\n       … and ${writes.length - HEAD_WRITES_SHOWN} more (all of them below)` : "";
+  // always shown: what it is, where it looked, what it mostly wrote
+  el.textContent = `L${layer + 1} ${spec.name}\nreads: ${top}\nwrote: ${brief}${more}\nsource: `;
   el.append(srcLinks(spec.src), document.createElement("br"), koButton("heads", [layer, head]));
+  // the formulas (and every write): open when short, collapsed when long (a trained head's are
+  // hundreds of terms); once toggled, the viewer's choice holds across steps and heads
+  const full = `score = ${score}\nvalue: ${value}` +
+    (writes.length > HEAD_WRITES_SHOWN ? `\nwrote (all ${writes.length}): ${writes.map(([d, v]) => `${d} += ${fmt(v)}`).join("\n       ")}` : "");
+  const box = document.createElement("details");
+  box.className = "head-formulas";
+  box.open = state.headFormulasOpen ?? full.length <= HEAD_FORMULAS_OPEN_MAX;
+  const sum = document.createElement("summary");
+  sum.textContent = `formulas · ${spec.query.length} score term${spec.query.length === 1 ? "" : "s"}, ` +
+    `${Object.keys(spec.value).length} value entr${Object.keys(spec.value).length === 1 ? "y" : "ies"}` +
+    (full.length > HEAD_FORMULAS_OPEN_MAX ? ` · ${full.length.toLocaleString()} characters` : "");
+  const body = document.createElement("pre");
+  body.className = "head-formulas-body";
+  body.textContent = full;
+  box.append(sum, body);
+  sum.addEventListener("click", () => { state.headFormulasOpen = !box.open; }); // the viewer's click only (not the default)
+  el.append(box);
 }
+const HEAD_WRITES_SHOWN = 6; // the largest writes, always visible
+const HEAD_FORMULAS_OPEN_MAX = 600; // characters: longer formulas start collapsed
 
 function renderDims(p) {
   const filter = $("dim-filter").value.trim().toLowerCase();
@@ -1471,6 +1554,17 @@ function wire() {
   $("btn-link").addEventListener("click", copyLink);
   $("model-sel").addEventListener("change", (e) => switchModel(e.target.value).catch((err) => setStatus(err.message, true)));
   $("diff").addEventListener("change", () => state.pos.has(state.q) && renderMap(state.pos.get(state.q)));
+  // decoding (language models): rerun on any change; T and seed matter only when sampling
+  const syncDecode = () => { const off = $("decode").value !== "sample"; $("temp").disabled = off; $("seed").disabled = off; };
+  syncDecode();
+  for (const id of ["decode", "temp", "seed"]) {
+    $(id).addEventListener("change", () => {
+      syncDecode();
+      state.baseline.clear(); // the knockout comparison must use the same draws
+      log("decoding", JSON.stringify(decodeSample()) || "greedy");
+      if (state.run) keepView(() => runExpression(state.run.expression, state.q)).catch((e) => setStatus(e.message, true));
+    });
+  }
   // heatmap row options (remembered in this browser, like the pins and sizes)
   for (const [id, key] of [["row-names", "handviz.rownames"], ["map-circuits", "handviz.mapcircuits"], ["map-hide-unused", "handviz.hideunused"]]) {
     const box = $(id);
@@ -1513,13 +1607,16 @@ function wire() {
   });
   attachHeatmapEvents($("map"), $("tooltip"));
   $("show-zero").addEventListener("change", () => state.pos.has(state.q) && renderDims(state.pos.get(state.q)));
+  // Step keys (arrows, Home, End). None while typing in a field (the text box, the code box, a
+  // number, a menu) or on a resize grip: there the keys keep their own meaning. The space bar is
+  // not a shortcut at all: it is a character in text.
   document.addEventListener("keydown", (e) => {
-    if (e.target.tagName === "INPUT" && e.target.type === "text") return;
+    const t = e.target;
+    if (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || t.closest?.("[role=separator]")) return;
     if (e.key === "ArrowRight") { e.preventDefault(); goto(state.q + 1); }
     else if (e.key === "ArrowLeft") { e.preventDefault(); goto(state.q - 1); }
     else if (e.key === "Home" && state.run) { e.preventDefault(); goto(state.run.prompt_len - 1); }
     else if (e.key === "End" && state.run) { e.preventDefault(); goto(state.run.chars.length - 2); }
-    else if (e.key === " ") { e.preventDefault(); play(); }
   });
 }
 
@@ -1957,6 +2054,7 @@ function viewParams() {
   if (!state.run) return h;
   if (state.model !== "calc") h.set("m", state.model);
   h.set("e", state.run.expression);
+  if (state.run.sample) h.set("dec", `${state.run.sample.temperature},${state.run.sample.seed}`);
   h.set("q", String(state.q));
   h.set("map", state.map);
   if (state.head) h.set("head", state.head.join("."));
@@ -1989,7 +2087,8 @@ function readHash() {
   const head = /^(\d+)\.(\d+)$/.exec(h.get("head") || "");
   return { m: h.get("m"), e: h.get("e"), q: num("q"), map: h.get("map"), head: head ? [Number(head[1]), Number(head[2])] : null,
            ml: num("ml"), snap: num("snap"), g: h.get("g"), pins: (h.get("pins") || "").split(",").filter(Boolean),
-           ko, diff: h.get("diff") !== "0", any: h.toString().length > 0 };
+           ko, diff: h.get("diff") !== "0", any: h.toString().length > 0,
+           dec: /^[\d.]+,\d+$/.test(h.get("dec") || "") ? h.get("dec").split(",").map(Number) : null };
 }
 async function copyLink() {
   scheduleHash();
@@ -2048,6 +2147,7 @@ async function main() {
     setStatus(`${state.info.layers.length} layers · d_model ${state.info.d_model} · ${state.info.nonzero_params} hand-written params`);
     if (v.any) log("opening the view from the link", location.hash.length, "chars");
     if (v.e) setInput(v.e);
+    if (v.dec && state.info.sampling) { $("decode").value = "sample"; [$("temp").value, $("seed").value] = v.dec; }
     state.ko = v.ko;
     if (v.map && document.querySelector(`[data-map="${v.map}"]`)) {
       state.map = v.map;

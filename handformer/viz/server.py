@@ -24,11 +24,17 @@ class Knockout(BaseModel):
     dims: list[str] = []
 
 
+class SampleBody(BaseModel):
+    temperature: float = Field(ge=0.05, le=5.0)
+    seed: int = Field(ge=0, le=0xFFFFFFFF)
+
+
 class RunBody(BaseModel):
     model: str = "calc"
     expression: str = Field(min_length=1, max_length=8000)  # each model checks its own limit
     knockout: Knockout | None = None
     max_new: int | None = Field(default=None, ge=1, le=100_000)  # "run longer"; the model's own limit still applies
+    sample: SampleBody | None = None  # language models: seeded sampling instead of greedy
 
 
 class PositionBody(BaseModel):
@@ -116,7 +122,8 @@ def create_app(runners: dict[str, Runner]) -> FastAPI:
 
     @app.post("/api/run")
     def run(body: RunBody) -> dict:
-        return pick(body.model).run(body.expression, body.knockout.model_dump() if body.knockout else None, body.max_new)
+        return pick(body.model).run(body.expression, body.knockout.model_dump() if body.knockout else None, body.max_new,
+                                    body.sample.model_dump() if body.sample else None)
 
     @app.post("/api/position")
     def position(body: PositionBody) -> dict:

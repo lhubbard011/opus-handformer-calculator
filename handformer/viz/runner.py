@@ -22,6 +22,7 @@ import numpy as np
 from .. import ablate, common as cm
 from ..model import Form, Tracer
 from . import sources
+from ..sampling import Sampling
 from .models import MODELS, ModelDef
 from .glossary import describe_dim, describe_head
 
@@ -258,7 +259,8 @@ class Runner:
             "name": "handformer",
             "model": self.spec.key, "title": self.spec.title, "marks": list(self.spec.marks),
             "default_input": self.spec.default_input, "input_hint": self.spec.input_hint,
-            "multiline": self.spec.multiline, "node_names": dict(self.spec.node_names),
+            "multiline": self.spec.multiline, "node_names": dict(self.spec.node_names), **self.spec.extra_info,
+            "sampling": self.spec.sampling,
             "model_id": self.model_id,
             "d_model": len(self.layout),
             # the dims the unembedding reads: the only ones a logit depends on directly
@@ -285,15 +287,24 @@ class Runner:
         self.ko_models.move_to_end(key)
         return self.ko_models[key]
 
-    def run(self, expression: str, knockout: dict | None = None, max_new: int | None = None) -> dict:
+    def run(self, expression: str, knockout: dict | None = None, max_new: int | None = None,
+            sample: dict | None = None) -> dict:
         """``max_new``: how many bytes the model may write ("run longer"), up to the model's limit;
-        by default a knocked-out run or one with unknown bytes is cut off sooner (see the budgets)."""
+        by default a knocked-out run or one with unknown bytes is cut off sooner (see the budgets).
+        ``sample`` ({"temperature", "seed"}, language models only): seeded sampling instead of the
+        argmax (handformer/sampling.py)."""
+        sampling = None
+        if sample is not None:
+            if not self.spec.sampling:
+                raise ValueError(f"the {self.spec.title} decodes greedily only (one right byte at each step)")
+            sampling = Sampling(float(sample["temperature"]), int(sample["seed"]))
         prompt = self.spec.prompt(expression)  # checks the input and its framing, or ValueError
-        expression = bytes(prompt[1:-1]).decode("utf-8")
+        pre, end = len(self.spec.prompt_prefix.encode()), len(self.spec.prompt_end.encode())
+        expression = bytes(prompt[pre:len(prompt) - end]).decode("utf-8")
         ko = ablate.Knockout.from_request(knockout)
         model = self._model_for(ko)
         t0 = time.perf_counter()
-        budget = max_budget = self.spec.max_tokens - len(prompt)  # the model stops itself at '\n'
+        budget = max_budget = min(self.spec.max_tokens - len(prompt), self.spec.max_new or self.spec.max_tokens)
         if ko:
             normal = self._normal_len(expression, prompt, budget)
             budget = knockout_budget(normal, budget)
@@ -305,7 +316,9 @@ class Runner:
         if max_new is not None:  # asked for: the viewer's choice beats both caps
             budget = max(1, min(max_budget, int(max_new)))
             log.info("run longer: %d new bytes allowed", budget)
-        tokens = model.generate(prompt, stop=cm.EOS, max_new=budget)
+        tokens = model.generate(prompt, stop=cm.EOS, max_new=budget, sample=sampling)
+        if sampling:
+            log.info("sampled at temperature %g, seed %d", sampling.temperature, sampling.seed)
         t1 = time.perf_counter()
         rec = _Recorder()
         logits = model.residual(tokens, trace=rec) @ model.unembed
@@ -329,6 +342,7 @@ class Runner:
             # bytes the model has no input features for (lenient models let them in): see what it does
             "unknown_chars": unknown,
             "budget": budget, "max_budget": max_budget,  # bytes the model could write this run / at most
+            "sample": {"temperature": sampling.temperature, "seed": sampling.seed} if sampling else None,
             "knockout": run.knockout,
             "steps": [self._step(run, q) for q in range(len(tokens))],
             "snapshots": list(rec.labels),

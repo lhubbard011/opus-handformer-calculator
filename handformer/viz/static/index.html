@@ -16,12 +16,18 @@
       <input id="expr-input" type="text" value="2+3*(4-1)" spellcheck="false" autocomplete="off" aria-label="Expression">
       <textarea id="code-input" class="code-input" rows="7" spellcheck="false" aria-label="C source" hidden></textarea>
       <button type="submit" class="primary" data-tip="Run the expression through the model and record every internal value.">Run</button>
+      <span id="decode-ctl" class="decode-ctl" hidden>
+        <select id="decode" aria-label="Decoding" data-tip="How the host picks each next byte from the model's distribution. Greedy: always the most likely one (language models soon loop). Sample: draw it with the model's own probabilities, from a seed (the same seed always gives the same text). Either way the model computes every probability; the host only chooses.">
+          <option value="greedy">greedy</option><option value="sample">sample</option></select>
+        <label data-tip="Temperature: 1 draws with the model's own probabilities; lower is more cautious (toward greedy), higher more adventurous.">T <input id="temp" type="number" min="0.05" max="5" step="0.1" value="1"></label>
+        <label data-tip="The seed of the random draws: change it for another text, keep it to get the same one again.">seed <input id="seed" type="number" min="0" max="4294967295" step="1" value="0"></label>
+      </span>
     </form>
     <div class="controls">
       <button id="btn-first" data-tip="Go to the first step: the '=' at the end of your prompt.">⏮</button>
       <button id="btn-back" data-tip="One character back (← key).">◀</button>
       <button id="btn-step" data-tip="One character forward (→ key).">Step ▶</button>
-      <button id="btn-play" data-tip="Step through automatically (space bar).">Play</button>
+      <button id="btn-play" data-tip="Step through automatically (click again to pause).">Play</button>
       <button id="btn-link" data-tip="Copy a link to exactly this view: the expression, step, heatmap, head, pinned panels and knockouts. Paste it in a review or an issue.">🔗 link</button>
       <label data-tip="Hide the parts of the model that are switched off at this step, so only the relevant notes and units are listed."><input id="focus" type="checkbox" checked> focus active circuit</label>
       <label>speed
@@ -46,6 +52,12 @@
         <span class="lg ph-number" data-tip="A number (pp-number: digits, letters, '.', exponent signs).">number</span><span class="lg ph-string" data-tip="A string literal, its escapes and quotes.">string</span>
         <span class="lg ph-char" data-tip="A character constant.">char</span><span class="lg ph-comment" data-tip="A block or line comment.">comment</span>
         <span class="lg ph-preproc" data-tip="A preprocessing directive: a line starting with '#'.">directive</span><span class="lg ph-punct" data-tip="A punctuator or operator.">punct</span>
+      </span>
+      <span class="legend" data-model="lmt" hidden>
+        <span class="lg ph-prompt" data-tip="Your text: the model predicts each next byte of it too.">your text</span><span class="lg ph-token" data-tip="Bytes the model wrote: the most likely next byte each time (greedy).">written</span>
+      </span>
+      <span class="legend" data-model="lm" hidden>
+        <span class="lg ph-prompt" data-tip="Your text: the model predicts each next byte of it too.">your text</span><span class="lg ph-token" data-tip="Bytes the model wrote: the most likely next byte each time (greedy).">written</span>
       </span>
       <span class="legend" data-model="parse" hidden>
         <span class="lg ph-keyword" data-tip="First the model lexes: one letter per source byte, the C highlighter's own weights (coloured as there).">letters</span>

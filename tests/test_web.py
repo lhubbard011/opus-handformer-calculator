@@ -192,6 +192,39 @@ class TestWebParity(unittest.TestCase):
         bad = self.node([["/api/run", {"expression": "int\x01x;"}]], c_dir)
         self.assertIn("unsupported characters", bad[0]["error"])
 
+    def test_random_draws_match(self):
+        """mulberry32 gives the same numbers in Python (handformer/sampling.py) and JS (engine.js)."""
+        from handformer.sampling import Mulberry32
+        script = ("import { mulberry32 } from './handformer/viz/static/engine.js';"
+                  "for (const seed of [0, 1, 7, 4294967295]) { const r = mulberry32(seed);"
+                  " console.log(JSON.stringify([seed, ...Array.from({length: 50}, r)])); }")
+        proc = subprocess.run([NODE, "--experimental-detect-module", "--no-warnings", "--input-type=module", "-e", script],
+                              capture_output=True, text=True, cwd=ROOT,
+                              timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for line in proc.stdout.strip().splitlines():
+            seed, *js = json.loads(line)
+            r = Mulberry32(seed)
+            self.assertEqual(js, [r.next() for _ in range(50)], f"seed {seed}")
+
+    @unittest.skipUnless((ROOT / "data" / "tinyshakespeare" / "input.txt").exists(),
+                         "Tiny Shakespeare not fetched (python tools/fetch_corpus.py)")
+    def test_lm_sampling_matches(self):
+        """The language model's seeded samples: the same bytes from the page's engine and the server's."""
+        lm_dir = self.tmp / "lm"
+        export_web.export(lm_dir, "lm")
+        r = Runner("lm")
+        for sample in ({"temperature": 1.0, "seed": 7}, {"temperature": 0.7, "seed": 8}, None):
+            with self.subTest(sample=sample):
+                body = {"expression": "ROMEO:\nWhat light", **({"sample": sample} if sample else {})}
+                js = self.node([["/api/run", body]], lm_dir)[0]
+                py = r.run(body["expression"], sample=sample)
+                self.assertNotIn("error", js, js)
+                self.assertEqual(js["chars"], py["chars"])
+                self.assertEqual(js["sample"], py["sample"])
+        with self.assertRaisesRegex(ValueError, "greedily only"):
+            self.runner.run("2+3", sample={"temperature": 1.0, "seed": 1})
+
     def test_parse_matches(self):
         """The parser: same records, step values and traces in both engines, and a knockout of the stack head."""
         p_dir = self.tmp / "parse"

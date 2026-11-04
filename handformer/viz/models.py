@@ -6,13 +6,15 @@ for its own dims. Display and input framing only; nothing here touches a weight.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 import yaml
 
 from .. import arith, common as cm, cparse, csyntax, expr, frame, life
+from ..lm import viz as lmviz
 
 log = logging.getLogger(__name__)
 SHOWN_FILE = Path(__file__).with_name("models.yaml")  # which models the drop-down offers
@@ -66,7 +68,7 @@ class ModelDef:
     category: Callable[[str], str]
     marks: tuple[str, ...]  # pointer dims tagged on the sequence strip
     summary: tuple[str, ...]  # dims the page reads at every step
-    docs: dict[str, str]  # docs for this model's own dims (others come from the glossary)
+    docs: Mapping[str, str]  # docs for this model's own dims (others come from the glossary)
     max_tokens: int
     default_input: str
     input_hint: str
@@ -75,11 +77,15 @@ class ModelDef:
     input_pattern: str  # regex the input must match (input framing only)
     pattern_error: str
     strip_spaces: bool = True  # the calculator and Life ignore spaces; C source keeps them
-    prompt_end: str = "="  # the byte that ends the prompt
+    prompt_end: str = "="  # the byte that ends the prompt ("" for none)
+    prompt_prefix: str = "\n"  # the byte the prompt starts with
     max_input: int = 400
     multiline: bool = False  # the page shows a code box instead of a one-line input
     node_names: tuple[tuple[str, str], ...] = ()  # parser: node code -> name (the page's tree view)
     lenient: bool = False  # any input goes in, as its UTF-8 bytes (to see what the weights do); runs list the unknown ones
+    extra_info: dict = field(default_factory=dict)  # model-specific facts the page needs (sent with /api/info)
+    max_new: int | None = None  # at most this many written bytes per run (None: up to max_tokens)
+    sampling: bool = False  # the page may ask for seeded sampling instead of greedy decoding (language models)
 
 
 C_SAMPLE = """#include <stdio.h>
@@ -132,6 +138,19 @@ MODELS = {
                       "".join(sorted(csyntax.circuit.ALLOWED)), csyntax.circuit.CHARS_HINT, r"\S",
                       "empty source", strip_spaces=False, prompt_end="\x03", max_input=PARSE_MAX_INPUT,
                       multiline=True, node_names=tuple(cparse.toy.NAMES.items())),
+    # Needs the corpus (python tools/fetch_corpus.py); offered locally with --models, not on the site.
+    "lm": ModelDef("lm", "language model (stage 1: trigram heads)", lmviz.builder, lmviz.prompt, lmviz.category,
+                   (), (), lmviz.LazyDocs(), lmviz.MAX_INPUT + 1 + lmviz.MAX_NEW, lmviz.SAMPLE, lmviz.HINT,
+                   "".join(chr(c) for c in range(32, 127)) + "\n\t", "", r"[\s\S]", "empty text",
+                   strip_spaces=False, prompt_end="", prompt_prefix="\x02", max_input=lmviz.MAX_INPUT, multiline=True,
+                   lenient=True, extra_info={"byte_names": lmviz.BYTE_NAMES}, max_new=lmviz.MAX_NEW, sampling=True),
+    # The trained reference under the same constraints (no LayerNorm, no biases, p and p^2 only), to
+    # compare with "lm" head by head (tools/train_reference.py --arch engine; local only, like "lm").
+    "lmt": ModelDef("lmt", "language model, trained (1 layer, no LayerNorm)", lmviz.trained_builder, lmviz.trained_prompt,
+                    lmviz.trained_category, (), (), lmviz.TRAINED_DOCS, lmviz.TRAINED_CTX, lmviz.SAMPLE,
+                    lmviz.TRAINED_HINT, "".join(chr(c) for c in range(32, 127)) + "\n\t", "", r"[\s\S]",
+                    "empty text", strip_spaces=False, prompt_end="", prompt_prefix="", max_input=lmviz.TRAINED_CTX - 1,
+                    multiline=True, lenient=True, max_new=lmviz.MAX_NEW, sampling=True),
 }
 
 

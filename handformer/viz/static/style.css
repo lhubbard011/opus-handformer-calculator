@@ -444,4 +444,12 @@ svg.pd.dla .pd-item.dla-pos { fill: #7bd88f; opacity: 1; transform: scale(1.6); 
 svg.pd.dla .pd-item.dla-neg { fill: #f07178; opacity: 1; transform: scale(1.6); }
 svg.pd .pd-row.dla-pos .pd-box { stroke: #7bd88f; }
 .tr-dla-row.tr-dla-dim { grid-template-columns: minmax(0, 1fr) auto; }
+/* the selected head's formulas (app.js renderHeadDetail): collapsible, long ones start closed */
+.head-formulas { margin-top: 6px; }
+.head-formulas > summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+.head-formulas-body { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow: auto; font: inherit; }
+/* decoding control (language models only): greedy or a seeded draw */
+.decode-ctl { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 12px; }
+.decode-ctl input[type="number"] { width: 5.5em; }
+.decode-ctl[hidden] { display: none; }
 

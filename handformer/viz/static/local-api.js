@@ -86,7 +86,7 @@ export class LocalApi {
     const t0 = performance.now();
     const route = {
       "/api/info": () => this.info,
-      "/api/run": () => this.run(body.expression, body.knockout, body.max_new),
+      "/api/run": () => this.run(body.expression, body.knockout, body.max_new, body.sample),
       "/api/position": () => this.position(body.run_id, body.q),
       "/api/attention": () => this.attentionMap(body.run_id, body.layer, body.head),
       "/api/residual": () => this.residualMap(body.run_id, body.snapshot),
@@ -117,7 +117,12 @@ export class LocalApi {
     return this.koModels.get(key);
   }
 
-  run(expression, knockout, maxNew = null) {
+  run(expression, knockout, maxNew = null, sample = null) {
+    if (sample) { // the same checks as the server (handformer/viz/server.py SampleBody, runner.run)
+      if (!this.cfg.sampling) throw new Error(`the ${this.info.title} decodes greedily only (one right byte at each step)`);
+      if (!(sample.temperature >= 0.05 && sample.temperature <= 5)) throw new Error("temperature outside 0.05..5");
+      if (!(Number.isInteger(sample.seed) && sample.seed >= 0 && sample.seed <= 0xFFFFFFFF)) throw new Error("seed outside 0..4294967295");
+    }
     expression = String(expression);
     if (this.cfg.strip_spaces) {  // the calculator and Life ignore spaces and a trailing '='; C keeps its source
       expression = expression.replaceAll(" ", "");
@@ -132,9 +137,9 @@ export class LocalApi {
     if (!this.cfg.lenient && bad.length) throw new Error(`unsupported characters: '${bad.join("")}' ${this.cfg.chars_hint}`);
     if (bad.length) log(`input has bytes the model has no features for: ${JSON.stringify(bad.join(""))}`);
     if (!this.cfg.lenient && !new RegExp(this.cfg.input_pattern).test(expression)) throw new Error(this.cfg.pattern_error);
-    const prompt = [...new TextEncoder().encode(`\n${expression}${this.cfg.prompt_end}`)]; // its UTF-8 bytes
+    const prompt = [...new TextEncoder().encode(`${this.cfg.prompt_prefix ?? "\n"}${expression}${this.cfg.prompt_end}`)]; // its UTF-8 bytes
     const ko = normKnockout(knockout);
-    let budget = this.cfg.max_tokens - prompt.length;
+    let budget = Math.min(this.cfg.max_tokens - prompt.length, this.cfg.max_new ?? this.cfg.max_tokens);
     const maxBudget = budget;
     if (!koEmpty(ko)) {
       if (!this.normalLen.has(expression)) {
@@ -151,7 +156,7 @@ export class LocalApi {
       budget = Math.max(1, Math.min(maxBudget, Math.floor(maxNew)));
       log(`run longer: ${budget} new bytes allowed`);
     }
-    const tr = this._modelFor(ko).generate(prompt, budget, this.cfg.top_keys);
+    const tr = this._modelFor(ko).generate(prompt, budget, this.cfg.top_keys, sample);
     const runId = Math.random().toString(16).slice(2, 14).padEnd(12, "0");
     this.runs.set(runId, { expression, tr, promptLen: prompt.length });
     while (this.runs.size > MAX_RUNS) {
@@ -171,6 +176,7 @@ export class LocalApi {
       finished,
       unknown_chars: this.cfg.lenient ? bad.join("") : "",
       budget, max_budget: maxBudget,
+      sample: sample ? { temperature: sample.temperature, seed: sample.seed } : null,
       knockout: ko,
       steps: tokens.map((_, q) => this._step(tr, q)),
       snapshots: this.labels,

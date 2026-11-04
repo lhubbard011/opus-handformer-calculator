@@ -66,16 +66,18 @@ export class Model {
   }
 
   /** Greedy decode from prompt bytes until EOS or maxNew bytes; returns a Trace. */
-  generate(prompt, maxNew, topKeys) {
+  generate(prompt, maxNew, topKeys, sample = null) {
     const t0 = performance.now();
     const tr = new Trace(this, prompt.length + maxNew, topKeys);
     let logits = null;
     for (const t of prompt) logits = tr.step(t);
     const out = [...prompt];
     let finished = false;
+    const rng = sample ? mulberry32(sample.seed) : null; // the language models: a seeded draw (handformer/sampling.py)
     for (let s = 0; s < maxNew; s++) {
       let best = 0;
-      for (let b = 1; b < logits.length; b++) if (logits[b] > logits[best]) best = b;
+      if (rng) best = draw(logits, sample.temperature, rng);
+      else for (let b = 1; b < logits.length; b++) if (logits[b] > logits[best]) best = b;
       out.push(best);
       if (best === this.eos) { finished = true; break; }
       logits = tr.step(best);
@@ -87,6 +89,30 @@ export class Model {
     if (!finished) console.warn("[engine] hit max_new without EOS");
     return tr;
   }
+}
+
+/** mulberry32: the same 32-bit generator as handformer/sampling.py (same seed, same numbers). */
+export function mulberry32(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6D2B79F5) | 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** The first byte whose running total of exp(z - max z), z = logits / T, passes u * total (sampling.py draw). */
+export function draw(logits, temperature, rng) {
+  let mx = -Infinity;
+  for (let b = 0; b < logits.length; b++) mx = Math.max(mx, logits[b] / temperature);
+  const cum = new Float64Array(logits.length);
+  let acc = 0;
+  for (let b = 0; b < logits.length; b++) { acc += Math.exp(logits[b] / temperature - mx); cum[b] = acc; }
+  const u = rng() * acc;
+  for (let b = 0; b < logits.length; b++) if (cum[b] > u) return b;
+  return logits.length - 1;
 }
 
 /** Decode cache + compact trace of every position. */

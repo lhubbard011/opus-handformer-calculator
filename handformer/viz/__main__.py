@@ -6,7 +6,7 @@ import logging
 
 import uvicorn
 
-from .models import shown
+from .models import MODELS, shown
 from .runner import Runner
 from .server import create_app
 
@@ -18,13 +18,20 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8768)
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--models", help="comma-separated model keys to offer, in menu order, instead of models.yaml "
+                                         "(e.g. calc,lm: the language model needs the corpus, so it is local only)")
     args = parser.parse_args()
 
     logging.basicConfig(
         level=args.log_level.upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    runners = {key: Runner(key) for key in shown()}  # models.yaml: the drop-down, in menu order
+    keys = tuple(k.strip() for k in args.models.split(",") if k.strip()) if args.models else shown()
+    unknown = [k for k in keys if k not in MODELS]
+    if unknown:
+        parser.error(f"unknown model(s) {', '.join(unknown)} (one of {', '.join(MODELS)})")
+    log.info("offering %s%s", ", ".join(keys), " (--models)" if args.models else " (models.yaml)")
+    runners = {key: Runner(key) for key in keys}  # the drop-down, in menu order
     app = create_app(runners)
     log.info("serving on http://%s:%d", args.host, args.port)
     # log_config=None: uvicorn's loggers propagate to the root config above instead of installing their own.

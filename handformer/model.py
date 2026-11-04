@@ -380,8 +380,11 @@ class Transformer:
     def logits(self, tokens: list[int]) -> np.ndarray:
         return self.residual(tokens) @ self.unembed
 
-    def generate(self, tokens: list[int], stop: int, max_new: int) -> list[int]:
+    def generate(self, tokens: list[int], stop: int, max_new: int, sample=None) -> list[int]:
         """Greedy decoding until ``stop`` is emitted or ``max_new`` tokens.
+
+        ``sample`` (a ``sampling.Sampling``): draw each byte from the softmax of the logits at that
+        temperature, seeded, instead of taking the argmax (the language models; see sampling.py).
 
         Incremental (cached) decoding: the same per-position computation as
         ``residual``, but each new position reuses the cached layer inputs
@@ -394,8 +397,13 @@ class Transformer:
         for t in tokens:
             logits = cache.step(t)
         out = list(tokens)
+        rng = None
+        if sample is not None:
+            from .sampling import Mulberry32, draw
+
+            rng = Mulberry32(sample.seed)
         for step in range(max_new):
-            nxt = int(np.argmax(logits))
+            nxt = int(np.argmax(logits)) if rng is None else draw(logits, sample.temperature, rng)
             out.append(nxt)
             if nxt == stop:
                 log.debug("generate: stop byte after %d new tokens", step + 1)
