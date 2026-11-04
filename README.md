@@ -163,7 +163,8 @@ Each circuit is a short list of named heads and units, placed at fixed layers wi
 - **"Focus active circuit"** hides circuits that are switched off at the current step. They still run, but their outputs are gated to zero; untick it to see all 147 heads.
 - **Explanations:** hover (or tap) any dim, head, unit, byte or heatmap row name to see what it means.
 - **View source:** every head, unit and dim links to the line of Python that wrote it.
-- **Knock out:** switch off any head, unit or dim (its writes are zeroed in the weights) and re-run, to see what it is needed for. The bar shows the answer with and without it.
+- **Knock out:** switch off any head, unit or dim (its writes are zeroed in the weights) and re-run, to see what it is needed for. The bar shows the answer with and without it, and the heatmaps can show the **change vs the normal run**: the knockout's footprint across every layer and position.
+- **Links:** 🔗 copies a link to exactly the current view (expression, step, heatmap, head, pinned panels, knockouts).
 - **Circuit graph:** all circuits together (who feeds whom, and how they share the 22 layers), or one circuit's full dataflow by layer; generated from the weight specs. Click a value to see what it is computed from and what it feeds.
 - **Phones:** every feature works; tap replaces hover and the step controls sit in a bottom bar.
 

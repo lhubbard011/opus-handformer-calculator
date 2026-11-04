@@ -9,7 +9,8 @@ export const isTouch = () => matchMedia("(pointer: coarse)").matches;
 
 // spec: { key, rows, cols, get(r,c) -> raw, norm(raw) -> [0,1], lut, rowLabels[], groups[{row,label}],
 //         colLabel(c), valueText(r,c), rowTip(r) (hover on a row label), onClick(r,c), square,
-//         pointers[r] (column to trace per row: an attention head's argmax), colChars[c] (axis characters) }
+//         pointers[r] (column to trace per row: an attention head's argmax), colChars[c] (axis characters),
+//         markCol (a dashed vertical line at that column) }
 // view: { q } current query position (column, or row for attention)
 export function drawHeatmap(canvas, spec, view) {
   const wrap = canvas.parentElement;
@@ -56,7 +57,8 @@ export function drawHeatmap(canvas, spec, view) {
   // causal view: everything after the current step has not been computed yet
   const q = view.q;
   if (q !== undefined) {
-    ctx.fillStyle = spec.square ? "rgba(13,15,18,0.55)" : "rgba(13,15,18,0.72)";
+    // view.noDim: keep the current-step outline but don't dim later positions (difference view)
+    ctx.fillStyle = view.noDim ? "rgba(0,0,0,0)" : spec.square ? "rgba(13,15,18,0.55)" : "rgba(13,15,18,0.72)";
     if (spec.square) {
       ctx.fillRect(GUTTER, (q + 1) * rowH, plotW, plotH - (q + 1) * rowH);
       ctx.strokeStyle = "#f2a541";
@@ -69,6 +71,17 @@ export function drawHeatmap(canvas, spec, view) {
       ctx.lineWidth = 1.5;
       ctx.strokeRect(GUTTER + q * colW, 0, Math.max(colW, 1.5), plotH);
     }
+  }
+
+  // a marked column (the knockout difference view: where the two runs' text first differs)
+  if (spec.markCol !== undefined && spec.markCol >= 0 && spec.markCol < spec.cols) {
+    ctx.save();
+    ctx.strokeStyle = "#e07bd0";
+    ctx.setLineDash([4, 3]);
+    ctx.lineWidth = 1.5;
+    const x = GUTTER + spec.markCol * colW;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, plotH); ctx.stroke();
+    ctx.restore();
   }
 
   // row labels and circuit group separators

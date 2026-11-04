@@ -18,6 +18,7 @@
       <button id="btn-back" data-tip="One character back (← key).">◀</button>
       <button id="btn-step" data-tip="One character forward (→ key).">Step ▶</button>
       <button id="btn-play" data-tip="Step through automatically (space bar).">Play</button>
+      <button id="btn-link" data-tip="Copy a link to exactly this view: the expression, step, heatmap, head, pinned panels and knockouts. Paste it in a review or an issue.">🔗 link</button>
       <label data-tip="Hide the parts of the model that are switched off at this step, so only the relevant notes and units are listed."><input id="focus" type="checkbox" checked> focus active circuit</label>
       <label>speed
         <select id="speed">
@@ -121,7 +122,9 @@
         <li><b>Knock out</b> a head, unit or value (buttons on the selected head, an opened value, every active unit)
           and re-run: if it matters, the answer changes.
           <button class="try" data-try='{"expr":"47+38","phase":"op","knockOutWriters":"add.carry","layer":3}'>knock out the carry</button>
-          (47+38 becomes 75: the carry from 7+8 is gone).</li>
+          (47+38 becomes 75: the carry from 7+8 is gone). With a knockout on, the heatmaps show
+          <b>change vs normal</b>: the cells it alters, at every layer and position, i.e. its footprint.</li>
+        <li><b>Share a view:</b> 🔗 link copies a URL that reopens this exact view, knockouts included.</li>
         <li><b>View source</b> (<code>file.py:line ↗</code> links) opens the Python line that wrote any head, unit or
           value; <b>Raw weights</b> shows the numbers themselves.</li>
         <li><b>Hover anything</b> (tap on a phone) for what it means; every heatmap has a "How to use this map" box.</li>
@@ -167,6 +170,7 @@
         <button role="tab" data-map="mlp" data-tip="How strongly each calculating unit (rows) fired at each character (columns), for one layer.">MLP activations</button>
         <button role="tab" data-map="weights" data-tip="The hand-written numbers themselves, labelled by what they connect.">Raw weights</button>
       </nav>
+      <label id="diff-ctl" class="diff-ctl" hidden data-tip="With parts knocked out, show how each value changed compared with the normal run (knocked-out minus normal), instead of the raw values. Every lit cell is part of the knockout's footprint."><input id="diff" type="checkbox" checked> show change vs normal</label>
       <span id="map-controls" class="map-controls">
         <label data-for="residual">after <select id="snapshot"></select></label>
         <label data-for="mlp">layer <select id="mlp-layer"></select></label>

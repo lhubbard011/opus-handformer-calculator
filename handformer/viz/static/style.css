@@ -248,3 +248,5 @@ button.pin { font-size: 11px; padding: 1px 6px; border-color: var(--border); }
   .pinned[data-layout="small"] #pinned-small { display: grid; grid-template-columns: repeat(var(--n), minmax(0, 1fr)); align-items: start; }
 }
 .pinned[hidden] { display: none; }
+.diff-ctl { display: flex; gap: 6px; align-items: center; font-size: 12px; font-weight: 600; color: #e07bd0; }
+.diff-ctl[hidden] { display: none; }

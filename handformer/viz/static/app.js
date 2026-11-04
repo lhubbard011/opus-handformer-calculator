@@ -318,8 +318,13 @@ async function runExpression(expression, keepStep = null) {
     const body = ko ? { expression, knockout: ko } : { expression };
     const run = await api("/api/run", body);
     if (ko && !state.baseline.has(run.expression)) {
-      state.baseline.set(run.expression, answerOf(await api("/api/run", { expression })));
-    } else if (!ko) state.baseline.set(run.expression, answerOf(run));
+      const normal = await api("/api/run", { expression }); // also the difference view's comparison run
+      state.base = normal;
+      state.baseline.set(run.expression, answerOf(normal));
+    } else if (!ko) {
+      state.baseline.set(run.expression, answerOf(run));
+      state.base = run; // the normal run itself
+    }
     if (seq !== state.runSeq) { log("dropping a stale run response", run.run_id); return; }
     state.running = false;
     run.steps = run.steps.map((raw, q) => summarize(run, q, raw));
@@ -742,8 +747,149 @@ function syncHeadPicker() {
   $("a-head").value = head;
 }
 
+// ------------------------------------------------------------------ knockout difference view
+// With parts knocked out, a heatmap can show knocked-out minus normal: the knockout's causal
+// footprint. Both runs share their first bytes (the prompt and whatever the knockout left
+// unchanged); after the first byte where their text differs, the inputs differ too, which the
+// map marks with a dashed line.
+
+/** The normal (nothing knocked out) run of the current expression, for comparison. */
+async function baseRun() {
+  const e = state.run.expression;
+  if (!state.base || state.base.expression !== e) {
+    state.base = await api("/api/run", { expression: e });
+    log("difference view: normal run", state.base.run_id, "for", e);
+  }
+  return state.base;
+}
+
+/** mapData for the normal run, re-running it once if the server dropped it. */
+async function baseMap(path, body) {
+  try {
+    return await mapData(path, { ...body, run_id: (await baseRun()).run_id });
+  } catch (e) {
+    if (!/unknown or evicted run/.test(e.message)) throw e;
+    state.base = null;
+    return mapData(path, { ...body, run_id: (await baseRun()).run_id });
+  }
+}
+
+const diffOn = () => koCount() > 0 && $("diff").checked && state.map !== "weights";
+
+async function renderDiffMap(p) {
+  const canvas = $("map"), cap = $("map-caption"), run = state.run, q = state.q;
+  const base = await baseRun();
+  const nK = run.chars.length, nB = base.chars.length, nc = Math.min(nK, nB);
+  let split = 0;
+  while (split < nc && run.chars[split] === base.chars[split]) split++;
+  const where = split >= nc ? "Both runs write the same text, so every change is the knockout's own effect."
+    : `Both runs write the same text up to position ${split - 1}; from position ${split} (dashed line) they write ` +
+      "different bytes, so later changes also reflect different input.";
+  // f16 transport (server) quantises each value to ~1e-3 of its row's scale: ignore changes below that.
+  const tolOf = (meta) => (meta.dtype === "float16" ? 2e-3 : 1e-6);
+  const pairs = async (path, body) => {
+    const [K, B] = await Promise.all([mapData(path, { ...body, run_id: run.run_id }), baseMap(path, body)]);
+    return { K, B };
+  };
+  const drawRows = (title, names, valK, valB, nRows, docs, clickRow) => {
+    // valK(r, c) / valB(r, c): raw values; keep rows with any real change, scale each by its biggest change
+    const rows = [];
+    for (let r = 0; r < nRows; r++) {
+      let mx = 0, ref = 0;
+      for (let c = 0; c < nc; c++) {
+        mx = Math.max(mx, Math.abs(valK(r, c) - valB(r, c)));
+        ref = Math.max(ref, Math.abs(valB(r, c)), Math.abs(valK(r, c)));
+      }
+      if (mx > title.tol * Math.max(1, ref)) rows.push({ r, mx });
+    }
+    cap.textContent = `${title.text}: knocked-out run minus normal run (orange = higher, blue = lower), each row ` +
+      `scaled by its biggest change. ${rows.length} of ${nRows} rows change. ${where} ` +
+      "Private values of switched-off calculators (e.g. div.*) can move too: they compute at every byte, " +
+      "but their outputs are gated to zero, so they cannot change the answer." +
+      (rows.length ? "" : " Nothing changes in this view: try a later layer or step, or the residual stream map.");
+    drawHeatmap(canvas, {
+      key: `diff:${title.key}:${run.run_id}:${base.run_id}`,
+      rows: rows.length, cols: nc,
+      get: (i, c) => (valK(rows[i].r, c) - valB(rows[i].r, c)) / rows[i].mx, norm: (v) => (v + 1) / 2, lut: DIV,
+      rowLabels: rows.map((x) => names(x.r)), markCol: split < nc ? split : undefined,
+      valueText: (i, c) => { const r = rows[i].r;
+        return `${names(r)} at position ${c} ${charAt(c)}
+normal ${fmt(valB(r, c))} → knocked out ${fmt(valK(r, c))}` +
+          ` (change ${fmt(valK(r, c) - valB(r, c))})
+${docs(r)}`; },
+      rowTip: (i) => docs(rows[i].r),
+      onClick: (i, c) => clickRow(rows[i].r, c),
+    }, { q, noDim: true });
+  };
+  if (state.map === "residual") {
+    const snap = Number($("snapshot").value);
+    const { K, B } = await pairs("/api/residual", { snapshot: snap });
+    const dims = state.info.dims;
+    drawRows({ text: `residual stream after ${K.meta.label}`, key: `res${snap}`, tol: tolOf(K.meta) },
+      (r) => dims[r].name, (r, c) => K.data[r * nK + c] * K.meta.scale[r], (r, c) => B.data[r * nB + c] * B.meta.scale[r],
+      dims.length, (r) => dimTip(dims[r].name), (r, c) => { state.openDim = dims[r].name; goto(c); });
+  } else if (state.map === "mlp") {
+    const layer = Number($("mlp-layer").value);
+    const { K, B } = await pairs("/api/mlp", { layer });
+    const units = state.info.layers[layer].units;
+    drawRows({ text: `layer ${layer + 1} MLP activations`, key: `mlp${layer}`, tol: tolOf(K.meta) },
+      (r) => `#${r} ${units[r].write}`, (r, c) => K.data[r * nK + c] * K.meta.scale[r], (r, c) => B.data[r * nB + c] * B.meta.scale[r],
+      units.length, (r) => unitTip(units[r], r), (_r, c) => goto(c));
+  } else if (state.map === "step") {
+    if (q >= nc) { cap.textContent = `position ${q} exists only in one of the two runs. ${where}`; drawHeatmap(canvas, { rows: 0, cols: 0 }, {}); return; }
+    const pb = await api("/api/position", { run_id: base.run_id, q });
+    const labels = run.snapshots, dims = state.info.dims;
+    cap.textContent = "";
+    const S = labels.length;
+    const changed = dims.map((d, i) => i).filter((i) => p.values[i].some((v, s) => Math.abs(v - pb.values[i][s]) > 1e-6 * Math.max(1, Math.abs(v))));
+    cap.textContent = `position ${q} ${charAt(q)}: each dim (rows) after each sublayer (columns), knocked-out minus normal, ` +
+      `each row scaled by its biggest change. ${changed.length} of ${dims.length} dims change here. ${where}` +
+      (changed.length ? "" : " Nothing changes in this view: try a later layer or step, or the residual stream map.");
+    const mx = changed.map((i) => Math.max(...p.values[i].map((v, s) => Math.abs(v - pb.values[i][s]))));
+    drawHeatmap(canvas, {
+      key: `diffstep:${run.run_id}:${base.run_id}:${q}`, rows: changed.length, cols: S,
+      get: (r, s) => (p.values[changed[r]][s] - pb.values[changed[r]][s]) / mx[r], norm: (v) => (v + 1) / 2, lut: DIV,
+      rowLabels: changed.map((i) => dims[i].name),
+      valueText: (r, s) => { const i = changed[r];
+        return `${dims[i].name} after ${labels[s]}
+normal ${fmt(pb.values[i][s])} → knocked out ${fmt(p.values[i][s])}
+${dims[i].doc}`; },
+      rowTip: (r) => dimTip(dims[changed[r]].name),
+    }, {});
+  } else if (state.map === "attention") {
+    if (!state.head) state.head = defaultHead(p);
+    if (!state.head) { cap.textContent = "pick a head to compare"; drawHeatmap(canvas, { rows: 0, cols: 0 }, {}); return; }
+    const [layer, head] = state.head;
+    syncHeadPicker();
+    const { K, B } = await pairs("/api/attention", { layer, head });
+    let mx = 0;
+    for (let r = 0; r < nc; r++) for (let c = 0; c <= r; c++) mx = Math.max(mx, Math.abs(K.data[r * nK + c] - B.data[r * nB + c]));
+    const changedRows = new Set();
+    for (let r = 0; r < nc; r++) for (let c = 0; c <= r; c++) if (Math.abs(K.data[r * nK + c] - B.data[r * nB + c]) > 2e-3) changedRows.add(r);
+    cap.textContent = `L${layer + 1} '${K.meta.name}': attention of the knocked-out run minus the normal run ` +
+      `(orange = reads more, blue = reads less). ${changedRows.size} of ${nc} rows read differently. ${where}` +
+      (changedRows.size ? "" : " This head reads the same everywhere: try a later layer's head.");
+    drawHeatmap(canvas, {
+      key: `diffattn:${run.run_id}:${base.run_id}:${layer}:${head}`, rows: nc, cols: nc, square: true,
+      get: (r, c) => (mx ? (K.data[r * nK + c] - B.data[r * nB + c]) / mx : 0), norm: (v) => (v + 1) / 2, lut: DIV,
+      colChars: run.chars.slice(0, nc).map(showChar), markCol: split < nc ? split : undefined,
+      valueText: (r, c) => `query ${r} ${charAt(r)} → key ${c} ${charAt(c)}
+normal ${(B.data[r * nB + c] * 100).toFixed(2)}%` +
+        ` → knocked out ${(K.data[r * nK + c] * 100).toFixed(2)}%`,
+      onClick: (r) => goto(r),
+    }, { q, noDim: true });
+  }
+}
+
 async function renderMap(p) {
   if (!state.run) return;
+  scheduleHash();
+  $("diff-ctl").hidden = !(koCount() > 0 && state.map !== "weights");
+  if (diffOn()) {
+    document.querySelectorAll("#map-controls label").forEach((l) => l.classList.toggle("on", l.dataset.for === state.map));
+    renderHowto();
+    return renderDiffMap(p);
+  }
   document.querySelectorAll("#map-controls label").forEach((l) => l.classList.toggle("on", l.dataset.for === state.map));
   const canvas = $("map");
   const run = state.run;
@@ -902,7 +1048,9 @@ function wire() {
     $("w-head").replaceChildren(...layer.heads.map((h, i) => new Option(`${i}: ${h.name}`, i)));
   };
   $("w-layer").addEventListener("input", fillHeads);
-  $("g-circuit").addEventListener("input", renderGraph);
+  $("g-circuit").addEventListener("input", () => { renderGraph(); scheduleHash(); });
+  $("btn-link").addEventListener("click", copyLink);
+  $("diff").addEventListener("change", () => state.pos.has(state.q) && renderMap(state.pos.get(state.q)));
   document.querySelectorAll("#guide .try").forEach((b) => {
     b.dataset.tip = "Set the visualizer up to show this (runs an example and opens the right view).";
     b.addEventListener("click", () => tryIt(JSON.parse(b.dataset.try)).catch((e) => setStatus(e.message, true)));
@@ -1055,6 +1203,7 @@ function togglePin(id, { ids = null, scroll = true } = {}) {
   try { pins.length ? localStorage.setItem(PIN_KEY, JSON.stringify(pins)) : localStorage.removeItem(PIN_KEY); }
   catch { /* private mode */ }
   log("pinned", pins.join(", ") || "nothing");
+  scheduleHash();
   // widths changed: redraw the canvases and the graph that size themselves to their panel
   if (state.pos.has(state.q)) renderMap(state.pos.get(state.q));
   renderGraph();
@@ -1080,6 +1229,61 @@ function setupPins() {
   if (saved.length) togglePin(null, { ids: saved, scroll: false });
 }
 
+// ------------------------------------------------------------------ shareable links
+// The view lives in the URL hash (expression, step, heatmap, head, layers, pins, knockouts), so
+// a link reopens exactly what you are looking at. replaceState: no history entry per step.
+let hashTimer = null;
+function viewParams() {
+  const h = new URLSearchParams();
+  if (!state.run) return h;
+  h.set("e", state.run.expression);
+  h.set("q", String(state.q));
+  h.set("map", state.map);
+  if (state.head) h.set("head", state.head.join("."));
+  if (state.map === "mlp") h.set("ml", $("mlp-layer").value);
+  if (state.map === "residual") h.set("snap", $("snapshot").value);
+  if ($("g-circuit").value !== "all") h.set("g", $("g-circuit").value);
+  if (pins.length) h.set("pins", pins.join(","));
+  const ko = [...state.ko.heads.map(([l, x]) => `h${l}.${x}`), ...state.ko.units.map(([l, x]) => `u${l}.${x}`),
+              ...state.ko.dims.map((d) => `d${d}`)];
+  if (ko.length) h.set("ko", ko.join(","));
+  if (!$("diff").checked) h.set("diff", "0");
+  return h;
+}
+function scheduleHash() {
+  clearTimeout(hashTimer);
+  hashTimer = setTimeout(() => {
+    const p = viewParams().toString();
+    if (p && location.hash.slice(1) !== p) history.replaceState(null, "", `#${p}`);
+  }, 250);
+}
+function readHash() {
+  const h = new URLSearchParams(location.hash.slice(1));
+  const num = (k) => (h.has(k) && /^-?\d+$/.test(h.get(k)) ? Number(h.get(k)) : null);
+  const ko = { heads: [], units: [], dims: [] };
+  for (const t of (h.get("ko") || "").split(",").filter(Boolean)) {
+    const m = /^([hu])(\d+)\.(\d+)$/.exec(t);
+    if (m) ko[m[1] === "h" ? "heads" : "units"].push([Number(m[2]), Number(m[3])]);
+    else if (t[0] === "d") ko.dims.push(t.slice(1));
+  }
+  const head = /^(\d+)\.(\d+)$/.exec(h.get("head") || "");
+  return { e: h.get("e"), q: num("q"), map: h.get("map"), head: head ? [Number(head[1]), Number(head[2])] : null,
+           ml: num("ml"), snap: num("snap"), g: h.get("g"), pins: (h.get("pins") || "").split(",").filter(Boolean),
+           ko, diff: h.get("diff") !== "0", any: h.toString().length > 0 };
+}
+async function copyLink() {
+  scheduleHash();
+  clearTimeout(hashTimer);
+  history.replaceState(null, "", `#${viewParams().toString()}`);
+  try {
+    await navigator.clipboard.writeText(location.href);
+    setStatus("link to this exact view copied");
+  } catch {
+    prompt("Copy this link:", location.href); // clipboard blocked (http, old browser)
+  }
+  log("copied view link", location.href.length, "chars");
+}
+
 /** Phones: the step controls are a fixed bottom bar; keep its height in --bar-h for padding. */
 function trackBar() {
   const bar = document.querySelector(".controls");
@@ -1100,7 +1304,24 @@ async function main() {
   try {
     await loadInfo();
     setStatus(`${state.info.layers.length} layers · d_model ${state.info.d_model} · ${state.info.nonzero_params} hand-written params`);
+    const v = readHash();
+    if (v.any) log("opening the view from the link", location.hash.length, "chars");
+    if (v.e) $("expr-input").value = v.e;
+    state.ko = v.ko;
+    if (v.map && document.querySelector(`[data-map="${v.map}"]`)) {
+      state.map = v.map;
+      document.querySelectorAll("[data-map]").forEach((x) => x.classList.toggle("active", x.dataset.map === v.map));
+    }
+    if (v.head && state.info.layers[v.head[0]]?.heads[v.head[1]]) state.head = v.head;
+    if (v.ml !== null && state.info.layers[v.ml]?.units.length) $("mlp-layer").value = v.ml;
+    if (v.g) $("g-circuit").value = v.g;
+    $("diff").checked = v.diff;
+    if (v.pins.length) { [...pins].forEach(unpinOne); togglePin(null, { ids: v.pins, scroll: false }); }
+    renderGraph();
     await runExpression($("expr-input").value);
+    if (v.snap !== null && v.snap < state.run.snapshots.length) $("snapshot").value = v.snap;
+    if (v.q !== null) await goto(v.q);
+    else if (v.snap !== null && state.pos.has(state.q)) await renderMap(state.pos.get(state.q));
   } catch (e) {
     setStatus(e.message, true);
   }
