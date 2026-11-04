@@ -1087,3 +1087,26 @@ position), exact for depth ≤ 999 and sequences ≤ 10⁵ bytes. The byte to wr
 depth ± 1 and of the lookahead position by `floor_div_head`); the unembedding is the quadratic
 K·(2·b·out − b²), so the nearest byte code wins. Decoding caches each head's values (x·W_V) as the
 JS engine does, which the parser's long outputs need.
+
+## 34. The parser reads real C: two models in one (`handformer/cparse/`, stage 2)
+
+The parser now takes C source. It includes the highlighter's weights unchanged
+(`csyntax.add_lexer`, layers 1-6) and writes the letters first, then `\x04`, then the records:
+lexing is sequential, so it is written down like every running value. A token starts at a letter
+exactly when the lexer rule that fired there starts one; the rule dims, plus a per-keyword AND
+unit and the classified byte's punctuator character, give the token's class (`t_*`, layer 7).
+The lookahead searches those letters (`next_match_head` over token starts, positions carried as
+source positions `sp`), so whitespace, comments and directives are skipped because no rule
+starts a token there. For the tokens to be visible in the letters, the lexer gained
+longest-match punctuators (C11 §6.4.6): units at the first byte test every punctuator of two or
+more bytes, the first letter gives the length (`o q r v`) and the later letters count down
+(`m l j`), so the next byte needs no lookup.
+
+Merging two models in one stream needs each to be exactly silent outside its phase. `in_lex`
+gates every lexer rule (after the records start, its lookups read past the source) and `after_M`
+gates every parser rule, every proposed byte, and the unembedding's constant −K·b², which was on
+`one`: there it would add up to −30·b² to every logit while the letters are written, dwarfing
+the lexer's votes of 10. Record ends are tagged on `|` and `\x04`, and the stack keys need
+`after_M`, because C source contains `|`. The tests check the silence at every output byte: in
+the letters every parser rule, `out` and `after_M` are exactly 0; in the records every lexer rule.
+The parser's layers moved to 7-12 with their internal plan unchanged.

@@ -4,7 +4,8 @@ Returns one state letter per source byte (see handformer/csyntax/circuit.py STAT
 Covered: keywords, identifiers (with universal character names), pp-numbers, strings and
 character constants with escapes and prefixes (L u U u8), block and line comments,
 directives ('#', '%:' or '??=' first on a line), backslash-newline splices in line comments,
-directives, strings, identifiers and numbers, and the trigraph '??/' acting as a backslash."""
+directives, strings, identifiers and numbers, the trigraph '??/' acting as a backslash, and
+punctuators by the longest match (the first byte's letter gives the length, the rest count down)."""
 
 KEYWORDS = {
     "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern",
@@ -16,6 +17,14 @@ KEYWORDS = {
 START = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_")
 IDENT = START | set("0123456789")
 SPACE = set(" \t\n\r\v\f")
+PUNCTUATORS = {  # C11 §6.4.6, digraphs included
+    "[", "]", "(", ")", "{", "}", ".", "->", "++", "--", "&", "*", "+", "-", "~", "!", "/", "%", "<<", ">>",
+    "<", ">", "<=", ">=", "==", "!=", "^", "|", "&&", "||", "?", ":", ";", "...", "=", "*=", "/=", "%=", "+=",
+    "-=", "<<=", ">>=", "&=", "^=", "|=", ",", "#", "##", "<:", ":>", "<%", "%>", "%:", "%:%:",
+}
+# a punctuator's first byte says its length; the later bytes count down what is left
+FIRST = {1: "o", 2: "q", 3: "r", 4: "v"}
+NEXT = {"q": "j", "r": "l", "v": "m", "m": "l", "l": "j"}
 
 
 def lex(src: str) -> str:
@@ -61,6 +70,8 @@ def lex(src: str) -> str:
             letter = "n"
         elif state in ("i", "k") and (ch in IDENT or splice or ucn):
             letter = state
+        elif state in NEXT:
+            letter = NEXT[state]
         else:
             letter = None
         if letter is None:  # outside any token: what starts here
@@ -88,8 +99,9 @@ def lex(src: str) -> str:
                 letter = "k" if src[i:j] in KEYWORDS else "i"
             elif ch in SPACE:
                 letter = "_"
-            else:
-                letter = "o"
+            else:  # a punctuator: the longest one that starts here (any other byte counts as one byte)
+                n = max((len(p) for p in PUNCTUATORS if src.startswith(p, i)), default=1)
+                letter = FIRST[n]
         out.append(letter)
         state = letter
     return "".join(out)

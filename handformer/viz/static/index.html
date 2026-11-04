@@ -48,6 +48,7 @@
         <span class="lg ph-preproc" data-tip="A preprocessing directive: a line starting with '#'.">directive</span><span class="lg ph-punct" data-tip="A punctuator or operator.">punct</span>
       </span>
       <span class="legend" data-model="parse" hidden>
+        <span class="lg ph-keyword" data-tip="First the model lexes: one letter per source byte, the C highlighter's own weights (coloured as there).">letters</span>
         <span class="lg ph-open" data-tip="A record that opens a node: the rule for (item, lookahead) says this token starts a child.">open</span><span class="lg ph-token" data-tip="A record that consumes the lookahead token.">token</span>
         <span class="lg ph-close" data-tip="A record that closes a node: the parent's item comes from the open record at this depth (the stack search).">close</span><span class="lg ph-error" data-tip="A syntax error record: no rule continues with this token.">error</span>
       </span>

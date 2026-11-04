@@ -14,8 +14,8 @@ each next generation as a block `k:<grid>=`, counting down to 0, then `\n`. The 
 the text: each block starts with the previous block's count minus one. The host feeds bytes,
 takes the argmax and stops at `\n`. That is all it does.
 
-**Try it in the visualizer:** pick "game of life" in the model menu, or open
-[the glider](https://lhubbard011.github.io/opus-handformer-calculator/#m=life). The **Board**
+**Try it in the visualizer:** run `python -m handformer.viz` and pick "game of life" in the model
+menu (the public site shows only the calculator for now: `handformer/viz/models.yaml`). The **Board**
 panel shows the generation one back and the one being written, with the cell being written and
 the nine cells its heads read outlined.
 

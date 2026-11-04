@@ -28,7 +28,7 @@ const MARK_LABELS_BY = {
   calc: { Ls: "Ls", F: "[", p: "p", c: "c", o: "o", a_lo: "a_lo", b_hi: "b_hi", E: "=", S: ";", Rb: "]" },
   life: { C: ":", cell: "cell", nb: "nb" },
   c: { E: "end", src: "src" },
-  parse: { E: "end", Lsep: "rec", la_pos: "next", mpos: "pop" },
+  parse: { E: "end", M: "lex end", Lsep: "rec", la_pos: "next", mpos: "pop" },
 };
 
 const state = {
@@ -256,6 +256,7 @@ function summarizeC(run, q, raw) {
   const prev = run.chars[q];
   const was = q === E ? "the start" : `state '${prev}'`;
   const explain = p === "\n" ? "The source is used up, so the model writes the final newline (rule end)."
+    : p === LEND ? "The source is used up, so the model writes '\\x04', the end of the letters: the parse starts after it (rule end)."
     : `Source byte ${src} ${JSON.stringify(ch)}, after ${was}: ${fired.length === 1 ? doc(fired[0]) : `rules ${fired.join(", ")}`}`;
   return { q, phase: C_CLASS[p] || "punct", op: null, pred: p, explain, marks: { E, src }, rule: fired[0] };
 }
@@ -267,18 +268,48 @@ const REC_FIELD = ["the action", "the symbol", "a space", "the depth", "the dept
   "the pointer", "the pointer", "the pointer", "a space", "the item", "the item", "the item", "a space",
   "the return item", "the return item", "the return item", "the record's end '|'"];
 const REC_ACT = { O: "open", T: "token", C: "close", "!": "error" };
+const LEND = "\x04"; // the C parser writes it after the letters (handformer/cparse/circuit.py)
+// A token starts where its letter can start one and does not continue the token before it
+// (handformer/cparse/tokens.py starts(), the same reading of the letters; display only).
+const PUNCT_LEN = { o: 1, q: 2, r: 3, v: 4 };
+function tokenStarts(letters) {
+  return [...letters].map((cur, i) => {
+    const prev = i ? letters[i - 1] : "_";
+    if (cur in PUNCT_LEN) return true;
+    if ("ikn".includes(cur)) return prev !== cur;
+    if (cur === "P") return prev !== "P";
+    if (cur === "s") return !"sStGHP".includes(prev);
+    if (cur === "a") return !"aAbghP".includes(prev);
+    return false;
+  });
+}
+/** The source text of the token starting at source position ``at`` (1-based), from the letters. */
+function tokenText(chars, E, at) {
+  const letters = chars.slice(E + 1, chars.indexOf(LEND, E + 1) < 0 ? chars.length : chars.indexOf(LEND, E + 1)).join("");
+  const st = tokenStarts(letters), i = at - 1, L = letters[i];
+  if (L === undefined || !st[i]) return chars[at] ?? "";
+  if (L in PUNCT_LEN) return chars.slice(at, at + PUNCT_LEN[L]).join("");
+  let j = i + 1;
+  while (j < letters.length && !st[j] && "ikn".includes(L) && letters[j] === L) j++;
+  if ("sPa".includes(L)) while (j < letters.length && !st[j] && !"_BLp".includes(letters[j])) j++;
+  return chars.slice(at, j + 1).join("");
+}
 function summarizeParse(run, q, raw) {
   const v = raw.v, r = Math.round, p = raw.pred;
   if (q < run.prompt_len - 1) return { q, phase: "prompt", op: null, pred: p, explain: "Part of the source you gave: input, not predicted.", marks: {} };
-  const E = r(v.E), L = r(v.Lsep), o = q - L, n = (L - E) / REC + 1, la = r(v.la_pos);
+  if (v.after_M < 0.5) { // first the letters: the highlighter's own lexer, inside this model
+    const lex = summarizeC(run, q, raw);
+    return { ...lex, explain: `Lexing (the letters come first, then the records). ${lex.explain}` };
+  }
+  const E = r(v.E), M = r(v.M), L = r(v.Lsep), o = q - L, n = (L - M) / REC + 1, la = r(v.la_pos);
   const fired = Object.keys(v).filter((k) => k.startsWith("r_") && v[k] > 0.5);
   const doc = (k) => (dimDoc(k)?.doc || k).replace(/\.$/, "");
   const act = o === 0 ? p : run.chars[L + 1];
   const halt = o === 0 && p === "\n";
   const phase = halt ? "halt" : REC_ACT[act] || "token";
   const rule = fired.length === 1 ? doc(fired[0]) : `rules ${fired.join(", ") || "(none)"}`;
-  const tok = la < E ? JSON.stringify(run.chars[la]) : la === E ? "the end ($)" : "nothing";
-  const marks = { E, Lsep: L, la_pos: la };
+  const tok = la < E ? JSON.stringify(tokenText(run.chars, E, la)) : la === E ? "the end ($)" : "nothing";
+  const marks = { E, M, Lsep: L, la_pos: la };
   let explain;
   if (halt) explain = `${rule}.`;
   else {
@@ -370,7 +401,7 @@ function answerOf(run) {
     return `${written} of ${source} source bytes classified` + (run.finished ? "" : " (did not finish)");
   }
   if (state.model === "parse") {
-    const recs = parseRecords(run.chars, run.prompt_len - 1, run.chars.length - 1);
+    const recs = parseRecords(run.chars, run.chars.length - 1);
     const last = recs[recs.length - 1];
     const verdict = !run.finished ? "did not finish" : last?.act === "!" ? `syntax error at ${last.ptr}`
       : last?.act === "C" && last.depth === 0 ? "parsed" : "stopped early";
@@ -727,10 +758,12 @@ function renderCode() {
 }
 
 // ------------------------------------------------------------------ parse tree view
-/** The complete records in chars (E = the end marker's position) whose '|' is at or before ``upto``. */
-function parseRecords(chars, E, upto) {
+/** The complete records in chars whose '|' is at or before ``upto`` (they start after the letters' end). */
+function parseRecords(chars, upto) {
   const out = [];
-  for (let s = E + 1; s + REC - 1 <= upto && chars[s + REC - 1] === "|"; s += REC) {
+  const M = chars.indexOf(LEND);
+  if (M < 0) return out;
+  for (let s = M + 1; s + REC - 1 <= upto && chars[s + REC - 1] === "|"; s += REC) {
     const t = chars.slice(s, s + REC).join("");
     out.push({ start: s, act: t[0], sym: t[1], depth: +t.slice(3, 6), ptr: +t.slice(7, 11), item: +t.slice(12, 15),
       ret: t.slice(16, 19) === "..." ? null : +t.slice(16, 19) });
@@ -745,7 +778,7 @@ function renderTree() {
   if (panel.hidden || !state.run) return;
   const run = state.run, q = state.q, E = run.prompt_len - 1, s = run.steps[q];
   const names = state.info.node_names || {};
-  const recs = parseRecords(run.chars, E, q + 1);
+  const recs = parseRecords(run.chars, q + 1);
   const last = recs[recs.length - 1];
   // source: consumed (up to the last record's pointer), the lookahead outlined
   const src = $("tree-src");
@@ -786,8 +819,9 @@ function renderTree() {
     } else if (rc.act === "T") {
       const t = document.createElement("span");
       t.className = "ttok";
-      t.textContent = rc.sym === "$" ? "$" : rc.sym;
-      t.dataset.tip = `token ${JSON.stringify(rc.sym)} at source byte ${rc.ptr}, consumed by the record at ${rc.start}`;
+      t.textContent = rc.sym === "$" ? "$" : tokenText(run.chars, E, rc.ptr);
+      t.dataset.tip = `token ${JSON.stringify(t.textContent)} (code ${JSON.stringify(rc.sym)}) at source byte ${rc.ptr}, ` +
+        `consumed by the record at ${rc.start}`;
       t.addEventListener("click", () => goto(rc.start - 1));
       parent.append(t);
     } else {

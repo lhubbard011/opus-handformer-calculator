@@ -1,12 +1,12 @@
-"""Plain recursive-descent parser for the stage-1 toy grammar (handformer/cparse/toy.py),
-written separately from the grammar compiler. Returns the parse tree as an S-expression in the
-format of ``grammar.tree``, or for a syntax error the prompt position of the offending token.
+"""Plain recursive-descent parser for the toy grammar (handformer/cparse/toy.py), written
+separately from the grammar compiler. Takes the token list (prompt position, terminal code or
+None, the last one the end '$') and returns the parse tree as an S-expression in the format of
+``grammar.tree``, or for a syntax error the prompt position of the offending token.
 
     P -> S* $        S -> B | i ( E ) S [e S] | w ( E ) S | E ; | ;
     B -> { S* }      E -> F (+ F)*        F -> x | 1 | ( E )
 """
-
-SPACE = " \t\n\r"
+STATEMENT_START = "{iwx1(;"
 
 
 class SyntaxErr(Exception):
@@ -16,18 +16,14 @@ class SyntaxErr(Exception):
 
 
 class Parser:
-    def __init__(self, src: str) -> None:
-        self.src = src
-        self.i = 0  # index into src of the next unread byte
+    def __init__(self, toks: list[tuple[int, str | None]]) -> None:
+        self.toks = toks
+        self.i = 0  # index of the next unread token
 
     def peek(self) -> tuple[str, int]:
-        """The next token and its prompt position (source index + 1); '$' at the end."""
-        while self.i < len(self.src) and self.src[self.i] in SPACE:
-            self.i += 1
-        if self.i == len(self.src):
-            return "$", self.i + 1
-        t = self.src[self.i]
-        return ("?" if t == "$" else t), self.i + 1  # a '$' byte is no token (only the end is '$')
+        """The next token's code ('?' for a token the grammar does not know) and position."""
+        pos, t = self.toks[self.i]
+        return ("?" if t is None else t), pos
 
     def take(self, want: str) -> str:
         t, pos = self.peek()
@@ -38,7 +34,7 @@ class Parser:
 
     def program(self) -> str:
         parts = []
-        while self.peek()[0] in "{iwx1(;":
+        while self.peek()[0] in STATEMENT_START:
             parts.append(self.statement())
         parts.append(self.take("$"))
         return "(P " + " ".join(parts) + ")"
@@ -46,20 +42,19 @@ class Parser:
     def statement(self) -> str:
         t, pos = self.peek()
         if t == "{":
-            body = ["{"]
-            self.i += 1
-            while self.peek()[0] in "{iwx1(;":
+            body = [self.take("{")]
+            while self.peek()[0] in STATEMENT_START:
                 body.append(self.statement())
             body.append(self.take("}"))
             return "(S (B " + " ".join(body) + "))"
-        if t in "iw":
+        if t in ("i", "w"):
             parts = [self.take(t), self.take("("), self.expression(), self.take(")"), self.statement()]
             if t == "i" and self.peek()[0] == "e":  # the nearest if takes the else
                 parts += [self.take("e"), self.statement()]
             return "(S " + " ".join(parts) + ")"
         if t == ";":
             return "(S " + self.take(";") + ")"
-        if t in "x1(":
+        if t in ("x", "1", "("):
             return "(S " + self.expression() + " " + self.take(";") + ")"
         raise SyntaxErr(pos)
 
@@ -71,16 +66,16 @@ class Parser:
 
     def factor(self) -> str:
         t, pos = self.peek()
-        if t in "x1":
+        if t in ("x", "1"):
             return "(F " + self.take(t) + ")"
         if t == "(":
             return "(F " + self.take("(") + " " + self.expression() + " " + self.take(")") + ")"
         raise SyntaxErr(pos)
 
 
-def parse(src: str) -> str | int:
+def parse(toks: list[tuple[int, str | None]]) -> str | int:
     """The tree, or the prompt position of the first token that cannot continue a program."""
     try:
-        return Parser(src).program()
+        return Parser(toks).program()
     except SyntaxErr as e:
         return e.pos

@@ -21,8 +21,8 @@ A conflict (two entries for one item and token) is a grammar error, except that 
 never in conflict with closing: the entry wins over the default, which is how C's dangling
 ``else`` binds to the nearest ``if``.
 
-``simulate`` runs the table with an explicit stack and writes the records the model must write
-(see circuit.py for the format). The model has no stack: on a close it finds the matching open
+``simulate`` runs the table with an explicit stack over a token list (tokens.py) and writes the
+records the model must write (see circuit.py for the format). The model has no stack: on a close it finds the matching open
 record by its depth.
 """
 from __future__ import annotations
@@ -35,9 +35,8 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-END = "$"  # the end marker as a terminal (the byte '\x03' in the prompt)
+END = "$"  # the end of the input as a terminal (the source's end marker '\x03')
 DONE = 0  # the item a finished parse returns to: the root's return item
-SPACE = " \t\n\r"
 
 
 class GrammarError(ValueError):
@@ -89,8 +88,10 @@ class Item:
     accepting: bool  # the node may close here
     edges: dict[str, int] = field(default_factory=dict)  # symbol -> item
 
-    def describe(self, names: dict[str, str]) -> str:
-        read = " ".join(names.get(s, repr(s)) if len(s) == 1 and s in names else repr(s) for s in self.path)
+    def describe(self, names: dict[str, str], terms: dict[str, str] | None = None) -> str:
+        """``terms``: how to show a terminal (e.g. ``'if'`` for the code ``i``); default its code."""
+        terms = terms or {}
+        read = " ".join(names[s] if s in names else terms.get(s, repr(s)) for s in self.path)
         return f"{names[self.nt]}, after {read}" if self.path else f"{names[self.nt]}, at its start"
 
 
@@ -311,22 +312,19 @@ def record(act: str, sym: str, depth: int, ptr: int, item: int, ret: int | None)
     return s
 
 
-def lookahead(source: str, ptr: int) -> tuple[int, str | None]:
+Tokens = list[tuple[int, "str | None"]]  # (prompt position, terminal or None), the last is END
+
+
+def lookahead(toks: Tokens, ptr: int) -> tuple[int, str | None]:
     """The first token after prompt position ``ptr``: (its position, its terminal or None)."""
-    prompt = "\n" + source + "\x03"
-    k = ptr + 1
-    while k < len(prompt) - 1 and prompt[k] in SPACE:
-        k += 1
-    if k >= len(prompt):  # past the end marker: the model sees an output byte, which is no token
-        return k, None
-    if k == len(prompt) - 1:
-        return k, END
-    # a source byte spelled like the end terminal is not the end of the input (no token at all)
-    return k, (None if prompt[k] == END else prompt[k])
+    for k, t in toks:
+        if k > ptr:
+            return k, t
+    return toks[-1][0] + 1, None  # past the end: no token (the parse has consumed END)
 
 
-def simulate(table: Table, source: str) -> str:
-    """The records the model writes for ``source``, then the final newline. An explicit stack."""
+def simulate(table: Table, toks: Tokens) -> str:
+    """The records the model writes for the tokens, then the final newline. An explicit stack."""
     out = []
     root = table.grammar.root
     item, depth, ptr = table.starts[root], 1, 0
@@ -335,7 +333,7 @@ def simulate(table: Table, source: str) -> str:
     entries = {(e.item, e.token): e for e in table.entries}
     terminals = set(table.terminals)
     while item != DONE:
-        k, t = lookahead(source, ptr)
+        k, t = lookahead(toks, ptr)
         e = entries.get((item, t)) if t in terminals else None
         if e is not None and e.act == "T":
             ptr, item = k, e.target
@@ -368,12 +366,14 @@ def parse_records(text: str) -> list[tuple]:
     return recs
 
 
-def tree(text: str) -> str:
+def tree(text: str, texts: dict[int, str] | None = None) -> str:
     """The parse tree in the records as an S-expression, e.g. ``(P (S (E (F x)) ;) $)``.
 
     Nodes are ``(<node code> children...)``; tokens are bare, except ``(`` ``)`` and ``'`` which
     are quoted (``'('``) so the nesting stays unambiguous. An error record becomes
-    ``(error at N)``, N the prompt position of the offending token (1 = first source byte)."""
+    ``(error at N)``, N the prompt position of the offending token (1 = first source byte).
+    ``texts`` (prompt position -> source text, ``tokens.texts``) shows each token as written
+    (``count`` instead of its code ``x``)."""
     out: list[str] = []
     for act, sym, _depth, ptr, _item, _ret in parse_records(text):
         if act == "O":
@@ -381,7 +381,8 @@ def tree(text: str) -> str:
         elif act == "C":
             out.append(")")
         elif act == "T":
-            out.append(" " + (f"'{sym}'" if sym in "()'" else sym))
+            tok = (texts or {}).get(ptr, sym)
+            out.append(" " + (f"'{tok}'" if any(c in "()' " for c in tok) else tok))
         else:
             out.append(f" (error at {ptr})")
     return "".join(out).lstrip()

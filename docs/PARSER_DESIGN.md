@@ -2,8 +2,8 @@
 
 Goal: a model that parses ANSI C89 (X3.159-1989, plus K&R function definitions) and writes the
 full parse tree, with a real typedef symbol table, everything computed in the weights, every
-rule named. Built in stages; this note fixes the architecture. Stage 1 (the engine, on a toy
-grammar) is in `handformer/cparse/`.
+rule named. Built in stages; this note fixes the architecture. Stages 1 and 2 (the engine, on a
+toy grammar, reading real C tokens from the lexer) are in `handformer/cparse/`.
 
 ## Why records, not free-form tree text
 
@@ -69,8 +69,12 @@ for byte; the claims (exactly one rule per output byte, exact reads, robust step
 ## Stages
 
 1. The engine on a toy grammar (blocks, if/else, while, expressions): done.
-2. Tokens from the C lexer: the model first writes the highlighter's state letters, then parses
-   reading token boundaries and classes from them (the text is the memory, again).
+2. Tokens from the C lexer: done. The model first writes the highlighter's state letters (its
+   weights included as they are), then `\x04`, then parses, reading token starts and classes
+   off the lexer rule that fired at each letter (the text is the memory, again). The lexer gained
+   longest-match punctuators, whose letters count down the token's length, so every token start
+   is in the letters. Each side is gated to its phase (`in_lex`, `after_M`), the parser's
+   unembedding constant included, and the tests check both are exactly silent outside it.
 3. C89 expressions (15 precedence levels, casts, sizeof, ?:, comma). The tree must stay flat
    (a node per operator, not per precedence level) or the output grows ~30 records per operand.
 4. Statements.

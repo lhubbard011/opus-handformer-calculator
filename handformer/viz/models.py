@@ -93,9 +93,15 @@ int main(void) {
 """
 C_SUMMARY = ("E", *(f"r_{r.name}" for r in csyntax.RULES), "r_end", "kw", "norm")
 
-PARSE_MARKS = ("E", "Lsep", "la_pos", "mpos")
-PARSE_SUMMARY = (*PARSE_MARKS, "first", "isclose", *(f"r_{r.name}" for r in cparse.circuit.rules(cparse.TABLE)))
-PARSE_MAX_INPUT = 80  # about 140 output bytes per token: 80 bytes of source is ~10k bytes of records
+PARSE_MARKS = ("E", "M", "Lsep", "la_pos", "mpos")
+PARSE_SUMMARY = (*PARSE_MARKS, "first", "isclose", "after_M", *C_SUMMARY[1:],
+                 *(f"r_{r.name}" for r in cparse.rules()))
+PARSE_MAX_INPUT = 120  # about 140 output bytes per token: 120 bytes of C is ~5-10k bytes of records
+PARSE_SAMPLE = """if (ready) {
+    count + 1;
+} else
+    while (waiting) ;
+"""
 
 MODELS = {
     "calc": ModelDef("calc", "calculator", arith.builder, _calc_prompt, _calc_category, CALC_MARKS, CALC_SUMMARY,
@@ -113,13 +119,14 @@ MODELS = {
                   "".join(sorted(csyntax.circuit.ALLOWED)), csyntax.circuit.CHARS_HINT, csyntax.circuit.PATTERN,
                   csyntax.circuit.PATTERN_ERROR, strip_spaces=False, prompt_end="\x03",
                   max_input=csyntax.circuit.MAX_SOURCE, multiline=True),
-    "parse": ModelDef("parse", "parser (stage 1: toy C)", cparse.builder, cparse.prompt, cparse.circuit.category,
-                      PARSE_MARKS, PARSE_SUMMARY, cparse.circuit.docs(cparse.TABLE), PARSE_MAX_INPUT * 140 + 64,
-                      "i(x){x+1;} e ;",
-                      "toy C: { } ( ) ; + x 1, i=if e=else w=while; the model writes one record per parser action",
-                      "".join(chr(c) for c in range(32, 127)) + "\t\n", "(printable ASCII)", r"\S",
+    "parse": ModelDef("parse", "C parser (stage 2: toy grammar)", cparse.builder, cparse.prompt,
+                      cparse.circuit.category, PARSE_MARKS, PARSE_SUMMARY, cparse.docs(),
+                      PARSE_MAX_INPUT * 141 + 64, PARSE_SAMPLE,
+                      "C: if / else / while, { } blocks, ( ) and + over identifiers and numbers; the model writes "
+                      "a lexer letter per byte, then one record per parser action",
+                      "".join(sorted(csyntax.circuit.ALLOWED)), csyntax.circuit.CHARS_HINT, r"\S",
                       "empty source", strip_spaces=False, prompt_end="\x03", max_input=PARSE_MAX_INPUT,
-                      node_names=tuple(cparse.toy.NAMES.items())),
+                      multiline=True, node_names=tuple(cparse.toy.NAMES.items())),
 }
 
 

@@ -19,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
+from handformer.cparse.circuit import LEX
 from handformer.viz import models
 from handformer.viz.runner import Runner
 
@@ -196,7 +197,9 @@ class TestWebParity(unittest.TestCase):
         p_dir = self.tmp / "parse"
         export_web.export(p_dir, "parse")
         r = Runner("parse")
-        for src, ko in (("i(x){x+1;} e ;", None), ("{ x; }}", None), ("w(x) x;", {"heads": [[5, 0]]})):
+        stack = [LEX + 5, 0]  # layer 12's first head: the stack search (handformer/cparse/circuit.py)
+        for src, ko in (("if (a) { b + 1; } else ;", None), ("{ x; /* c */ }}", None),
+                        ("while (a) b;", {"heads": [stack]})):
             with self.subTest(src=src, ko=ko):
                 py = r.run(src, ko)
                 q = len(py["chars"]) - 30

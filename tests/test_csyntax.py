@@ -37,11 +37,14 @@ EDGES = ["int x;", "/**/x", "/*/ still comment */y", "//", "a//b\nc", '"untermin
          # prefixes, digraph/trigraph directives, trigraph backslash, splices in words and numbers, UCNs
          'L"wide"', 'u8"utf8"', "u'c'", "U'\\n'", "Lx u8x u8'", "  %:define A 1", "??=include <x>", "a=b??=c",
          '"a??/"b"', "'??/''", "// c ??/\ncontinued", "#define A ??/\n 1", "na\\\nme", "12\\\n34", "1e\\\n+5",
-         "a\\u00e9b", "\\u00e9x", "x\\U0001F600", "??(??)", "<: :> <% %> %:%:"]
+         "a\\u00e9b", "\\u00e9x", "x\\U0001F600", "??(??)", "<: :> <% %> %:%:",
+         # punctuators by the longest match (C11 §6.4.6)
+         "a+=b->c", "a<<=b>>=c", "x&&y||z&=w", "p->>q", "....", "..5", "a-->b", "x%:%:y", "a%:%y", "f(x,y);[]{}",
+         "a!=b==c<=d>=e", "x^=y|=z", "#define A(x) x##x", "<%%>"]
 
 
 def fuzz(rng: random.Random, n: int) -> str:
-    alphabet = "ab_09ex /*'\"\\#\n.+-E\tp(){};<=!?%:LUu8"
+    alphabet = "ab_09ex /*'\"\\#\n.+-E\tp(){};<=!?%:LUu8>&|"
     return "".join(rng.choice(alphabet) for _ in range(n))
 
 

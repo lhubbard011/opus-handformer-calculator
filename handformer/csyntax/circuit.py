@@ -19,11 +19,19 @@ Keywords are decided at a word's first byte: one AND unit per C11 keyword checks
 characters (the source is all in the prompt, so the model can look ahead) and that the word
 ends there. The later bytes of the word keep the state ('k' or 'i').
 
+Punctuators are decided the same way (C11 §6.4.6, the longest match): at a punctuator's first
+byte, one AND unit per punctuator of two or more bytes checks the bytes ahead, and the first
+byte's letter says how long the token is ('o' one byte, 'q' two, 'r' three, 'v' four). Each later
+byte's letter counts down what is left ('m' two more, 'l' one more, 'j' the last), so the next
+byte knows whether the token goes on from the letter alone, and every token's start is visible
+in the letters (the C parser, handformer/cparse, reads its tokens from them).
+
     layer 1  MLP   landmark tags: the end marker, the latest newline, the latest non-space byte
     layer 2  attn  read them: E (end marker), Lnl, Lns at every position
     layer 3  attn  read the source byte being classified (s = pos - E + 1), the bytes before and
-                   after it, and the next 14 bytes' letters (for keywords)
-             MLP   keyword matches; "first non-space on its line"; "+/- after an exponent letter"
+                   after it, and the next 14 bytes' letters (for keywords and punctuators)
+             MLP   keyword and punctuator matches; "first non-space on its line"; "+/- after an
+                   exponent letter"
     layer 4  MLP   the rules inside comments, strings, characters, directives, numbers, words;
                    "outside any token" (norm)
     layer 5  MLP   the fallbacks of those groups; the rules outside any token
@@ -56,7 +64,7 @@ BOS = EOS = ord("\n")
 
 # The state letters the model writes (one per source byte) and what each means.
 STATES = {
-    "_": "whitespace outside any token", "o": "a punctuator or operator", "i": "an identifier", "k": "a keyword",
+    "_": "whitespace outside any token", "o": "a one-byte punctuator or operator", "i": "an identifier", "k": "a keyword",
     "n": "a number (pp-number)",
     "s": "a string literal: its opening quote or body", "S": "a backslash starting an escape in a string",
     "t": "the escaped character in a string", "z": "the closing quote of a string",
@@ -68,10 +76,13 @@ STATES = {
     "P": "a string or character prefix (L u U u8)",
     "G": "the first '?' of a '??/' (a trigraph backslash) in a string", "H": "its second '?'",
     "g": "the first '?' of a '??/' in a character constant", "h": "its second '?'",
+    "q": "the first byte of a two-byte punctuator", "r": "the first byte of a three-byte punctuator",
+    "v": "the first byte of a four-byte punctuator ('%:%:')", "m": "a punctuator byte with two more to come",
+    "l": "a punctuator byte with one more to come", "j": "the last byte of a punctuator",
 }
 # How the page colours them.
 DISPLAY = {"comment": "BDCELc", "string": "sStzPGH", "char": "aAbygh", "preproc": "p", "number": "n",
-           "keyword": "k", "ident": "i", "punct": "o", "space": "_"}
+           "keyword": "k", "ident": "i", "punct": "oqrvmlj", "space": "_"}
 
 KEYWORDS = (  # C11 §6.4.1
     "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern",
@@ -83,12 +94,29 @@ KEYWORDS = (  # C11 §6.4.1
 MAX_KW = max(map(len, KEYWORDS))
 LETTERS_AT = [sorted({k[j] for k in KEYWORDS if len(k) > j}) for j in range(MAX_KW)]  # letters a keyword has at offset j
 
+PUNCTUATORS = (  # C11 §6.4.6, digraphs included
+    "[", "]", "(", ")", "{", "}", ".", "->", "++", "--", "&", "*", "+", "-", "~", "!", "/", "%", "<<", ">>",
+    "<", ">", "<=", ">=", "==", "!=", "^", "|", "&&", "||", "?", ":", ";", "...", "=", "*=", "/=", "%=", "+=",
+    "-=", "<<=", ">>=", "&=", "^=", "|=", ",", "#", "##", "<:", ":>", "<%", "%>", "%:", "%:%:",
+)
+MAX_PUNCT = max(map(len, PUNCTUATORS))
+PUNCT_NAMES = {"[": "lbrack", "]": "rbrack", "(": "lparen", ")": "rparen", "{": "lbrace", "}": "rbrace", ".": "dot",
+               "-": "minus", ">": "gt", "+": "plus", "&": "amp", "*": "star", "~": "tilde", "!": "bang",
+               "/": "slash", "%": "pct", "<": "lt", "=": "eq", "^": "caret", "|": "bar", "?": "q", ":": "colon",
+               ";": "semi", ",": "comma", "#": "hash"}
+# the bytes a punctuator of two or more bytes has at offset j (the longest-match units read these)
+PUNCT_AT = [sorted({p[j] for p in PUNCTUATORS if len(p) > 1 and len(p) > j}) for j in range(MAX_PUNCT)]
+PUNCT_START = {1: "o", 2: "q", 3: "r", 4: "v"}  # the first byte's letter, by the punctuator's length
+pc = lambda c: "pc_" + PUNCT_NAMES[c]  # noqa: E731  "this byte is the punctuator character c"
+pq = lambda j, c: f"q{j}_{PUNCT_NAMES[c]}"  # noqa: E731  "byte j of the punctuator is c"
+
 # Byte classes of the source (each a 0/1 feature of the byte embedding).
 CLASSES = {
     "c_slash": "/", "c_star": "*", "c_dq": '"', "c_sq": "'", "c_hash": "#", "c_bs": "\\", "c_nl": "\n", "c_dot": ".",
     "c_pm": "+-", "c_digit": string.digits, "c_start": string.ascii_letters + "_",
     "c_ident": string.ascii_letters + string.digits + "_", "c_space": " \t\n\r\v\f", "c_exp": "eEpP", "c_mark": chr(END),
     "c_q": "?", "c_eq": "=", "c_pct": "%", "c_colon": ":", "c_LUu": "LUu", "c_u": "u", "c_8": "8", "c_uU": "uU",
+    **{pc(c): c for c in PUNCT_NAMES},
 }
 XFEATS = ("c_slash", "c_star", "c_dq", "c_sq", "c_hash", "c_bs", "c_nl", "c_dot", "c_pm", "c_digit", "c_start",
           "c_ident", "c_space", "c_mark", "c_q", "c_pct", "c_LUu", "c_u")
@@ -100,7 +128,8 @@ st = lambda letter: "st__" if letter == "_" else f"st_{letter}"  # noqa: E731  "
 class Rule:
     """One lexer rule: in states ``src``, when every dim in ``when`` is 1 and none in ``unless``,
     the byte is ``out``. ``fallback``: the rest of the group (group minus the listed siblings).
-    ``src`` may also be "norm": outside any token."""
+    ``src`` may also be "norm": outside any token. A fallback may also have ``when`` and ``unless``
+    (the punctuator fallbacks split by length)."""
     name: str
     src: str
     out: str
@@ -116,6 +145,9 @@ class Rule:
 # Read top to bottom: each group is one lexer state; its rules are mutually exclusive by the
 # byte they look at, and its fallback catches the rest. A fallback reads its siblings' rule
 # dims ("group minus siblings"), so it sits one layer after them (layer 5, or 6 for punct).
+NORM_SIBLINGS = ("r_open_block", "r_open_line", "r_open_str", "r_open_chr", "r_pp_start", "r_pp_digraph",
+                 "r_pp_trigraph", "r_prefix", "r_ucn_start", "r_num_start", "r_num_dot", "r_keyword", "r_ident",
+                 "r_space")
 RULES = [
     # line comment: '//' to the end of the line; a backslash-newline continues it (C11 §5.1.1.2 phase 2)
     Rule("line_end", "Lc", "_", "a newline ends a line comment (unless a backslash or '??/' splices the lines)",
@@ -173,6 +205,11 @@ RULES = [
          "(the keyword check sees up to it)", when=("wmore",)),
     Rule("word_i_more", "i", "i", "a backslash-newline or a universal character name (\\u, \\U) continues an identifier",
          when=("wmore",)),
+    # punctuator: its length was decided at its first byte (the longest match); the later bytes
+    # count down what is left, so each byte's letter says whether the token goes on
+    Rule("punct_last", "ql", "j", "the last byte of a punctuator (one more was to come)"),
+    Rule("punct_more", "rm", "l", "a punctuator byte with one more to come"),
+    Rule("punct_more2", "v", "m", "the second byte of a four-byte punctuator: two more to come"),
     # outside any token (norm): what the next token is
     Rule("open_block", "norm", "B", "'/' followed by '*' opens a block comment", when=("x_slash", "n_star"), layer=5),
     Rule("open_line", "norm", "L", "'/' followed by '/' opens a line comment", when=("x_slash", "n_slash"), layer=5),
@@ -192,12 +229,14 @@ RULES = [
     Rule("keyword", "norm", "k", "a word that is a C11 keyword", when=("x_start", "kw"), layer=5),
     Rule("ident", "norm", "i", "any other word is an identifier", when=("x_start",), unless=("kw", "pfx"), layer=5),
     Rule("space", "norm", "_", "whitespace outside a token", when=("x_space",), layer=5),
-    Rule("punct", "norm", "o", "any other byte outside a token is a punctuator", layer=6,
-         fallback=("r_open_block", "r_open_line", "r_open_str", "r_open_chr", "r_pp_start", "r_pp_digraph",
-                   "r_pp_trigraph", "r_prefix", "r_ucn_start", "r_num_start", "r_num_dot", "r_keyword", "r_ident",
-                   "r_space")),
+    # any other byte outside a token is a punctuator: the longest one that starts here (C11 §6.4.6)
+    *(Rule(f"punct{n}" if n > 1 else "punct", "norm", PUNCT_START[n],
+           f"any other byte outside a token is a punctuator: {what}", layer=6, fallback=NORM_SIBLINGS,
+           when=(f"pl{n}",) if n > 1 else (), unless=tuple(f"pl{k}" for k in range(n + 1, MAX_PUNCT + 1)))
+      for n, what in ((1, "one byte (no longer punctuator starts here)"), (2, "two bytes long (e.g. '+=', '->')"),
+                      (3, "three bytes long ('...', '<<=', '>>=')"), (4, "four bytes long ('%:%:')"))),
 ]
-NORMAL_STATES = "_ozyE"  # after these the next byte starts fresh (plus the end marker: the first byte)
+NORMAL_STATES = "_ozyEj"  # after these the next byte starts fresh (plus the end marker: the first byte)
 
 DIMS = (
     *CLASSES, *(f"ch_{c}" for c in sorted(set("".join(KEYWORDS)))), *(st(s) for s in STATES),
@@ -205,6 +244,7 @@ DIMS = (
     *(x_(c) for c in XFEATS), "p_star", "p_bs", "p_exp", "p_slash", "pLnl", "pLns", "pp_q", "ppp_q",
     "n_star", "n_slash", "n_digit", "n_dq", "n_sq", "n_8", "n_q", "n_colon", "n_nl", "n_uU", "nn_dq", "nn_eq", "nn_slash",
     *(f"k{j}_{c}" for j in range(MAX_KW) for c in LETTERS_AT[j]), *(f"id{j}" for j in range(MAX_KW + 1)),
+    *(pq(j, c) for j in range(MAX_PUNCT) for c in PUNCT_AT[j]), *(f"pl{n}" for n in range(2, MAX_PUNCT + 1)),
     "kw", "linestart", "pexp_pm", "numcont", "norm", "r_end",
     "p_bse", "tri_bs", "pfx", "splice", "ucn", "wmore",
     *(f"r_{r.name}" for r in RULES),
@@ -218,19 +258,21 @@ def _group(src: str) -> Form:
     return {st(s): 1.0 for s in src}
 
 
-def _rule_unit(r: Rule) -> UnitSpec:
-    """AND of the rule's group and conditions (all exact 0/1), or its group minus the siblings."""
+def _rule_unit(r: Rule, gate: str | None = None) -> UnitSpec:
+    """AND of the rule's group and conditions (all exact 0/1), or its group minus the siblings.
+    ``gate``: a 0/1 dim the rule also needs (another model that includes the lexer switches it on
+    only while the letters are written); a rule's input is a few 0/1 terms, far below BIG."""
     read = dict(_group(r.src))
-    if r.fallback is not None:
-        for sib in r.fallback:
-            read[sib] = read.get(sib, 0.0) - 1.0
-    else:
-        for d in r.when:
-            read[d] = read.get(d, 0.0) + 1.0
-        for d in r.unless:
-            read[d] = read.get(d, 0.0) - 1.0
-        read["one"] = read.get("one", 0.0) - float(len(r.when))
+    for sib in r.fallback or ():
+        read[sib] = read.get(sib, 0.0) - 1.0
+    for d in r.when:
+        read[d] = read.get(d, 0.0) + 1.0
+    for d in r.unless:
+        read[d] = read.get(d, 0.0) - 1.0
+    read["one"] = read.get("one", 0.0) - float(len(r.when))
     read["x_mark"] = -1.0  # past the last source byte only r_end fires (exactly one rule per byte)
+    if gate is not None:
+        read = pr.gated(read, {gate: 1.0}, 1.0)
     states = "outside any token" if r.src == "norm" else "in state " + "/".join(repr(s) for s in r.src)
     return UnitSpec(read=read, write={f"r_{r.name}": 1.0}, where=r.where,
                     label=f"rule {r.name}: {states}, {r.doc} -> '{r.out}'")
@@ -241,12 +283,23 @@ def builder() -> ModelBuilder:
     lay = Layout()
     lay.add("one", "pos", "pos2", *DIMS)
     b = ModelBuilder(lay)
+    add_lexer(b)
+    return b
+
+
+def add_lexer(b: ModelBuilder, gate: str | None = None, end: int = EOS) -> None:
+    """The lexer's weights into ``b`` (whose layout holds ``DIMS``), at global layers 1-6.
+
+    Alone (``builder``) it is the highlighter. The C parser (handformer/cparse) includes it to
+    write the same letters first: ``gate`` is then its "the letters are being written" flag
+    (every rule needs it, so outside the letters the lexer writes nothing and votes for no
+    byte) and ``end`` the byte written after the last letter (instead of the final newline)."""
     # Byte embedding: the constant, the source byte's classes and keyword letter, and (for the
     # letters the model writes) which lexer state the byte names.
     for byte in range(256):
         ch = chr(byte)
         form = {"one": 1.0, **{c: 1.0 for c, chars in CLASSES.items() if ch in chars}}
-        if f"ch_{ch}" in lay:
+        if f"ch_{ch}" in b.layout:
             form[f"ch_{ch}"] = 1.0
         if ch in STATES:
             form[st(ch)] = 1.0
@@ -272,6 +325,7 @@ def builder() -> ModelBuilder:
     s = {"pos": 1.0, "E": -1.0, "one": 1.0}
     x = pr.gather_head("the source byte being classified", s, "x_slash", src="c_slash")
     x.value = {c: {x_(c): 1.0} for c in XFEATS}
+    x.value.update({pc(c): {pq(0, c): 1.0} for c in PUNCT_AT[0]})
     prev = pr.gather_head("the byte before it", pr.add(s, pr.const(-1.0)), "p_star", src="c_star")
     prev.value = {"c_star": {"p_star": 1.0}, "c_bs": {"p_bs": 1.0}, "c_exp": {"p_exp": 1.0},
                   "c_slash": {"p_slash": 1.0}, "Lnl": {"pLnl": 1.0}, "Lns": {"pLns": 1.0}}
@@ -282,10 +336,14 @@ def builder() -> ModelBuilder:
     nxt = pr.gather_head("the byte after it", pr.add(s, pr.const(1.0)), "n_star", src="c_star")
     nxt.value = {"c_star": {"n_star": 1.0}, "c_slash": {"n_slash": 1.0}, "c_digit": {"n_digit": 1.0},
                  "c_dq": {"n_dq": 1.0}, "c_sq": {"n_sq": 1.0}, "c_8": {"n_8": 1.0}, "c_q": {"n_q": 1.0},
-                 "c_colon": {"n_colon": 1.0}, "c_nl": {"n_nl": 1.0}, "c_uU": {"n_uU": 1.0}}
+                 "c_colon": {"n_colon": 1.0}, "c_nl": {"n_nl": 1.0}, "c_uU": {"n_uU": 1.0},
+                 **{pc(c): {pq(1, c): 1.0} for c in PUNCT_AT[1]}}
     nxt2 = pr.gather_head("two bytes after it", pr.add(s, pr.const(2.0)), "nn_dq", src="c_dq")
-    nxt2.value = {"c_dq": {"nn_dq": 1.0}, "c_eq": {"nn_eq": 1.0}, "c_slash": {"nn_slash": 1.0}}
-    l3.heads += [x, prev, prev2, prev3, nxt, nxt2]
+    nxt2.value = {"c_dq": {"nn_dq": 1.0}, "c_eq": {"nn_eq": 1.0}, "c_slash": {"nn_slash": 1.0},
+                  **{pc(c): {pq(2, c): 1.0} for c in PUNCT_AT[2]}}
+    nxt3 = pr.gather_head("three bytes after it (for '%:%:')", pr.add(s, pr.const(3.0)), pq(3, ":"), src=pc(":"))
+    nxt3.value = {pc(c): {pq(3, c): 1.0} for c in PUNCT_AT[3]}
+    l3.heads += [x, prev, prev2, prev3, nxt, nxt2, nxt3]
     for j in range(MAX_KW + 1):  # offset j: the letters a keyword can have there, and "is it an identifier byte"
         h = pr.gather_head(f"byte {j} of the word (for keywords)", pr.add(s, pr.const(float(j))), f"id{j}", src="c_ident")
         h.value = {"c_ident": {f"id{j}": 1.0},
@@ -297,6 +355,11 @@ def builder() -> ModelBuilder:
         read["one"] = -float(len(kw) - 1)
         l3.units.append(UnitSpec(read=read, write={"kw": 1.0},
                                  label=f"keyword '{kw}': the word here spells {kw} and ends after {len(kw)} bytes"))
+    for p in PUNCTUATORS:  # the longest-match test: every byte of a punctuator of two or more bytes
+        if len(p) > 1:
+            l3.units.append(UnitSpec(read={**{pq(j, c): 1.0 for j, c in enumerate(p)}, "one": -float(len(p) - 1)},
+                                     write={f"pl{len(p)}": 1.0},
+                                     label=f"punctuator '{p}': the bytes here spell it ({len(p)} bytes)"))
     # '#' is first on its line when no non-space byte comes after the latest newline before it
     l3.units += pr.clamp01_units({"pLnl": 1.0, "pLns": -1.0, "one": 1.0}, {"linestart": 1.0})
     l3.units.append(pr.relu_unit({"x_pm": 1.0, "p_exp": 1.0, "one": -1.0}, {"pexp_pm": 1.0},
@@ -339,18 +402,19 @@ def builder() -> ModelBuilder:
                      "outside any token: a number ends here"),
         pr.relu_unit({st("i"): 1.0, st("k"): 1.0, "x_ident": -1.0, "wmore": -1.0}, {"norm": 1.0},
                      "outside any token: a word ends here"),
-        pr.relu_unit({"x_mark": 1.0}, {"r_end": 1.0}, "the source is used up: write the final newline"),
+        pr.relu_unit({"x_mark": 1.0} if gate is None else pr.gated({"x_mark": 1.0}, {gate: 1.0}, 1.0), {"r_end": 1.0},
+                     "the source is used up: write the final newline" if end == EOS
+                     else f"the source is used up: write {chr(end)!r}, the end of the letters"),
     ]
     for r in RULES:
         if r.name == "num":  # needs numcont from this layer: placed in layer 5
             r.layer = 5
-        b.at(r.layer).units.append(_rule_unit(r))
+        b.at(r.layer).units.append(_rule_unit(r, gate))
 
     # ---- Unembedding: each rule's dim votes for its letter; the end beats any letter.
     for r in RULES:
         b.logit(f"r_{r.name}", ord(r.out), 10.0)
-    b.logit("r_end", EOS, 20.0)
-    return b
+    b.logit("r_end", end, 20.0)
 
 
 def build() -> Transformer:
@@ -427,6 +491,11 @@ def _docs() -> dict[str, str]:
             d[f"k{j}_{c}"] = f"1 if byte {j} of the word is {c!r} (for matching keywords)."
     for j in range(MAX_KW + 1):
         d[f"id{j}"] = f"1 if byte {j} of the word is an identifier byte (the word goes on)."
+    for j in range(MAX_PUNCT):
+        for c in PUNCT_AT[j]:
+            d[pq(j, c)] = f"1 if byte {j} of a punctuator starting here is {c!r} (for the longest match)."
+    for n in range(2, MAX_PUNCT + 1):
+        d[f"pl{n}"] = f"1 if a {n}-byte punctuator starts here (C takes the longest one)."
     for r in RULES:
         d[f"r_{r.name}"] = f"Rule {r.name}: {r.doc} -> writes {r.out!r} ({STATES[r.out]})."
     return d
@@ -437,12 +506,12 @@ DOCS = _docs()
 
 def category(name: str) -> str:
     """How the visualizer groups the dims: byte features, landmarks, lookups, keywords, rules."""
-    if name in ("one", "pos", "pos2") or name.startswith(("c_", "ch_", "st_")):
+    if name in ("one", "pos", "pos2") or name.startswith(("c_", "ch_", "st_", "pc_")):
         return "input"
     if name in ("f_E", "f_nl", "f_ns", "E", "Lnl", "Lns"):
         return "landmarks"
-    if name.startswith(("x_", "p_", "n_", "pL", "id")) or re.match(r"^k\d+_", name):
+    if name.startswith(("x_", "p_", "n_", "pL", "id")) or re.match(r"^[kq]\d+_", name):
         return "lookups"
-    if name == "kw":
+    if name == "kw" or re.match(r"^pl\d$", name):
         return "keywords"
     return "rules"

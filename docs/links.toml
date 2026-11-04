@@ -309,7 +309,7 @@ match = 'x = pr.gather_head("the source byte being classified"'
 
 [src."c.compile"]
 file = "handformer/csyntax/circuit.py"
-match = 'def _rule_unit(r: Rule) -> UnitSpec:'
+match = 'def _rule_unit(r: Rule, gate: str | None = None) -> UnitSpec:'
 
 [src."c.keywords"]
 file = "handformer/csyntax/circuit.py"
