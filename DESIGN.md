@@ -443,11 +443,11 @@ on the bounding byte, whose value is 0.
 
 | | |
 |---|---|
-| layers | 14 |
-| heads | 73 |
-| MLP units | 462 |
-| d_model | 263 |
-| nonzero parameters | 3,774 |
+| layers | 22 |
+| heads | 78 |
+| MLP units | 539 |
+| d_model | 302 |
+| nonzero parameters | 4,489 |
 
 The dense size is much larger, mostly zeros in the per-head `d×d` value/output
 matrices. A factored per-head value/output layout would shrink it without
@@ -485,8 +485,7 @@ changing the nonzero count.
 ## 17. Roadmap
 
 1. ~~Signed operands~~: done (§19).
-2. **Decimals** for + and −: align on `.` with marker lookups. For ×, place the
-   point at frac(a) + frac(b).
+2. ~~Decimals~~: done (§20).
 3. **Division** (`/`) by long division: repeated subtraction lines reusing the
    borrow and complement circuits, with precision from `~N` in the prompt.
 4. **Integer powers** `a^n`: repeated multiplication frames (a negative n becomes division).
@@ -547,3 +546,46 @@ step q is the computation at position q that wrote byte q+1.
 Tests: every signed `a op b` for a, b ∈ [−12, 12]; random trees with negative
 leaves, negated groups and negative intermediate values; the reference's
 answer is also checked against Python's own arithmetic.
+
+## 20. Decimals
+
+```
+1.25+3.5=[125+350=574;475]4.75        0.1*0.2=[01*02=200,000|2000;2]0.02
+0.5-1.25=[050-125=529<-75]-0.75       1.5+1.5=[15+15=03;30]3
+3.14*(2-0.5)=[20-05=51;15]3.14*1.5=[314*15=0751,1740|01740;4710]4.71
+```
+
+The operator circuits are unchanged: they only ever see integers. All
+decimal handling lives in the parser and rewriter (`expr.py`, layers 9–22):
+
+- **Numbers.** A number is a run of digits and `.`. The non-number class
+  `Lnd` excludes both, so operand bounds include the point. A `-` after a
+  digit, `.` or `)` is binary.
+- **Fraction lengths.** `a_dot` = latest `.` before o, inside a iff
+  `a_dot > a_lo`, giving `frac_a = o − 1 − a_dot`; likewise for b from `b_hi − 1`.
+- **Frame copy.** The frame is written in five segments: signed a without
+  its `.`, zero padding, the operator, signed b without its `.`, zero
+  padding. Each segment is a region flag. Skipping the `.` is one robust step
+  ("from the dot's offset on, read one byte further"). For + and −, the pads
+  make the fractions equal (`max − own`); × has no padding.
+- **Result scale.** `f_res = max(frac_a, frac_b)` for + and −, and
+  `frac_a + frac_b` for ×, picked with the `use_mul` select.
+- **Formatting in the rewrite:**
+  - trailing zeros: `tz = min(Rb − 1 − latest nonzero digit, f_res)`;
+  - `f' = f_res − tz`, forced to 0 for a zero result;
+  - `m' = digits − tz`;
+  - width `w = max(m', f' + 1)` (zero-pad on the left);
+  - emit the sign, the first `w − f'` digits, `.` if `f' > 0`, then the rest.
+
+  The padding zeros and `.` are written directly; result digits are copied.
+- **Integers are unchanged:** with no `.` every pad and `f_res` is 0, so the
+  rewrite reduces exactly to the integer rule (checked: the integer suites
+  pass byte for byte).
+
+Tests (`tests/test_decimal.py`):
+- all 432 pairs of 12 decimal literals under + − ×;
+- formatting edge cases;
+- fractions 60 digits long (+ −) and 6 digits (×);
+- random decimal trees.
+
+Every answer is also checked against exact `Fraction` arithmetic.

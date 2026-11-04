@@ -36,7 +36,8 @@ from __future__ import annotations
 from . import primitives as pr
 from .model import Form, HeadSpec, ModelBuilder
 
-# A '-' is unary (a sign) when the byte before it is not a digit and not ')'.
+# A '-' is unary (a sign) when the byte before it is not part of a number
+# (digit or '.') and not ')'.
 # "binary minus" as a 0/1 match form: is_minus + prev_digit + prev_rpar - 1 equals 1
 # exactly for a binary '-', 0 for a unary one, <= 0 for any other byte.
 BINMINUS: Form = {"is_minus": 1.0, "prev_digit": 1.0, "prev_rpar": 1.0, "one": -1.0}
@@ -53,7 +54,9 @@ MARKERS: dict[str, list[Form]] = {
     "Lrp": [{"is_rpar": 1.0}],
     "Lmul": [{"is_star": 1.0}],
     "Ladd": [{"is_plus": 1.0}, BINMINUS],
-    "Lnd": [{"one": 1.0, "is_digit": -1.0}],
+    "Lnd": [{"one": 1.0, "is_digit": -1.0, "is_dot": -1.0}],  # not part of a number
+    "Ldot": [{"is_dot": 1.0}],
+    "Lnz": [{"nz": 1.0}],  # nonzero digit (trailing-zero count of a result)
 }
 NEXT_CLASSES = ("Lrp", "Lmul", "Ladd", "Lnd")  # classes searched with next_match
 OPS = {"add": "is_plus", "sub": "is_minus", "mul": "is_star"}
@@ -76,7 +79,12 @@ def build(b: ModelBuilder) -> None:
     prev = pr.add({"pos": 1.0}, pr.const(-1.0))
     l1 = b.at(1)
     l1.heads += [
-        pr.gather_head("prev byte digit?", prev, "prev_digit", src="is_digit"),
+        HeadSpec(  # "digit" here means part of a number: a digit or '.'
+            name="prev byte in a number?",
+            query=[pr.scale(prev, 2 * pr.GATHER_BETA), pr.const(-pr.GATHER_BETA)],
+            key=[{"pos": 1.0}, {"pos2": 1.0}],
+            value={"is_digit": {"prev_digit": 1.0}, "is_dot": {"prev_digit": 1.0}},
+        ),
         pr.gather_head("prev byte ')'?", prev, "prev_rpar", src="is_rpar"),
     ]
     l1.units.append(pr.relu_unit({"is_minus": 1.0, "prev_digit": -1.0, "prev_rpar": -1.0},

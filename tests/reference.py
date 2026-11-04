@@ -7,8 +7,8 @@ test compares the model's output against this, one byte at a time.
 
 
 def unary(x: str, i: int) -> bool:
-    """A '-' is a sign when the byte before it is not a digit and not ')'."""
-    return x[i] == "-" and (i == 0 or not (x[i - 1].isdigit() or x[i - 1] == ")"))
+    """A '-' is a sign when the byte before it is not part of a number and not ')'."""
+    return x[i] == "-" and (i == 0 or not (x[i - 1].isdigit() or x[i - 1] in ".)"))
 
 
 def binary_op(x: str, i: int) -> bool:
@@ -56,6 +56,40 @@ def working(a: str, op: str, b: str) -> str:
     return work + end + ("-" if neg and v else "") + str(v)
 
 
+def is_num(ch: str) -> bool:
+    return ch.isdigit() or ch == "."
+
+
+def split_decimal(operand: str) -> tuple[str, int]:
+    """Signed decimal text -> (signed integer digits without '.', fraction length)."""
+    sign = "-" if operand.startswith("-") else ""
+    body = operand.lstrip("-")
+    if "." not in body:
+        return sign + body, 0
+    whole, frac = body.split(".")
+    return sign + whole + frac, len(frac)
+
+
+def format_result(result: str, f: int) -> str:
+    """Integer result text with f implied fractional digits -> canonical decimal.
+
+    Trailing fractional zeros are stripped, the '.' is inserted, and a
+    result shorter than its fraction is left-padded with zeros. Zero stays "0".
+    """
+    sign = "-" if result.startswith("-") else ""
+    digits = result.lstrip("-")
+    if int(digits) == 0:
+        return "0"
+    tz = min(len(digits) - len(digits.rstrip("0")), f)
+    f -= tz
+    digits = digits[: len(digits) - tz]
+    if f == 0:
+        return sign + digits
+    w = max(len(digits), f + 1)
+    padded = digits.zfill(w)
+    return sign + padded[: w - f] + "." + padded[w - f:]
+
+
 def step(x: str) -> tuple[str, str, bool]:
     """One reduction of line x: (frame, next line, more steps needed)."""
     p = x.rfind("(")
@@ -64,19 +98,29 @@ def step(x: str) -> tuple[str, str, bool]:
     o = next((i for i in span if x[i] == "*"), None)
     if o is None:
         o = next(i for i in span if x[i] in "+-" and binary_op(x, i))
-    a_lo = max(i for i in range(-1, o) if i == -1 or not x[i].isdigit())
+    a_lo = max(i for i in range(-1, o) if i == -1 or not is_num(x[i]))
     afence = a_lo - 1 if a_lo >= 0 and unary(x, a_lo) else a_lo
     sb = o + 1 < len(x) and x[o + 1] == "-"
-    b_hi = next(i for i in range(o + 1 + sb, len(x) + 1) if i == len(x) or not x[i].isdigit())
+    b_hi = next(i for i in range(o + 1 + sb, len(x) + 1) if i == len(x) or not is_num(x[i]))
     a, op, b = x[afence + 1:o], x[o], x[o + 1:b_hi]
-    body = working(a, op, b)
-    result = body[max(body.rfind(";"), body.rfind("<")) + 1:]
+
+    ia, fa = split_decimal(a)
+    ib, fb = split_decimal(b)
+    if op == "*":
+        f = fa + fb
+    else:  # align the fractions: pad the shorter one with zeros
+        f = max(fa, fb)
+        ia, ib = ia + "0" * (f - fa), ib + "0" * (f - fb)
+    body = working(ia, op, ib)
+    raw = body[max(body.rfind(";"), body.rfind("<")) + 1:]
+    result = format_result(raw, f)
+
     drop = p >= 0 and afence == p and b_hi == c
     lo, hi = (p, c) if drop else (afence + 1, b_hi - 1)
     if result.startswith("-") and lo >= 1 and unary(x, lo - 1):
         lo, result = lo - 1, result[1:]  # -(-v) == v
     more = sum(binary_op(x, i) for i in range(len(x))) >= 2
-    return f"[{a}{op}{b}={body}]", x[:lo] + result + x[hi + 1:], more
+    return f"[{ia}{op}{ib}={body}]", x[:lo] + result + x[hi + 1:], more
 
 
 def output(expression: str) -> str:
