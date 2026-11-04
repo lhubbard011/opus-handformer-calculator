@@ -3,7 +3,7 @@
 // is the computation at position q that produced byte q+1.
 
 import { decodeF16, SEQ, DIV } from "./render.js";
-import { drawHeatmap, attachHeatmapEvents, isTouch, showSheet, hideSheet, setTip } from "./heatmap.js";
+import { drawHeatmap, attachHeatmapEvents, isTouch, showSheet, hideSheet, setTip, setRowNames } from "./heatmap.js";
 import { LocalApi } from "./local-api.js";
 import { drawGraph, drawOverview } from "./graph.js";
 
@@ -1173,7 +1173,7 @@ async function renderDiffMap(p) {
     const [K, B] = await Promise.all([mapData(path, { ...body, run_id: run.run_id }), baseMap(path, body)]);
     return { K, B };
   };
-  const drawRows = (title, names, valK, valB, nRows, docs, clickRow) => {
+  const drawRows = (title, names, valK, valB, nRows, docs, clickRow, cat = null) => {
     // valK(r, c) / valB(r, c): raw values; keep rows with any real change, scale each by its biggest change
     const rows = [];
     for (let r = 0; r < nRows; r++) {
@@ -1194,6 +1194,7 @@ async function renderDiffMap(p) {
       rows: rows.length, cols: nc,
       get: (i, c) => (valK(rows[i].r, c) - valB(rows[i].r, c)) / rows[i].mx, norm: (v) => (v + 1) / 2, lut: DIV,
       rowLabels: rows.map((x) => names(x.r)), markCol: split < nc ? split : undefined,
+      groups: cat ? groupsOf(rows.map((x) => cat(x.r))) : undefined,
       valueText: (i, c) => { const r = rows[i].r;
         return `${names(r)} at position ${c} ${charAt(c)}
 normal ${fmt(valB(r, c))} → knocked out ${fmt(valK(r, c))}` +
@@ -1209,14 +1210,14 @@ ${docs(r)}`; },
     const dims = state.info.dims;
     drawRows({ text: `residual stream after ${K.meta.label}`, key: `res${snap}`, tol: tolOf(K.meta) },
       (r) => dims[r].name, (r, c) => K.data[r * nK + c] * K.meta.scale[r], (r, c) => B.data[r * nB + c] * B.meta.scale[r],
-      dims.length, (r) => dimTip(dims[r].name), (r, c) => { state.openDim = dims[r].name; goto(c); });
+      dims.length, (r) => dimTip(dims[r].name), (r, c) => { state.openDim = dims[r].name; goto(c); }, (r) => dims[r].cat);
   } else if (state.map === "mlp") {
     const layer = Number($("mlp-layer").value);
     const { K, B } = await pairs("/api/mlp", { layer });
     const units = state.info.layers[layer].units;
     drawRows({ text: `layer ${layer + 1} MLP activations`, key: `mlp${layer}`, tol: tolOf(K.meta) },
       (r) => `#${r} ${units[r].write}`, (r, c) => K.data[r * nK + c] * K.meta.scale[r], (r, c) => B.data[r * nB + c] * B.meta.scale[r],
-      units.length, (r) => unitTip(units[r], r), (_r, c) => goto(c));
+      units.length, (r) => unitTip(units[r], r), (_r, c) => goto(c), (r) => units[r].circuit);
   } else if (state.map === "step") {
     if (q >= nc) { cap.textContent = `position ${q} exists only in one of the two runs. ${where}`; drawHeatmap(canvas, { rows: 0, cols: 0 }, {}); return; }
     const pb = await api("/api/position", { run_id: base.run_id, q });
@@ -1231,7 +1232,7 @@ ${docs(r)}`; },
     drawHeatmap(canvas, {
       key: `diffstep:${run.run_id}:${base.run_id}:${q}`, rows: changed.length, cols: S,
       get: (r, s) => (p.values[changed[r]][s] - pb.values[changed[r]][s]) / mx[r], norm: (v) => (v + 1) / 2, lut: DIV,
-      rowLabels: changed.map((i) => dims[i].name),
+      rowLabels: changed.map((i) => dims[i].name), groups: groupsOf(changed.map((i) => dims[i].cat)),
       valueText: (r, s) => { const i = changed[r];
         return `${dims[i].name} after ${labels[s]}
 normal ${fmt(pb.values[i][s])} → knocked out ${fmt(p.values[i][s])}
@@ -1434,6 +1435,15 @@ function wire() {
   $("btn-link").addEventListener("click", copyLink);
   $("model-sel").addEventListener("change", (e) => switchModel(e.target.value).catch((err) => setStatus(err.message, true)));
   $("diff").addEventListener("change", () => state.pos.has(state.q) && renderMap(state.pos.get(state.q)));
+  // row names on the heatmaps (remembered in this browser, like the pins and sizes)
+  try { if (localStorage.getItem(ROWNAMES_KEY) === "0") $("row-names").checked = false; } catch { /* private mode */ }
+  setRowNames($("row-names").checked);
+  $("row-names").addEventListener("change", () => {
+    setRowNames($("row-names").checked);
+    try { localStorage.setItem(ROWNAMES_KEY, $("row-names").checked ? "1" : "0"); } catch { /* private mode */ }
+    log("heatmap row names", $("row-names").checked ? "on" : "off");
+    if (state.pos.has(state.q)) renderMap(state.pos.get(state.q));
+  });
   document.querySelectorAll("#guide .try").forEach((b) => {
     b.dataset.tip = "Set the visualizer up to show this (runs an example and opens the right view).";
     b.addEventListener("click", () => tryIt(JSON.parse(b.dataset.try)).catch((e) => setStatus(e.message, true)));
@@ -1544,6 +1554,78 @@ async function tryIt(cfg) {
 // column next to them, or sit side by side when no big panel is pinned (wide screens; narrow
 // screens stack everything). Pinning a fourth sends the oldest back. The choice is a per-viewer
 // convenience, remembered in this browser only.
+// ------------------------------------------------------------------ resizable views
+// Every long list or view (data-resize in index.html) gets a grip along its bottom edge: drag it
+// (mouse, pen or touch) to make the view taller or shorter, double-click it or press Enter for
+// the usual size, or use the arrow keys. The size is a max-height, so a short list stays short.
+// Sizes are remembered in this browser only, a per-viewer convenience like the pins.
+const SIZE_KEY = "handviz.sizes";
+const ROWNAMES_KEY = "handviz.rownames";
+const MIN_VIEW = 48; // px: always room for a row or two
+const KEY_STEP = 40; // px per arrow key
+
+function loadSizes() {
+  try { return JSON.parse(localStorage.getItem(SIZE_KEY) || "{}") || {}; } catch { return {}; }
+}
+function saveSize(id, h) {
+  try {
+    const sizes = loadSizes();
+    if (h === null) delete sizes[id]; else sizes[id] = h;
+    Object.keys(sizes).length ? localStorage.setItem(SIZE_KEY, JSON.stringify(sizes)) : localStorage.removeItem(SIZE_KEY);
+  } catch { /* private mode: the size just isn't remembered */ }
+}
+
+function setupResizers() {
+  const saved = loadSizes();
+  document.querySelectorAll("[data-resize]").forEach((el) => {
+    const id = el.id, what = el.dataset.resize;
+    const grip = document.createElement("div");
+    grip.className = "grip";
+    grip.tabIndex = 0;
+    grip.setAttribute("role", "separator");
+    grip.setAttribute("aria-orientation", "horizontal");
+    grip.setAttribute("aria-label", `Resize ${what}`);
+    grip.dataset.tip = `Drag to make ${what} taller or shorter. Double-click (or Enter) for its usual size; arrow keys work too.`;
+    el.after(grip);
+    let limit = null; // the max-height the viewer chose (px), or null: the stylesheet's
+    const apply = (h) => {
+      limit = h === null ? null : Math.max(MIN_VIEW, Math.round(h));
+      if (limit === null) el.style.removeProperty("max-height"); else el.style.maxHeight = `${limit}px`;
+      el.classList.toggle("resized", limit !== null);
+    };
+    const commit = () => { saveSize(id, limit); log("resized", id, limit === null ? "to its usual size" : `to ${limit}px`); };
+    if (typeof saved[id] === "number") apply(saved[id]);
+    let drag = null; // {y, h}: where the drag started and the view's height then
+    grip.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      drag = { y: e.clientY, h: el.getBoundingClientRect().height };
+      grip.setPointerCapture(e.pointerId);
+      grip.classList.add("dragging");
+      document.body.classList.add("resizing");
+      e.preventDefault();
+    });
+    grip.addEventListener("pointermove", (e) => { if (drag) apply(drag.h + e.clientY - drag.y); });
+    const stop = () => {
+      if (!drag) return;
+      drag = null;
+      grip.classList.remove("dragging");
+      document.body.classList.remove("resizing");
+      commit();
+    };
+    grip.addEventListener("pointerup", stop);
+    grip.addEventListener("pointercancel", stop);
+    grip.addEventListener("dblclick", () => { apply(null); commit(); });
+    grip.addEventListener("keydown", (e) => {
+      const now = limit ?? el.getBoundingClientRect().height;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") apply(now + (e.key === "ArrowDown" ? KEY_STEP : -KEY_STEP));
+      else if (e.key === "Enter") apply(null);
+      else return;
+      e.preventDefault();
+      commit();
+    });
+  });
+}
+
 const PIN_KEY = "handviz.pinned";
 const MAX_PINS = 3;
 const BIG_PANELS = new Set(["p-maps", "p-graph"]);
@@ -1683,6 +1765,7 @@ function trackBar() {
 async function main() {
   wire();
   setupPins();
+  setupResizers();
   trackBar();
   if (matchMedia("(max-width: 700px)").matches) $("map-howto").open = false; // long on a phone; one tap opens it
   try {

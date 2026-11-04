@@ -140,7 +140,7 @@ input[type=text], select {
 
 /* ---------- touch and small screens: same features, laid out for a phone ---------- */
 :root { --bar-h: 0px; }
-.map-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.map-wrap { overflow: auto; max-height: 70vh; -webkit-overflow-scrolling: touch; }
 .tooltip.sheet {
   left: 8px; right: 8px; top: auto; bottom: calc(var(--bar-h) + 8px + env(safe-area-inset-bottom));
   max-width: none; max-height: 45vh; overflow-y: auto; pointer-events: auto; font-size: 13px;
@@ -311,3 +311,14 @@ button.pin { font-size: 11px; padding: 1px 6px; border-color: var(--border); }
 .tnode.open-now > .thead { outline: 2px solid var(--accent); border-radius: 2px; display: inline-block; }
 .ttok { display: inline-block; margin: 0 6px 0 0; padding: 0 4px; border-radius: 3px; background: #2a303b;
         color: var(--ph-token); cursor: pointer; }
+
+/* resizable views: a grip under each long list (app.js setupResizers) */
+.resized { overflow: auto; }
+.grip { height: 12px; margin-top: 2px; display: flex; align-items: center; justify-content: center;
+        cursor: ns-resize; touch-action: none; border-radius: 4px; }
+.grip::before { content: ""; width: 40px; height: 3px; border-radius: 2px; background: var(--border); }
+.grip:hover::before, .grip:focus-visible::before, .grip.dragging::before { background: var(--accent); }
+.grip:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+body.resizing { user-select: none; -webkit-user-select: none; cursor: ns-resize; }
+@media (pointer: coarse) { .grip { height: 24px; } .grip::before { width: 56px; height: 4px; } }
+

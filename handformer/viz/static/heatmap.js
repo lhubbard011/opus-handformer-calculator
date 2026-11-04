@@ -6,6 +6,12 @@ const GUTTER = 128; // px reserved for row labels
 // Touch screens: cells at least this big (the map scrolls sideways inside its panel).
 const TOUCH_COL = 8, TOUCH_ROW = 5, TOUCH_MAX_W = 4000;
 export const isTouch = () => matchMedia("(pointer: coarse)").matches;
+// Row names: every row gets at least LABEL_ROW px so its name fits (the map scrolls inside its
+// resizable box); off, the rows shrink until the whole map fits FIT_H px and only the circuit
+// groups are named.
+const LABEL_ROW = 11, LABEL_MIN = 8, FIT_H = 560;
+let rowNames = true;
+export function setRowNames(on) { rowNames = !!on; }
 
 // spec: { key, rows, cols, get(r,c) -> raw, norm(raw) -> [0,1], lut, rowLabels[], groups[{row,label}],
 //         colLabel(c), valueText(r,c), rowTip(r) (hover on a row label), onClick(r,c), square,
@@ -18,8 +24,9 @@ export function drawHeatmap(canvas, spec, view) {
   let cssW = Math.max(240, wrap.clientWidth - 2);
   if (touch && spec.cols) cssW = Math.max(cssW, GUTTER + Math.min(TOUCH_MAX_W, spec.cols * TOUCH_COL));
   const plotW = cssW - GUTTER;
+  const fit = Math.min(12, FIT_H / Math.max(1, spec.rows));
   const rowH = spec.square ? plotW / spec.cols
-    : Math.max(touch ? TOUCH_ROW : 3, Math.min(12, 560 / Math.max(1, spec.rows)));
+    : Math.max(touch ? TOUCH_ROW : 3, rowNames && spec.rowLabels ? Math.max(LABEL_ROW, fit) : fit);
   const plotH = spec.square ? plotW : rowH * spec.rows;
   const colW0 = plotW / Math.max(1, spec.cols);
   const charAxis = spec.colChars && colW0 >= 9; // room for one character per column
@@ -87,7 +94,7 @@ export function drawHeatmap(canvas, spec, view) {
   // row labels and circuit group separators
   ctx.font = "10px ui-monospace, Menlo, monospace";
   ctx.textBaseline = "middle";
-  if (rowH >= 8 && spec.rowLabels) {
+  if (rowH >= LABEL_MIN && spec.rowLabels) {
     ctx.fillStyle = "#aab2c0";
     spec.rowLabels.forEach((l, r) => ctx.fillText(l.slice(0, 19), 4, r * rowH + rowH / 2));
   }
@@ -97,7 +104,7 @@ export function drawHeatmap(canvas, spec, view) {
     ctx.moveTo(0, g.row * rowH + 0.5);
     ctx.lineTo(cssW, g.row * rowH + 0.5);
     ctx.stroke();
-    if (rowH < 8) {
+    if (rowH < LABEL_MIN) {
       ctx.fillStyle = "#f2a541";
       ctx.fillText(g.label, 4, g.row * rowH + 7);
     }

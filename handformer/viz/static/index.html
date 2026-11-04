@@ -64,7 +64,7 @@
         <span class="lg ph-rewrite" data-tip="The model rewrites the line with the solved piece replaced by its answer.">rewrite</span>
       </span>
     </div>
-    <div id="tokens" class="token-strip"></div>
+    <div id="tokens" class="token-strip" data-resize="the sequence"></div>
     <input id="scrubber" type="range" min="0" max="0" value="0" aria-label="Step">
   </section>
   <div id="pinned" class="pinned" hidden>
@@ -155,14 +155,14 @@
   <section id="p-code" data-pin="Code" class="panel wide code-panel" hidden>
     <div class="panel-title" data-tip="The source coloured by the state letters the model has written so far. The outlined byte is the one being classified now; click any byte to step to it.">Code
       <span class="muted small" id="code-caption"></span></div>
-    <pre id="code-view" class="code-view"></pre>
+    <pre id="code-view" class="code-view" data-resize="the code"></pre>
   </section>
 
   <section id="p-tree" data-pin="Tree" class="panel wide tree-panel" hidden>
     <div class="panel-title" data-tip="The parse tree spelled by the records the model has written so far, and the source with the consumed tokens and the lookahead (outlined). The node the next record acts in is outlined; click a node or token to step to its record.">Tree
       <span class="muted small" id="tree-caption"></span></div>
     <pre id="tree-src" class="code-view tree-src"></pre>
-    <div id="tree-view" class="tree-view"></div>
+    <div id="tree-view" class="tree-view" data-resize="the tree"></div>
   </section>
 
   <section id="p-board" data-pin="Board" class="panel wide board-panel" hidden>
@@ -190,7 +190,7 @@
       <div class="panel-title" data-tip="Every attention head at this step: where it looked (← position) and what it wrote. Hover a row for what that head does.">Attention heads
         <input id="head-filter" class="filter" type="text" placeholder="filter (e.g. mul, latest)" spellcheck="false">
       </div>
-      <div id="heads" class="scroll"></div>
+      <div id="heads" class="scroll" data-resize="the heads list"></div>
     </section>
 
     <section id="p-dims" data-pin="Residual stream" class="panel">
@@ -198,7 +198,7 @@
         <input id="dim-filter" class="filter" type="text" placeholder="filter dims" spellcheck="false">
         <label class="small"><input id="show-zero" type="checkbox"> zeros</label>
       </div>
-      <div id="dims" class="scroll"></div>
+      <div id="dims" class="scroll" data-resize="the residual stream"></div>
     </section>
   </main>
 
@@ -211,6 +211,7 @@
         <button role="tab" data-map="mlp" data-tip="How strongly each calculating unit (rows) fired at each character (columns), for one layer.">MLP activations</button>
         <button role="tab" data-map="weights" data-tip="The hand-written numbers themselves, labelled by what they connect.">Raw weights</button>
       </nav>
+      <label class="small" data-tip="Give every row of the map room for its name (the map then scrolls inside its box: drag the grip under it to resize). Off: the whole map fits on screen and only the circuit groups are named."><input id="row-names" type="checkbox" checked> row names</label>
       <label id="diff-ctl" class="diff-ctl" hidden data-tip="With parts knocked out, show how each value changed compared with the normal run (knocked-out minus normal), instead of the raw values. Every lit cell is part of the knockout's footprint."><input id="diff" type="checkbox" checked> show change vs normal</label>
       <span id="map-controls" class="map-controls">
         <label data-for="residual">after <select id="snapshot"></select></label>
@@ -232,7 +233,7 @@
       <summary>How to use this map</summary>
       <div id="map-howto-body"></div>
     </details>
-    <div class="map-wrap"><canvas id="map"></canvas></div>
+    <div id="map-wrap" class="map-wrap" data-resize="the heatmap"><canvas id="map"></canvas></div>
   </section>
 
   <section id="p-graph" data-pin="Circuit graph" class="panel wide">
@@ -243,7 +244,7 @@
         <option value="div">div</option><option value="pow">pow</option></select></label>
     </div>
     <div id="g-caption" class="muted small"></div>
-    <div id="graph" class="graph-wrap"></div>
+    <div id="graph" class="graph-wrap" data-resize="the graph"></div>
     <div id="g-pick" class="detail muted">click a value to highlight what it is computed from and what it feeds</div>
   </section>
 
@@ -251,7 +252,7 @@
     <div class="panel-title" data-tip="The small calculating units that fired at this character. Hover one for what it computes.">Active MLP units <span class="muted small">ReLU(read) → write, at this step</span>
       <input id="unit-filter" class="filter" type="text" placeholder="filter (e.g. carry, D3)" spellcheck="false">
     </div>
-    <div id="units" class="scroll units"></div>
+    <div id="units" class="scroll units" data-resize="the units list"></div>
   </section>
 
   <div id="tooltip" class="tooltip" hidden></div>
