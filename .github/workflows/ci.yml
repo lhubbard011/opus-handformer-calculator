@@ -31,5 +31,7 @@ jobs:
       - run: python tools/run_weights.py weights.npz "2+3*(4-1)" "-12.5*3-4" "355/113~6" "2^10"
       - run: python -m handformer.export weights.safetensors
       - run: python -I tools/run_weights.py weights.safetensors "2+3*(4-1)" "-12.5*3-4" "355/113~6" "2^10"
+      # after the numpy-only proof: the docs check builds the visualizer's models (handformer/viz/models.yaml)
+      - run: pip install pyyaml==6.0.3
       - name: docs link to the current source lines
         run: python tools/doclinks.py --check
