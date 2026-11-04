@@ -9,14 +9,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [test_ops, test_expr, test_decimal, test_division, test_power, test_web, test_doclinks, test_explanations, test_claims, test_hello]
+        suite: [test_ops, test_expr, test_decimal, test_division, test_power, test_web, test_doclinks, test_explanations, test_claims, test_hello, test_export]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.13" }
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
-      - run: pip install numpy==2.5.4
+      - run: pip install numpy==2.5.4 safetensors==0.8.0  # safetensors: test_export checks the official reader
       - run: python -m tests.${{ matrix.suite }}
         env: { OPENBLAS_NUM_THREADS: "1" }
   standalone:
@@ -29,5 +29,7 @@ jobs:
       - run: pip install numpy==2.5.4
       - run: python -m handformer.export weights.npz
       - run: python tools/run_weights.py weights.npz "2+3*(4-1)" "-12.5*3-4" "355/113~6" "2^10"
+      - run: python -m handformer.export weights.safetensors
+      - run: python -I tools/run_weights.py weights.safetensors "2+3*(4-1)" "-12.5*3-4" "355/113~6" "2^10"
       - name: docs link to the current source lines
         run: python tools/doclinks.py --check

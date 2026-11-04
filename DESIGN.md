@@ -722,6 +722,13 @@ against exact truncated rational arithmetic.
   sign·log(1+|w|).
 - **Export:** `python -m handformer.export weights.npz` writes every tensor plus
   a JSON index of dimension, head and unit names.
+- **Safetensors:** `python -m handformer.export weights.safetensors` writes the same
+  tensors (dense float64, exact) as one file, with the index (dimension, layer and
+  head names) and a how-to-run note in its `__metadata__`. It is written with
+  numpy alone by following the format's spec, so exporting adds no dependency.
+  `tests/test_export.py` checks a bit-exact round trip, that the official
+  `safetensors` reader agrees when it is installed, and that the numpy-only runner
+  computes correct answers from the file.
 - **Density:** 8,478 nonzero of 2.08M stored cells (0.41%). The median residual
   dimension has one writer and one reader, and the median MLP unit reads 5
   dimensions. The sparsity is the price of one meaning per dimension. Planned

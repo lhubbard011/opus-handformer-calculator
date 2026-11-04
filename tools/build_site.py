@@ -7,6 +7,7 @@ OUT_DIR/static/*            the same frontend files the Python server serves
 OUT_DIR/data/model.json     every nonzero weight (tools/export_web.py)
 OUT_DIR/data/info.json      names, meanings and formulas (= server /api/info)
 OUT_DIR/handformer-weights.npz   raw weights download (handformer/export.py)
+OUT_DIR/handformer-weights.safetensors   the same weights as one safetensors file
 
 No build step, no bundler: the browser loads plain ES modules. Serve OUT_DIR
 with any static file server (`python -m http.server -d site`).
@@ -45,6 +46,7 @@ def build(out: Path) -> None:
     (out / ".nojekyll").write_text("")  # serve files as-is
     export_web.export(out / "data")
     npz_export.export(out / "handformer-weights.npz")
+    npz_export.export(out / "handformer-weights.safetensors")
     files = sorted(p for p in out.rglob("*") if p.is_file())
     log.info("site built in %s: %d files, %d bytes", out, len(files), sum(p.stat().st_size for p in files))
 
