@@ -62,6 +62,8 @@ python -m handformer "12*34-400" "(1+2)*(3+4)"   # solve expressions
 python -m handformer                              # interactive loop
 python -m handformer.viz                          # visualizer: http://127.0.0.1:8768
 python -m unittest discover -s tests -t .         # full test suite (~3 min)
+python tools/export_torch.py out --model calc --named   # a PyTorch package (needs the torch extra)
+python out/run.py "2+3*(4-1)"                     # ...run it with PyTorch alone
 ```
 
 ## In the browser
@@ -401,7 +403,8 @@ tools/
   run_weights.py     independent numpy-only inference from the exported weights
   export_web.py      model.json (nonzero weights) + info.json (names, formulas) for the browser
   build_site.py      static site for GitHub Pages
-  export_torch.py    standalone PyTorch package (optionally anonymised / hardened)
+  export_torch.py    standalone PyTorch package of any model (--named for study; anonymised / hardened by default);
+                     checks itself against the numpy model
   doclinks.py        keeps the docs' links to source lines current (map: docs/links.toml)
   arith.py           merges everything into one model; solve()
   viz/               step-through visualizer (FastAPI + vanilla JS)

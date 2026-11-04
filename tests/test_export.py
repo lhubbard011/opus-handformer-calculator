@@ -59,6 +59,40 @@ class TestSafetensors(unittest.TestCase):
             export.export(self.tmp / "w.bin")
 
 
+
+try:
+    import torch  # noqa: F401  (optional: the `torch` extra)
+except ImportError:
+    torch = None
+
+
+@unittest.skipIf(torch is None, "torch not installed (uv sync --extra torch)")
+class TestTorchExport(unittest.TestCase):
+    """tools/export_torch.py: every model exports, loads as plain PyTorch and matches the numpy
+    model (export() itself checks logits and generation and raises on a mismatch)."""
+
+    def test_every_model_named(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        import export_torch
+        for key in export_torch.MODELS:
+            with self.subTest(model=key), tempfile.TemporaryDirectory() as d:
+                out = Path(d) / key
+                export_torch.export(out, seed=0, shuffle=False, model=key, named=True)
+                names = json.loads((out / "names.json").read_text())
+                config = json.loads((out / "config.json").read_text())
+                self.assertEqual(len(names["dims"]), config["d_model"])
+                self.assertEqual([len(b["heads"]) for b in names["blocks"]], [b[0] for b in config["blocks"]])
+                self.assertEqual([len(b["units"]) for b in names["blocks"]], [b[3] for b in config["blocks"]])
+
+    def test_anonymous_and_hardened(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        import export_torch
+        for harden in (False, True):
+            with self.subTest(harden=harden), tempfile.TemporaryDirectory() as d:
+                export_torch.export(Path(d) / "m", seed=3, shuffle=True, harden=harden)
+                self.assertFalse((Path(d) / "m" / "names.json").exists())
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     unittest.main()
