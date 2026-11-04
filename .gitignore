@@ -4,3 +4,4 @@ __pycache__/
 model_*.zip
 .venv/
 *.egg-info/
+/data/

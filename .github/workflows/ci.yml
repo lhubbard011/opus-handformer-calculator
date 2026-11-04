@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [test_ops, test_expr, test_decimal, test_division, test_power, test_web, test_doclinks, test_explanations, test_claims, test_hello, test_export, test_life, test_csyntax, test_cparse]
+        suite: [test_ops, test_expr, test_decimal, test_division, test_power, test_web, test_doclinks, test_explanations, test_claims, test_hello, test_export, test_life, test_csyntax, test_cparse, test_lm]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

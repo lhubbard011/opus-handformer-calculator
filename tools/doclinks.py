@@ -33,7 +33,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 MAP = ROOT / "docs" / "links.toml"
-DOCS = ("README.md", "DESIGN.md", "HELLO.md", "LIFE.md", "CSYNTAX.md", "CPARSE.md", "docs/PARSER_DESIGN.md")
+DOCS = ("README.md", "DESIGN.md", "HELLO.md", "LIFE.md", "CSYNTAX.md", "CPARSE.md", "docs/PARSER_DESIGN.md", "docs/LM_DESIGN.md")
 
 log = logging.getLogger("doclinks")
 
