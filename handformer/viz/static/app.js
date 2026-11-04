@@ -1007,36 +1007,51 @@ async function tryIt(cfg) {
 }
 
 // ------------------------------------------------------------------ pinning
-// Any panel can be pinned directly under the sequence slider (one at a time), so its view
-// sits next to the controls that change the step: e.g. a heatmap while scrubbing on a phone.
-// The choice is a per-viewer convenience, remembered in this browser only.
+// Up to two panels can be pinned directly under the sequence slider, so their views sit next
+// to the controls that change the step: e.g. the Step panel beside a heatmap while scrubbing.
+// Pinning a third sends the oldest back. The choice is a per-viewer convenience, remembered in
+// this browser only.
 const PIN_KEY = "handviz.pinned";
+const MAX_PINS = 2;
 const pinHome = new Map(); // panel id -> placeholder comment marking its usual place
+let pins = []; // pinned panel ids, oldest first
 
-function pinPanel(id) {
+function unpinOne(id) {
+  const panel = $(id);
+  pinHome.get(id).replaceWith(panel);
+  pinHome.delete(id);
+  panel.classList.remove("is-pinned");
+  panel.querySelector(".pin").textContent = "📌";
+  pins = pins.filter((x) => x !== id);
+}
+
+function pinOne(id) {
+  if (pins.length >= MAX_PINS) unpinOne(pins[0]);
+  const panel = $(id);
+  const home = document.createComment(`home of ${id}`);
+  panel.replaceWith(home);
+  pinHome.set(id, home);
+  $("pinned").append(panel);
+  panel.classList.add("is-pinned");
+  panel.querySelector(".pin").textContent = "✕ unpin";
+  pins.push(id);
+}
+
+/** Pin ``id`` (or unpin it if it is pinned); ``ids`` restores a saved set. */
+function togglePin(id, { ids = null, scroll = true } = {}) {
+  if (ids) ids.filter((x) => $(x)?.dataset.pin).slice(-MAX_PINS).forEach(pinOne);
+  else if (pins.includes(id)) unpinOne(id);
+  else pinOne(id);
   const slot = $("pinned");
-  const current = slot.firstElementChild;
-  if (current) { // put the pinned panel back where it came from
-    pinHome.get(current.id).replaceWith(current);
-    current.classList.remove("is-pinned");
-    current.querySelector(".pin").textContent = "📌";
-  }
-  const target = id && id !== current?.id ? $(id) : null;
-  if (target) {
-    const home = document.createComment(`home of ${id}`);
-    target.replaceWith(home);
-    pinHome.set(id, home);
-    slot.append(target);
-    target.classList.add("is-pinned");
-    target.querySelector(".pin").textContent = "✕ unpin";
-  }
-  slot.hidden = !target;
-  try { target ? localStorage.setItem(PIN_KEY, id) : localStorage.removeItem(PIN_KEY); } catch { /* private mode */ }
-  log("pinned", target ? id : "nothing");
+  slot.hidden = !pins.length;
+  slot.classList.toggle("two", pins.length === 2);
+  try { pins.length ? localStorage.setItem(PIN_KEY, JSON.stringify(pins)) : localStorage.removeItem(PIN_KEY); }
+  catch { /* private mode */ }
+  log("pinned", pins.join(", ") || "nothing");
   // widths changed: redraw the canvases and the graph that size themselves to their panel
   if (state.pos.has(state.q)) renderMap(state.pos.get(state.q));
   renderGraph();
-  if (target) slot.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  if (scroll && pins.length) slot.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
 function setupPins() {
@@ -1045,13 +1060,17 @@ function setupPins() {
     b.className = "pin";
     b.textContent = "📌";
     b.dataset.tip = `Pin "${panel.dataset.pin}" right under the slider, so it stays next to the step controls ` +
-      "(one panel at a time; remembered on this device). Press again to put it back.";
-    b.addEventListener("click", (e) => { e.stopPropagation(); pinPanel(panel.classList.contains("is-pinned") ? null : panel.id); });
+      `(up to ${MAX_PINS} panels; pinning another sends the oldest back; remembered on this device). ` +
+      "Press again to put it back.";
+    b.addEventListener("click", (e) => { e.stopPropagation(); togglePin(panel.id); });
     panel.querySelector(".panel-title")?.prepend(b);
   });
-  let saved = null;
-  try { saved = localStorage.getItem(PIN_KEY); } catch { /* private mode */ }
-  if (saved && $(saved)) pinPanel(saved);
+  let saved = [];
+  try {
+    const raw = localStorage.getItem(PIN_KEY);
+    saved = raw ? (raw.startsWith("[") ? JSON.parse(raw) : [raw]) : []; // older pages saved one id
+  } catch { /* private mode or bad value */ }
+  if (saved.length) togglePin(null, { ids: saved, scroll: false });
 }
 
 /** Phones: the step controls are a fixed bottom bar; keep its height in --bar-h for padding. */

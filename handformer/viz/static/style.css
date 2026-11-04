@@ -238,3 +238,8 @@ button.try { font-size: 11px; padding: 1px 8px; margin-left: 4px; border-color: 
 button.pin { font-size: 11px; padding: 1px 6px; border-color: var(--border); }
 .panel.is-pinned button.pin { border-color: var(--accent); color: var(--accent); }
 @media (max-width: 700px) { .pinned { padding: 8px 8px 0; } }
+.pinned { display: flex; flex-direction: column; gap: 10px; }
+@media (min-width: 1400px) {
+  .pinned.two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+}
+.pinned[hidden] { display: none; }
