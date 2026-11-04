@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "handformer"
+version = "0.1.0"
+description = "Transformers whose every weight is a hand-written, named formula: a calculator, Game of Life, a C lexer and parser"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = ["numpy>=2.5.4"]  # the models themselves need only numpy
+
+[project.optional-dependencies]
+viz = ["fastapi>=0.162", "uvicorn>=0.54", "pydantic>=2.14", "pyyaml>=6.0.3"]  # python -m handformer.viz, tools/build_site.py
+torch = ["torch>=2.2"]  # tools/export_torch.py only
+
+[dependency-groups]
+dev = ["safetensors>=0.8"]  # tests/test_export checks the official safetensors reader
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.setuptools.packages.find]
+include = ["handformer*"]
+
+[tool.setuptools.package-data]
+"handformer.viz" = ["models.yaml", "op_dims.json", "static/*"]

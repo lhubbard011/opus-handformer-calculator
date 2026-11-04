@@ -49,9 +49,12 @@ precedence, copies it into a frame, computes it, and writes the reduced line.
 
 ## Run it
 
-Needs Python 3.13 and numpy (fastapi and uvicorn only for the server visualizer; node only for `tests/test_web.py`).
+Needs Python 3.13 and numpy (fastapi, uvicorn and pyyaml only for the server visualizer; node only for
+`tests/test_web.py`). Dependencies are in `pyproject.toml` and pinned in `uv.lock`:
 
 ```
+uv sync --extra viz                               # .venv/ with numpy + the visualizer's deps
+source .venv/bin/activate
 python -m handformer "12*34-400" "(1+2)*(3+4)"   # solve expressions
 python -m handformer                              # interactive loop
 python -m handformer.viz                          # visualizer: http://127.0.0.1:8768
