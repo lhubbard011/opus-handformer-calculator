@@ -966,6 +966,54 @@ async function tryIt(cfg) {
   target?.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
+// ------------------------------------------------------------------ pinning
+// Any panel can be pinned directly under the sequence slider (one at a time), so its view
+// sits next to the controls that change the step: e.g. a heatmap while scrubbing on a phone.
+// The choice is a per-viewer convenience, remembered in this browser only.
+const PIN_KEY = "handviz.pinned";
+const pinHome = new Map(); // panel id -> placeholder comment marking its usual place
+
+function pinPanel(id) {
+  const slot = $("pinned");
+  const current = slot.firstElementChild;
+  if (current) { // put the pinned panel back where it came from
+    pinHome.get(current.id).replaceWith(current);
+    current.classList.remove("is-pinned");
+    current.querySelector(".pin").textContent = "📌";
+  }
+  const target = id && id !== current?.id ? $(id) : null;
+  if (target) {
+    const home = document.createComment(`home of ${id}`);
+    target.replaceWith(home);
+    pinHome.set(id, home);
+    slot.append(target);
+    target.classList.add("is-pinned");
+    target.querySelector(".pin").textContent = "✕ unpin";
+  }
+  slot.hidden = !target;
+  try { target ? localStorage.setItem(PIN_KEY, id) : localStorage.removeItem(PIN_KEY); } catch { /* private mode */ }
+  log("pinned", target ? id : "nothing");
+  // widths changed: redraw the canvases and the graph that size themselves to their panel
+  if (state.pos.has(state.q)) renderMap(state.pos.get(state.q));
+  renderGraph();
+  if (target) slot.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function setupPins() {
+  document.querySelectorAll("[data-pin]").forEach((panel) => {
+    const b = document.createElement("button");
+    b.className = "pin";
+    b.textContent = "📌";
+    b.dataset.tip = `Pin "${panel.dataset.pin}" right under the slider, so it stays next to the step controls ` +
+      "(one panel at a time; remembered on this device). Press again to put it back.";
+    b.addEventListener("click", (e) => { e.stopPropagation(); pinPanel(panel.classList.contains("is-pinned") ? null : panel.id); });
+    panel.querySelector(".panel-title")?.prepend(b);
+  });
+  let saved = null;
+  try { saved = localStorage.getItem(PIN_KEY); } catch { /* private mode */ }
+  if (saved && $(saved)) pinPanel(saved);
+}
+
 /** Phones: the step controls are a fixed bottom bar; keep its height in --bar-h for padding. */
 function trackBar() {
   const bar = document.querySelector(".controls");
@@ -980,6 +1028,7 @@ function trackBar() {
 
 async function main() {
   wire();
+  setupPins();
   trackBar();
   if (matchMedia("(max-width: 700px)").matches) $("map-howto").open = false; // long on a phone; one tap opens it
   try {

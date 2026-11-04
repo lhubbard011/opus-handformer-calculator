@@ -47,6 +47,7 @@
     <div id="tokens" class="token-strip"></div>
     <input id="scrubber" type="range" min="0" max="0" value="0" aria-label="Step">
   </section>
+  <div id="pinned" class="pinned" hidden></div>
 
   <details id="guide" class="howto guide">
     <summary>Guide: the landmarks and tricks this model uses, and how to see each one here</summary>
@@ -127,7 +128,7 @@
 
 
   <main class="grid">
-    <section class="panel">
+    <section id="p-step" data-pin="Step" class="panel">
       <div class="panel-title" data-tip="What the model is doing at the selected character, in plain words.">Step</div>
       <div id="explain" class="explain"></div>
       <div class="panel-title" data-tip="The model's scores for the next character. The highest score is written.">Next byte <span class="muted small">top logits</span></div>
@@ -138,14 +139,14 @@
       <div id="head-detail" class="detail muted">click a head</div>
     </section>
 
-    <section class="panel">
+    <section id="p-heads" data-pin="Attention heads" class="panel">
       <div class="panel-title" data-tip="Every attention head at this step: where it looked (← position) and what it wrote. Hover a row for what that head does.">Attention heads
         <input id="head-filter" class="filter" type="text" placeholder="filter (e.g. mul, latest)" spellcheck="false">
       </div>
       <div id="heads" class="scroll"></div>
     </section>
 
-    <section class="panel">
+    <section id="p-dims" data-pin="Residual stream" class="panel">
       <div class="panel-title" data-tip="Every note the model keeps about this character. Hover a row for its meaning and which layers write and read it.">Residual stream
         <input id="dim-filter" class="filter" type="text" placeholder="filter dims" spellcheck="false">
         <label class="small"><input id="show-zero" type="checkbox"> zeros</label>
@@ -154,7 +155,7 @@
     </section>
   </main>
 
-  <section class="panel wide">
+  <section id="p-maps" data-pin="Heatmaps" class="panel wide">
     <div class="panel-title">Heatmaps
       <nav class="tabs" role="tablist">
         <button role="tab" data-map="residual" class="active" data-tip="Every note (rows) at every character (columns). Brighter = bigger value; each row is scaled on its own.">Residual stream</button>
@@ -186,7 +187,7 @@
     <div class="map-wrap"><canvas id="map"></canvas></div>
   </section>
 
-  <section class="panel wide">
+  <section id="p-graph" data-pin="Circuit graph" class="panel wide">
     <div class="panel-title" data-tip="The dataflow of one circuit, generated from the weight specs: which values each layer computes from which.">Circuit graph
       <label class="small muted">circuit <select id="g-circuit">
         <option value="all" selected>all circuits together</option><option value="frame">frame locator</option><option value="parser">parser / rewriter</option>
@@ -198,7 +199,7 @@
     <div id="g-pick" class="detail muted">click a value to highlight what it is computed from and what it feeds</div>
   </section>
 
-  <section class="panel wide">
+  <section id="p-units" data-pin="Active MLP units" class="panel wide">
     <div class="panel-title" data-tip="The small calculating units that fired at this character. Hover one for what it computes.">Active MLP units <span class="muted small">ReLU(read) → write, at this step</span>
       <input id="unit-filter" class="filter" type="text" placeholder="filter (e.g. carry, D3)" spellcheck="false">
     </div>

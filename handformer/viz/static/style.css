@@ -232,3 +232,9 @@ svg.graph { display: block; font: 10px var(--mono); }
 .guide-table td:first-child { white-space: nowrap; font-family: var(--mono); }
 button.try { font-size: 11px; padding: 1px 8px; margin-left: 4px; border-color: var(--accent); color: var(--accent); }
 @media (max-width: 700px) { .guide { margin: 8px; } .guide-table td:first-child { white-space: normal; } }
+/* pinned panel: directly under the sequence slider, full width */
+.pinned { padding: 8px 16px 0; }
+.pinned > .panel { margin: 0; border-color: var(--accent); }
+button.pin { font-size: 11px; padding: 1px 6px; border-color: var(--border); }
+.panel.is-pinned button.pin { border-color: var(--accent); color: var(--accent); }
+@media (max-width: 700px) { .pinned { padding: 8px 8px 0; } }
