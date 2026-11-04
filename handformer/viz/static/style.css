@@ -184,3 +184,24 @@ input[type=text], select {
 #map-caption { white-space: pre-line; }
 a.src { color: var(--accent-2); text-decoration: none; font-family: var(--mono); font-size: 11px; white-space: nowrap; }
 a.src:hover { text-decoration: underline; }
+.ko-bar { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; }
+.ko-label { color: #ff8a65; font-weight: 600; }
+.ko-chip { border-color: #ff8a65; color: #ff8a65; font-size: 12px; padding: 2px 8px; }
+.ko-result { color: var(--muted); }
+.ko-result.changed { color: #ff6b6b; font-weight: 600; }
+.ko-btn { font-size: 11px; padding: 1px 6px; margin-left: 6px; border-color: #ff8a65; color: #ff8a65; }
+.graph-wrap { overflow: auto; max-height: 70vh; margin-top: 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+svg.graph { display: block; font: 10px var(--mono); }
+.g-col { fill: var(--muted); font: 600 11px var(--sans); }
+.g-node rect { fill: var(--panel-2); stroke: var(--border); }
+.g-node text { fill: var(--text); }
+.g-node { cursor: pointer; }
+.g-node.g-ext text { fill: var(--muted); }
+.g-node.on rect { stroke: var(--accent); stroke-width: 2; }
+.g-node.off { opacity: .25; }
+.g-edge { fill: none; stroke-width: 1; opacity: .45; }
+.g-head { stroke: var(--accent-2); }
+.g-unit { stroke: #ff8a65; }
+.g-both { stroke: var(--text); }
+.g-edge.on { opacity: 1; stroke-width: 2; }
+.g-edge.off { opacity: .05; }

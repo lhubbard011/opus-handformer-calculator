@@ -74,25 +74,36 @@ def builder() -> ModelBuilder:
     y = {"A1": 1.0, "B1": -1.0}
     l4.units += pr.clamp01_units(pr.scale(y, -1.0), {"br": 1.0})
     l4.units += pr.hat_units(pr.add(y, {"is9": -20.0}, pr.const(20.0)), 0.0, {"br": 1.0})
-    l4.units.append(pr.relu_unit(pr.add({"Zp": 1.0, "E": -1.0}, pr.const(-1.0)), {"Zo": 1.0}))
+    l4.units.append(pr.relu_unit(pr.add({"Zp": 1.0, "E": -1.0}, pr.const(-1.0)), {"Zo": 1.0},
+                                 "Zp - E - 1: how far the top nonzero working digit sits past the first one (answer "
+                                 "length minus 1 when a >= b); 0 for a zero result (Zp falls back to E)"))
     # Final sign = sa XOR borrow, suppressed for a zero result:
     #   sa=1, no borrow: negative iff |a|-|b| != 0;  sa=0, borrow: always negative.
     l4.units += pr.clamp01_units(pr.add({"Zp": 1.0, "E": -1.0}, pr.scale({"sa": 1.0}, pr.BIG),
                                         pr.scale({"neg": 1.0}, -pr.BIG), pr.const(-pr.BIG)), {"sgn": 1.0})
-    l4.units.append(pr.relu_unit({"neg": 1.0, "sa": -1.0}, {"sgn": 1.0}))
+    l4.units.append(pr.relu_unit({"neg": 1.0, "sa": -1.0}, {"sgn": 1.0},
+                                 "sign case sa=0 with borrow (|a| < |b|): the result is negative, and never zero"))
     l4.units += [
-        pr.relu_unit({"Zlow": 1.0}, {"topneg": 1.0}),
-        pr.relu_unit({"Z9": 1.0, "Zlow": -1.0}, {"topneg": 1.0}),
+        pr.relu_unit({"Zlow": 1.0}, {"topneg": 1.0},
+                     "topneg = max(Zlow, Z9), part 1: the lowest nonzero working digit's position"),
+        pr.relu_unit({"Z9": 1.0, "Zlow": -1.0}, {"topneg": 1.0},
+                     "topneg = max(Zlow, Z9), part 2: adds Z9 - Zlow when the top non-9 digit is higher; the top "
+                     "digit of 10^n - D sits there"),
     ]
 
     l5 = b.at(5)
     l5.units += cm.ramp_mod10_units({"A": 1.0, "B": -1.0, "br": -1.0}, -10, 9, working, 0.0)
     done = {"exA": 1.0, "exB": 1.0, "one": -1.0}
-    l5.units.append(pr.relu_unit(pr.gated(pr.add(done, {"br": -1.0}), working, 0.0), {"work_end": 1.0}))
+    l5.units.append(pr.relu_unit(pr.gated(pr.add(done, {"br": -1.0}), working, 0.0), {"work_end": 1.0},
+                                 "end of working with no final borrow (a >= b): both operands exhausted, write ';'"))
     l5.units.append(pr.relu_unit(pr.gated(pr.add(done, {"br": 1.0}, pr.const(-1.0)), working, 0.0),
-                                 {"work_end_neg": 1.0}))
+                                 {"work_end_neg": 1.0},
+                                 "end of working with a final borrow (a < b): both operands exhausted, write '<' "
+                                 "(the sign lives in this byte)"))
     top_pos = pr.add({"E": 1.0, "Zo": 1.0}, pr.const(1.0))
-    l5.units.append(pr.relu_unit(top_pos, {"top": 1.0}))
+    l5.units.append(pr.relu_unit(top_pos, {"top": 1.0},
+                                 "answer source for a >= b: E + 1 + Zo, the top nonzero working digit (the select "
+                                 "below swaps in topneg when neg)"))
     l5.units += pr.times_flag_units(pr.add({"topneg": 1.0}, pr.scale(top_pos, -1.0)), {"neg": 1.0},
                                     {"top": 1.0})
 
@@ -105,13 +116,17 @@ def builder() -> ModelBuilder:
     l6.units += pr.hat_units(rel, 0.0, {"at": 1.0})
     l6.units += pr.clamp01_units(pr.gated(pr.add({"E": 1.0}, pr.const(1.0), pr.scale(src, -1.0)),
                                           working), {"frame_end": 1.0})
-    l6.units.append(pr.relu_unit({"sgn": 1.0, "is_semi": 1.0, "one": -1.0}, {"emit_minus": 1.0}))
+    l6.units.append(pr.relu_unit({"sgn": 1.0, "is_semi": 1.0, "one": -1.0}, {"emit_minus": 1.0},
+                                 "on the end-of-working byte of a negative result (sgn): write '-' before the answer"))
 
     l7 = b.at(7)
     l7.units += [
-        pr.relu_unit({"Dv": 1.0, "neg": -9.0}, {"V": 1.0}),
-        pr.relu_unit({"Dv": -1.0, "one": -9.0, "neg": 9.0, "above": 9.0}, {"V": 1.0}),
-        pr.relu_unit({"Dv": -1.0, "one": -10.0, "neg": 10.0, "at": 10.0}, {"V": 1.0}),
+        pr.relu_unit({"Dv": 1.0, "neg": -9.0}, {"V": 1.0},
+                     "a >= b (neg 0): the answer digit is the working digit Dv, copied as is"),
+        pr.relu_unit({"Dv": -1.0, "one": -9.0, "neg": 9.0, "above": 9.0}, {"V": 1.0},
+                     "a < b, above the lowest nonzero digit: complement digit 9 - Dv"),
+        pr.relu_unit({"Dv": -1.0, "one": -10.0, "neg": 10.0, "at": 10.0}, {"V": 1.0},
+                     "a < b, at the lowest nonzero digit: complement digit 10 - Dv (below it every digit is 0)"),
     ]
 
     l8 = b.at(8)

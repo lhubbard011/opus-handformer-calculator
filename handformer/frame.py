@@ -92,8 +92,10 @@ def build(b: ModelBuilder) -> None:
         pr.gather_head("prev byte ')'?", prev, "prev_rpar", src="is_rpar"),
     ]
     l1.units.append(pr.relu_unit({"is_minus": 1.0, "prev_digit": -1.0, "prev_rpar": -1.0},
-                                 {"is_unary": 1.0}))
-    l1.units.append(pr.relu_unit(BINMINUS, {"is_binminus": 1.0}))  # exact 0/1, for later key classes
+                                 {"is_unary": 1.0},
+                                 label="'is_unary': a '-' whose previous byte is not part of a number and not ')', so it is a sign, not subtraction"))
+    l1.units.append(pr.relu_unit(BINMINUS, {"is_binminus": 1.0},
+                                 label="'is_binminus': a '-' right after a digit, '.' or ')' is binary subtraction; exact 0/1 so later key classes can use it"))  # exact 0/1, for later key classes
     for m, matches in MARKERS.items():
         for k, match in enumerate(matches):
             l1.units += pr.latest_feature(match, f"f_{m}", bos=(k == 0))
@@ -107,7 +109,8 @@ def build(b: ModelBuilder) -> None:
     # Precision N: the digits between '~' and the prompt's '=' (N <= 9999).
     l2.units += pr.clamp01_units({"Ptil": 1.0}, {"has_til": 1.0})
     for k in range(N_DIGITS):
-        l2.units.append(pr.relu_unit({"E0": 1.0, "Ptil": -1.0, "one": -1.0 - k}, {f"tN{k}": 1.0}))
+        l2.units.append(pr.relu_unit({"E0": 1.0, "Ptil": -1.0, "one": -1.0 - k}, {f"tN{k}": 1.0},
+                                     label=f"offset 'tN{k}' from '~' to precision digit {k} (10^{k} place): (#digits between '~' and prompt '=') - {k}; 0 points at '~' itself"))
     l2.units += pr.clamp01_units({"F": 1.0, "Rb": -1.0}, {"open": 1.0})
     for m, flag in (("E", "seen_eq"), ("S", "seen_semi"), ("R", "seen_bar")):
         l2.units += pr.clamp01_units({m: 1.0, "F": -1.0}, {flag: 1.0})
@@ -128,9 +131,12 @@ def build(b: ModelBuilder) -> None:
     ]
     l3.units += pr.times_flag_units({f"Nd{k}": 10.0 ** k for k in range(N_DIGITS)}, {"has_til": 1.0}, {"N": 1.0})
     l3.units += [
-        pr.relu_unit({"is_eq": 1.0, "open": -1.0}, {"phase1": 1.0}),
-        pr.relu_unit({"open": 1.0, "seen_eq": -1.0}, {"phase2": 1.0}),
-        pr.relu_unit({"one": 1.0, "open": -1.0, "is_eq": -1.0}, {"phase4": 1.0}),
+        pr.relu_unit({"is_eq": 1.0, "open": -1.0}, {"phase1": 1.0},
+                     label="'phase1': at a line-ending '=' with no frame open, so the next byte is '[' (start a new frame)"),
+        pr.relu_unit({"open": 1.0, "seen_eq": -1.0}, {"phase2": 1.0},
+                     label="'phase2': a frame is open but has no '=' yet, so the model is copying the redex into it"),
+        pr.relu_unit({"one": 1.0, "open": -1.0, "is_eq": -1.0}, {"phase4": 1.0},
+                     label="'phase4': frame closed and not on '=', so the model is rewriting the expression line after ']'"),
     ]
 
     l4 = b.at(4)
@@ -149,15 +155,26 @@ def build(b: ModelBuilder) -> None:
     plus = pr.add(work, {"typ_add": 1.0})  # == 3 for a '+' frame
     minus = pr.add(work, {"typ_sub": 1.0})  # == 3 for a '-' frame
     l4.units += [
-        pr.relu_unit(pr.add(plus, {"sa": 1.0, "sb": 1.0}, pr.const(-4.0)), {"act_add": 1.0}),
-        pr.relu_unit(pr.add(plus, {"sa": -1.0, "sb": -1.0}, pr.const(-2.0)), {"act_add": 1.0}),
-        pr.relu_unit(pr.add(minus, {"sa": 1.0, "sb": -1.0}, pr.const(-3.0)), {"act_add": 1.0}),
-        pr.relu_unit(pr.add(minus, {"sa": -1.0, "sb": 1.0}, pr.const(-3.0)), {"act_add": 1.0}),
-        pr.relu_unit(pr.add(plus, {"sa": 1.0, "sb": -1.0}, pr.const(-3.0)), {"act_sub": 1.0}),
-        pr.relu_unit(pr.add(plus, {"sa": -1.0, "sb": 1.0}, pr.const(-3.0)), {"act_sub": 1.0}),
-        pr.relu_unit(pr.add(minus, {"sa": 1.0, "sb": 1.0}, pr.const(-4.0)), {"act_sub": 1.0}),
-        pr.relu_unit(pr.add(minus, {"sa": -1.0, "sb": -1.0}, pr.const(-2.0)), {"act_sub": 1.0}),
-        pr.relu_unit(pr.add(work, {"typ_mul": 1.0}, pr.const(-2.0)), {"act_mul": 1.0}),
-        pr.relu_unit(pr.add(work, {"typ_div": 1.0}, pr.const(-2.0)), {"act_div": 1.0}),
-        pr.relu_unit(pr.add(work, {"typ_pow": 1.0}, pr.const(-2.0)), {"act_pow": 1.0}),
+        pr.relu_unit(pr.add(plus, {"sa": 1.0, "sb": 1.0}, pr.const(-4.0)), {"act_add": 1.0},
+                     label="'act_add' case: working a '+' frame with a and b both negative (sa=sb=1): add magnitudes"),
+        pr.relu_unit(pr.add(plus, {"sa": -1.0, "sb": -1.0}, pr.const(-2.0)), {"act_add": 1.0},
+                     label="'act_add' case: working a '+' frame with a and b both positive: add magnitudes"),
+        pr.relu_unit(pr.add(minus, {"sa": 1.0, "sb": -1.0}, pr.const(-3.0)), {"act_add": 1.0},
+                     label="'act_add' case: '-' frame, a negative, b positive: b's effective sign equals a's, add magnitudes"),
+        pr.relu_unit(pr.add(minus, {"sa": -1.0, "sb": 1.0}, pr.const(-3.0)), {"act_add": 1.0},
+                     label="'act_add' case: '-' frame, a positive, b negative (a - -b): effective signs equal, add magnitudes"),
+        pr.relu_unit(pr.add(plus, {"sa": 1.0, "sb": -1.0}, pr.const(-3.0)), {"act_sub": 1.0},
+                     label="'act_sub' case: '+' frame, a negative, b positive: signs differ, subtract magnitudes"),
+        pr.relu_unit(pr.add(plus, {"sa": -1.0, "sb": 1.0}, pr.const(-3.0)), {"act_sub": 1.0},
+                     label="'act_sub' case: '+' frame, a positive, b negative: signs differ, subtract magnitudes"),
+        pr.relu_unit(pr.add(minus, {"sa": 1.0, "sb": 1.0}, pr.const(-4.0)), {"act_sub": 1.0},
+                     label="'act_sub' case: '-' frame, both a and b negative: effective signs differ, subtract magnitudes"),
+        pr.relu_unit(pr.add(minus, {"sa": -1.0, "sb": -1.0}, pr.const(-2.0)), {"act_sub": 1.0},
+                     label="'act_sub' case: '-' frame, both a and b positive: plain subtraction of magnitudes"),
+        pr.relu_unit(pr.add(work, {"typ_mul": 1.0}, pr.const(-2.0)), {"act_mul": 1.0},
+                     label="'act_mul': AND of open frame, past its '=', frame operator '*': enables the multiplication circuit"),
+        pr.relu_unit(pr.add(work, {"typ_div": 1.0}, pr.const(-2.0)), {"act_div": 1.0},
+                     label="'act_div': AND of open frame, past its '=', frame operator '/': enables the division circuit"),
+        pr.relu_unit(pr.add(work, {"typ_pow": 1.0}, pr.const(-2.0)), {"act_pow": 1.0},
+                     label="'act_pow': AND of open frame, past its '=', frame operator '^': enables the power-rewrite circuit"),
     ]

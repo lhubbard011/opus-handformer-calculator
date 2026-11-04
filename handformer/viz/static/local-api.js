@@ -8,6 +8,45 @@ import { Model } from "./engine.js";
 
 const log = (...a) => console.info("[local-api]", ...a);
 const MAX_RUNS = 4;
+const MAX_KNOCKOUT_MODELS = 4;
+const POSITIONAL = ["pos", "pos2"];
+
+/** Normalised knockout request: sorted lists, like handformer/ablate.py Knockout.as_request. */
+function normKnockout(ko) {
+  ko = ko || {};
+  const pairs = (xs) => [...new Map((xs || []).map(([a, b]) => [`${a}:${b}`, [Number(a), Number(b)]])).values()]
+    .sort((p, q) => p[0] - q[0] || p[1] - q[1]);
+  return { heads: pairs(ko.heads), units: pairs(ko.units), dims: [...new Set((ko.dims || []).map(String))].sort() };
+}
+const koKey = (k) => `h${JSON.stringify(k.heads)}u${JSON.stringify(k.units)}d${JSON.stringify(k.dims)}`;
+const koEmpty = (k) => !k.heads.length && !k.units.length && !k.dims.length;
+
+/**
+ * model.json with the knocked-out parts writing nothing, by the rules of handformer/ablate.py:
+ * a head's W_O, a unit's row of W_out, and every write into a dim (embedding, W_O, W_out columns).
+ */
+function knockoutJson(json, ko) {
+  const idx = new Map(json.names.map((n, i) => [n, i]));
+  for (const [l, h] of ko.heads) if (!json.layers[l]?.heads[h]) throw new Error(`no head ${h} in layer ${l}`);
+  for (const [l, u] of ko.units) if (!(json.layers[l] && u >= 0 && u < json.layers[l].units)) throw new Error(`no unit ${u} in layer ${l}`);
+  for (const d of ko.dims) {
+    if (!idx.has(d)) throw new Error(`no residual dim named '${d}'`);
+    if (POSITIONAL.includes(d)) throw new Error(`${d} is a position feature added by the forward pass, not a weight; it cannot be knocked out`);
+  }
+  const cols = new Set(ko.dims.map((d) => idx.get(d)));
+  const heads = new Set(ko.heads.map(([l, h]) => `${l}:${h}`));
+  const units = new Set(ko.units.map(([l, u]) => `${l}:${u}`));
+  const keepCol = (t) => !cols.has(t[1]);
+  return {
+    ...json,
+    embed: json.embed.filter(keepCol),
+    layers: json.layers.map((L, li) => ({
+      ...L,
+      heads: L.heads.map((h, hi) => ({ ...h, o: heads.has(`${li}:${hi}`) ? [] : h.o.filter(keepCol) })),
+      wout: L.wout.filter((t) => keepCol(t) && !units.has(`${li}:${t[0]}`)),
+    })),
+  };
+}
 
 const round = (v, p) => { const s = 10 ** p; const r = Math.round(v * s) / s; return r === 0 ? 0 : r; };
 
@@ -17,6 +56,7 @@ export class LocalApi {
     this.cfg = modelJson;
     this.info = info;
     this.runs = new Map();
+    this.koModels = new Map(); // knockout key -> Model
     this.labels = this.model.snapshotLabels();
     this.layerStart = []; // global head index of each layer's first head
     let g = 0;
@@ -38,7 +78,7 @@ export class LocalApi {
     const t0 = performance.now();
     const route = {
       "/api/info": () => this.info,
-      "/api/run": () => this.run(body.expression),
+      "/api/run": () => this.run(body.expression, body.knockout),
       "/api/position": () => this.position(body.run_id, body.q),
       "/api/attention": () => this.attentionMap(body.run_id, body.layer, body.head),
       "/api/residual": () => this.residualMap(body.run_id, body.snapshot),
@@ -58,7 +98,18 @@ export class LocalApi {
 
   // ------------------------------------------------------------- runs
 
-  run(expression) {
+  _modelFor(ko) {
+    if (koEmpty(ko)) return this.model;
+    const key = koKey(ko);
+    if (!this.koModels.has(key)) {
+      this.koModels.set(key, new Model(knockoutJson(this.cfg, ko)));
+      log("built knockout model", key);
+      while (this.koModels.size > MAX_KNOCKOUT_MODELS) this.koModels.delete(this.koModels.keys().next().value);
+    }
+    return this.koModels.get(key);
+  }
+
+  run(expression, knockout) {
     expression = String(expression).replaceAll(" ", "");
     if (expression.endsWith("=")) expression = expression.slice(0, -1);
     if (!expression) throw new Error("empty expression");
@@ -67,7 +118,8 @@ export class LocalApi {
     const bad = [...new Set([...expression].filter((ch) => !allowed.has(ch)))].sort();
     if (bad.length) throw new Error(`unsupported characters: '${bad.join("")}' (use digits . + - * / ( ) and ~N)`);
     const prompt = [...`\n${expression}=`].map((c) => c.charCodeAt(0));
-    const tr = this.model.generate(prompt, this.cfg.max_tokens - prompt.length, this.cfg.top_keys);
+    const ko = normKnockout(knockout);
+    const tr = this._modelFor(ko).generate(prompt, this.cfg.max_tokens - prompt.length, this.cfg.top_keys);
     const runId = Math.random().toString(16).slice(2, 14).padEnd(12, "0");
     this.runs.set(runId, { expression, tr, promptLen: prompt.length });
     while (this.runs.size > MAX_RUNS) {
@@ -85,6 +137,7 @@ export class LocalApi {
       chars: tokens.map((t) => String.fromCharCode(t)),
       prompt_len: prompt.length,
       finished,
+      knockout: ko,
       steps: tokens.map((_, q) => this._step(tr, q)),
       snapshots: this.labels,
     };

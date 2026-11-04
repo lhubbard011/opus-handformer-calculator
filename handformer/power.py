@@ -89,13 +89,20 @@ def builder() -> ModelBuilder:
     odd = {"ld": 1.0, "fl2": -2.0}  # parity of b
     l6c = b.at(6)
     l6c.units += [
-        pr.relu_unit({"sbp": 1.0}, {"negexp": 1.0}),
-        pr.relu_unit({"one": 1.0, "sbp": -1.0, "nzb": -1.0}, {"zero": 1.0}),
-        pr.relu_unit({"lb1": 1.0, "d0one": 1.0, "sbp": -1.0, "one": -1.0}, {"unit": 1.0}),  # b == 1
-        pr.relu_unit(pr.add(odd, {"nzb": 1.0, "sbp": -1.0, "one": -1.0}), {"odd": 1.0}),
-        pr.relu_unit(pr.add(odd, {"nzb": 1.0, "sbp": -1.0, "lb1": 1.0, "d0one": 1.0, "one": -3.0}), {"odd": -1.0}),
-        pr.relu_unit(pr.add(pr.scale(odd, -1.0), {"nzb": 1.0, "sbp": -1.0}), {"even": 1.0}),
-        pr.relu_unit({"d0one": 1.0, "lbge2": 1.0, "one": -1.0}, {"lead": 1.0}),  # halving drops a leading 0
+        pr.relu_unit({"sbp": 1.0}, {"negexp": 1.0},
+                     label="case flag 'negexp': the exponent starts with '-' (sbp), so this step writes (1/a^|b|)"),
+        pr.relu_unit({"one": 1.0, "sbp": -1.0, "nzb": -1.0}, {"zero": 1.0},
+                     label="case flag 'zero': exponent not negative (sbp 0) and has no nonzero digit (nzb 0), so this step writes 1"),
+        pr.relu_unit({"lb1": 1.0, "d0one": 1.0, "sbp": -1.0, "one": -1.0}, {"unit": 1.0},  # b == 1
+                     label="case flag 'unit': exponent is one digit (lb1), that digit is 1 (d0one), not negative; this step writes a"),
+        pr.relu_unit(pr.add(odd, {"nzb": 1.0, "sbp": -1.0, "one": -1.0}), {"odd": 1.0},
+                     label="case flag 'odd' (main): last exponent digit odd (ld - 2*fl2 = 1), b != 0 (nzb), b not negative (sbp 0)"),
+        pr.relu_unit(pr.add(odd, {"nzb": 1.0, "sbp": -1.0, "lb1": 1.0, "d0one": 1.0, "one": -3.0}), {"odd": -1.0},
+                     label="case flag 'odd' (correction): cancels it for b == 1 (one digit, lb1, equal to 1, d0one), which is the 'unit' case"),
+        pr.relu_unit(pr.add(pr.scale(odd, -1.0), {"nzb": 1.0, "sbp": -1.0}), {"even": 1.0},
+                     label="case flag 'even': last exponent digit even (ld - 2*fl2 = 0), b != 0 (nzb), b not negative (sbp 0)"),
+        pr.relu_unit({"d0one": 1.0, "lbge2": 1.0, "one": -1.0}, {"lead": 1.0},  # halving drops a leading 0
+                     label="'lead': first exponent digit is 1 (d0one) and b has >= 2 digits (lbge2), so b/2 starts with a 0 to drop"),
     ]
     l6c.units += pr.hat_units(pr.add(U, _c(1.0)), 0.0, {"semi": 1.0})  # body byte 0 is ';'
 
@@ -127,8 +134,12 @@ def builder() -> ModelBuilder:
     for case, lst in segs.items():
         for i in range(len(lst)):
             l8.units.append(pr.relu_unit({f"lt_{case}_{i + 1}": 1.0, f"lt_{case}_{i}": -1.0, case: 1.0, "one": -1.0},
-                                         {f"seg_{case}_{i}": 1.0}))
-        l8.units.append(pr.relu_unit({f"endraw_{case}": 1.0, case: 1.0, "one": -1.0}, {f"end_{case}": 1.0}))
+                                         {f"seg_{case}_{i}": 1.0},
+                                         label=f"region flag 'seg_{case}_{i}': u is in {case} segment {i} ({lst[i][0]}),"
+                                               f" [u < its end] - [u < its start], and the {case} case is active"))
+        l8.units.append(pr.relu_unit({f"endraw_{case}": 1.0, case: 1.0, "one": -1.0}, {f"end_{case}": 1.0},
+                                     label=f"'end_{case}': u equals the {case} expansion's length (endraw) and that case is"
+                                           f" active, so the next byte closes the frame"))
 
     l9 = b.at(9)
     copy_flags: Form = {}
@@ -147,17 +158,22 @@ def builder() -> ModelBuilder:
         value={d: {f"Ycp_{d}": 1.0} for d in NAMES},
     ))
     for d in NAMES:
-        l10.units.append(pr.relu_unit(pr.add({f"Ycp_{d}": 1.0}, copy_flags, _c(-1.0)), {f"O_{d}": 1.0}))
+        l10.units.append(pr.relu_unit(pr.add({f"Ycp_{d}": 1.0}, copy_flags, _c(-1.0)), {f"O_{d}": 1.0},
+                                      label=f"emit byte {d}: the byte at the copy source (Ycp_{d}) is {d} and u is in a"
+                                            f" copy segment of the active case"))
     for case, lst in segs.items():
         for i, (kind, _, payload) in enumerate(lst):
             flag = {f"seg_{case}_{i}": 1.0}
             if kind == "fixed":
-                l10.units.append(pr.relu_unit(flag, {f"O_{payload}": 1.0}))
+                l10.units.append(pr.relu_unit(flag, {f"O_{payload}": 1.0},
+                                              label=f"emit the fixed byte {payload} while u is in {case} segment {i}"))
             elif kind == "dec":  # odd exponent: last digit - 1
                 l10.units += cm.ramp_mod10_units({"ld": 1.0, "one": -1.0}, 0, 8, flag, 1.0)
             elif kind == "half":  # 5*[d_{j-1} odd] + floor(d_j/2)
                 hv = {"dj1": 5.0, "flj1": -10.0, "flj": 1.0}
                 l10.units += cm.ramp_mod10_units(hv, 0, 9, flag, 1.0)
-        l10.units.append(pr.relu_unit({f"end_{case}": 1.0}, {"frame_end": 1.0}))
-    l10.units.append(pr.relu_unit({"semi": 1.0}, {"work_end": 1.0}))
+        l10.units.append(pr.relu_unit({f"end_{case}": 1.0}, {"frame_end": 1.0},
+                                      label=f"emit ']' (frame_end) once the {case} expansion is complete (end_{case})"))
+    l10.units.append(pr.relu_unit({"semi": 1.0}, {"work_end": 1.0},
+                                  label="emit the END byte ';' (work_end) as body byte 0 (semi): a power frame has no working"))
     return b

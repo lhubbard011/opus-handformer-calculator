@@ -122,6 +122,23 @@ class TestWebParity(unittest.TestCase):
                     if "scale" in meta:
                         close(j["meta"]["scale"], meta["scale"], "scale")
 
+    def test_knockouts_match(self):
+        """Knocked-out heads, units and dims: same bytes and traces in both engines."""
+        r = self.runner
+        ko = {"heads": [[4, 0]], "units": [[3, 11], [3, 12]], "dims": ["add.carry"]}
+        for expression in ("47+38", "12*34-5"):
+            with self.subTest(expression=expression):
+                py = r.run(expression, ko)
+                q = len(py["chars"]) // 2
+                js = self.node([["/api/run", {"expression": expression, "knockout": ko}],
+                                ["/api/position", {"run_id": "$run", "q": q}]])
+                self.assertNotIn("error", js[0], js[0])
+                self.assertEqual(js[0]["chars"], py["chars"])
+                self.assertEqual(js[0]["knockout"], py["knockout"])
+                close(js[1]["values"], r.position(py["run_id"], q)["values"], f"knockout values q={q}")
+        bad = self.node([["/api/run", {"expression": "1+1", "knockout": {"dims": ["pos"]}}]])
+        self.assertIn("cannot be knocked out", bad[0]["error"])
+
     def test_weights_match(self):
         r = self.runner
         cases = [("embed", None, None), ("unembed", None, None), ("wq", 4, 0), ("wk", 2, 1), ("wov", 7, 2),

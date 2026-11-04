@@ -106,8 +106,10 @@ def build(b: ModelBuilder) -> None:
     ]
     # c = min(first ')' after p, Le): a ')' beyond the line (e.g. inside a frame body that
     # wrote "(a*a)^n") must not end the group. fc * ReLU(x) is one ReLU silenced by BIG.
-    l5.units.append(pr.relu_unit(LE, {"c": 1.0}))
-    l5.units.append(pr.relu_unit(pr.add(LE, {"c_raw": -1.0, "fc": pr.BIG}, pr.const(-pr.BIG)), {"c": -1.0}))
+    l5.units.append(pr.relu_unit(LE, {"c": 1.0},
+                                 label="'c' base: Le (the line's '=' minus 1); the paired unit subtracts the excess when a ')' before Le is found"))
+    l5.units.append(pr.relu_unit(pr.add(LE, {"c_raw": -1.0, "fc": pr.BIG}, pr.const(-pr.BIG)), {"c": -1.0},
+                                 label="'c' correction: minus ReLU(Le - c_raw) when a ')' was found (fc), giving c = min(c_raw, Le); silenced by BIG otherwise"))
 
     l6 = b.at(6)
     l6.heads.append(pr.gather_head("latest ^ before c", pr.add({"c": 1.0}, pr.const(-1.0)), "opw", src="Lpow"))
@@ -119,9 +121,12 @@ def build(b: ModelBuilder) -> None:
     # Positions are >= 0, so each choice is one ReLU silenced by BIG unless selected.
     l7 = b.at(7)
     l7.units += [
-        pr.relu_unit({"oa": 1.0, "use_mul": -pr.BIG, "pw": -pr.BIG}, {"o": 1.0}),
-        pr.relu_unit({"om": 1.0, "use_mul": pr.BIG, "pw": -pr.BIG, "one": -pr.BIG}, {"o": 1.0}),
-        pr.relu_unit({"opw": 1.0, "pw": pr.BIG, "one": -pr.BIG}, {"o": 1.0}),
+        pr.relu_unit({"oa": 1.0, "use_mul": -pr.BIG, "pw": -pr.BIG}, {"o": 1.0},
+                     label="'o' choice 3: first '+'/binary '-' after p (oa), used only when no '^' in group and no '*'/'/' before c"),
+        pr.relu_unit({"om": 1.0, "use_mul": pr.BIG, "pw": -pr.BIG, "one": -pr.BIG}, {"o": 1.0},
+                     label="'o' choice 2: first '*'/'/' after p (om), used when it lies before c (use_mul) and the group has no '^'"),
+        pr.relu_unit({"opw": 1.0, "pw": pr.BIG, "one": -pr.BIG}, {"o": 1.0},
+                     label="'o' choice 1: latest '^' before c (opw, right-associative), used when it lies inside the group (pw)"),
     ]
 
     # ---------------------------------------------------------- operands
@@ -170,7 +175,8 @@ def build(b: ModelBuilder) -> None:
     # The group's parentheses go when the redex is the whole group and the result is a plain
     # number, or is itself fully parenthesised (ends in ')': power expansions "(a*a^n)", "(1/a^n)").
     b.at(11).units.append(pr.relu_unit({"e1": 1.0, "e2": 1.0, "e3": 1.0, "res_expr": -1.0, "res_wrap": 1.0,
-                                        "one": -2.0}, {"drop": 1.0}))
+                                        "one": -2.0}, {"drop": 1.0},
+                                       label="'drop': redex is the whole group (e1,e2,e3) AND result is a plain number or ends in ')', so the parentheses go too"))
     A = pr.add(AF, {"drop": -1.0}, pr.const(1.0))
     B = pr.add({"b_hi": 1.0, "drop": 1.0}, pr.const(-1.0))
 
@@ -184,7 +190,8 @@ def build(b: ModelBuilder) -> None:
 
     l12 = b.at(12)
     l12.heads.append(pr.gather_head("unary '-' before A?", pr.add(A, pr.const(-1.0)), "prevA_unary", src="is_unary"))
-    l12.units.append(pr.relu_unit({"prevA_unary": 1.0, "rneg": 1.0, "one": -1.0}, {"cancel": 1.0}))
+    l12.units.append(pr.relu_unit({"prevA_unary": 1.0, "rneg": 1.0, "one": -1.0}, {"cancel": 1.0},
+                                  label="'cancel': negative result (rneg) replacing bytes right after a unary '-': AND, both signs are dropped"))
     # keep going if another operator remains, or the frame's result is itself an expression
     l12.units += pr.clamp01_units({"cont": 1.0, "res_expr": 1.0}, {"cont2": 1.0})
     l12.units += pr.times_flag_units(pr.add({"b_hi": 1.0, "b_dot": -1.0}, pr.const(-1.0)), {"has_b": 1.0},
@@ -193,15 +200,20 @@ def build(b: ModelBuilder) -> None:
     # ---------------------------------------------------------- decimal geometry
     l13 = b.at(13)
     l13.units += [
-        pr.relu_unit({"frac_b": 1.0, "frac_a": -1.0}, {"pad_a_raw": 1.0}),
-        pr.relu_unit({"frac_a": 1.0, "frac_b": -1.0}, {"pad_b_raw": 1.0}),
+        pr.relu_unit({"frac_b": 1.0, "frac_a": -1.0}, {"pad_a_raw": 1.0},
+                     label="'pad_a_raw' = ReLU(frac_b - frac_a): zeros to append to a so its fraction lines up with b's (pair of pad_b_raw)"),
+        pr.relu_unit({"frac_a": 1.0, "frac_b": -1.0}, {"pad_b_raw": 1.0},
+                     label="'pad_b_raw' = ReLU(frac_a - frac_b): zeros to append to b so its fraction lines up with a's (pair of pad_a_raw)"),
     ]
 
     l14 = b.at(14)
     l14.units += [
-        pr.relu_unit(pr.gated({"pad_a_raw": 1.0}, {"op_md": 1.0}, 0.0), {"pad_a": 1.0}),
-        pr.relu_unit(pr.gated({"pad_b_raw": 1.0}, {"op_md": 1.0}, 0.0), {"pad_b": 1.0}),
-        pr.relu_unit({"frac_a": 1.0, "pad_a_raw": 1.0}, {"f_res": 1.0}),  # max(frac_a, frac_b)
+        pr.relu_unit(pr.gated({"pad_a_raw": 1.0}, {"op_md": 1.0}, 0.0), {"pad_a": 1.0},
+                     label="'pad_a' for + and -: alignment zeros pad_a_raw, silenced when the redex is * or / (op_md)"),
+        pr.relu_unit(pr.gated({"pad_b_raw": 1.0}, {"op_md": 1.0}, 0.0), {"pad_b": 1.0},
+                     label="'pad_b' for + and -: alignment zeros pad_b_raw, silenced when the redex is * or / (op_md)"),
+        pr.relu_unit({"frac_a": 1.0, "pad_a_raw": 1.0}, {"f_res": 1.0},
+                     label="'f_res' base: frac_a + ReLU(frac_b - frac_a) = max(frac_a, frac_b), the result's fraction digits for + and -"),  # max(frac_a, frac_b)
     ]
     l14.units += pr.times_flag_units({"frac_b": 1.0, "pad_a_raw": -1.0}, {"op_md": 1.0}, {"f_res": 1.0})
     # a/b: the frame holds a*10^(frac_b+N) / b*10^frac_a, so the integer quotient has N fractional digits
@@ -222,7 +234,8 @@ def build(b: ModelBuilder) -> None:
 
     l15 = b.at(15)
     l15.units.append(pr.relu_unit({"Rb": 1.0, "Lnzr": -1.0, "f_res": -1.0, "one": -1.0},
-                                  {"tzx": 1.0}))  # ReLU(trailing zeros - f_res)
+                                  {"tzx": 1.0},
+                                  label="'tzx': trailing zeros of the result beyond f_res; subtracted later so only fractional zeros are stripped (tz)"))  # ReLU(trailing zeros - f_res)
     l15.units += _lt(t, T1, "inA")
     l15.units += _lt(t, T2, "inPA") + _lt(t, T1, "inPA", -1.0)
     l15.units += _lt(t, T3, "atOp") + _lt(t, T2, "atOp", -1.0)
@@ -256,11 +269,14 @@ def build(b: ModelBuilder) -> None:
     l17.units += pr.clamp01_units({"Ptil": 1.0, "Ls": -1.0}, {"til_line": 1.0})
 
     l18 = b.at(18)
-    l18.units.append(pr.relu_unit(LE, {"Lend": 1.0}))  # where the line's suffix copy stops
+    l18.units.append(pr.relu_unit(LE, {"Lend": 1.0},
+                                  label="'Lend' base: Le, where the suffix copy stops; the prompt line's '~N' correction is added next"))  # where the line's suffix copy stops
     l18.units += pr.times_flag_units({"Ptil": 1.0, "F": -1.0, "one": 1.0}, {"til_line": 1.0}, {"Lend": 1.0})
     l18.units += [  # width of the zero-padded digit string: max(m', f'+1)
-        pr.relu_unit({"fp": 1.0, "one": 1.0}, {"wd": 1.0}),
-        pr.relu_unit(pr.add(mp, {"fp": -1.0}, pr.const(-1.0)), {"wd": 1.0}),
+        pr.relu_unit({"fp": 1.0, "one": 1.0}, {"wd": 1.0},
+                     label="'wd' base: f'+1 (fraction digits plus one leading 0); with the paired unit wd = max(m', f'+1)"),
+        pr.relu_unit(pr.add(mp, {"fp": -1.0}, pr.const(-1.0)), {"wd": 1.0},
+                     label="'wd' excess: ReLU(m' - f' - 1), the result digits beyond f'+1 after stripping trailing zeros (pair of wd base)"),
     ]
     l18.units += pr.clamp01_units({"fp": 1.0}, {"dotf": 1.0})
 
@@ -302,18 +318,28 @@ def build(b: ModelBuilder) -> None:
     copy4 = pr.add({"in1": 1.0, "in123": 1.0, "in12": -1.0}, resdig)
     for d in NAMES.values():
         l22.units.append(pr.relu_unit(pr.add({f"Y2_{d}": 1.0, "phase2": 1.0}, copy2, pr.const(-2.0)),
-                                      {f"O_{d}": 1.0}))
+                                      {f"O_{d}": 1.0},
+                                      label=f"emit byte {d} in phase2 frame copy: AND of copied byte Y2_{d}, phase2, and inside a/op/b segment"))
         l22.units.append(pr.relu_unit(pr.add({f"Y4_{d}": 1.0, "phase4": 1.0}, copy4, pr.const(-2.0)),
-                                      {f"O_{d}": 1.0}))
+                                      {f"O_{d}": 1.0},
+                                      label=f"emit byte {d} in phase4 rewrite: AND of copied byte Y4_{d}, phase4, and prefix/suffix/result-digit region"))
     l22.units += [
-        pr.relu_unit({"phase1": 1.0}, {"out_lbr": 1.0}),
-        pr.relu_unit({"phase2": 1.0, "inPA": 1.0, "inPB": 1.0, "one": -1.0}, {"O_oh0": 1.0}),  # pad
-        pr.relu_unit({"phase2": 1.0, "end2": 1.0, "one": -1.0}, {"out_eq": 1.0}),
-        pr.relu_unit({"phase4": 1.0, "isSign": 1.0, "in12": 1.0, "in1": -1.0, "one": -2.0}, {"O_is_minus": 1.0}),
-        pr.relu_unit({"phase4": 1.0, "isDot": 1.0, "in12": 1.0, "in1": -1.0, "one": -2.0}, {"O_is_dot": 1.0}),
-        pr.relu_unit({"phase4": 1.0, "padzero": 1.0, "one": -1.0}, {"O_oh0": 1.0}),
-        pr.relu_unit({"phase4": 1.0, "end4": 1.0, "cont2": 1.0, "one": -2.0}, {"out_eq": 1.0}),
-        pr.relu_unit({"phase4": 1.0, "end4": 1.0, "cont2": -1.0, "one": -1.0}, {"out_nl": 1.0}),
+        pr.relu_unit({"phase1": 1.0}, {"out_lbr": 1.0},
+                     label="emit '[' in phase1 (line-ending '=' with no frame open): open a new frame"),
+        pr.relu_unit({"phase2": 1.0, "inPA": 1.0, "inPB": 1.0, "one": -1.0}, {"O_oh0": 1.0},
+                     label="emit '0' in phase2 inside a zero-pad segment (inPA after a, inPB after b) to align fractions"),  # pad
+        pr.relu_unit({"phase2": 1.0, "end2": 1.0, "one": -1.0}, {"out_eq": 1.0},
+                     label="emit '=' in phase2 at the end of the frame copy (end2), handing over to the operator circuit"),
+        pr.relu_unit({"phase4": 1.0, "isSign": 1.0, "in12": 1.0, "in1": -1.0, "one": -2.0}, {"O_is_minus": 1.0},
+                     label="emit '-' in phase4 at the result's sign position (isSign), inside the result segment (in12 - in1)"),
+        pr.relu_unit({"phase4": 1.0, "isDot": 1.0, "in12": 1.0, "in1": -1.0, "one": -2.0}, {"O_is_dot": 1.0},
+                     label="emit '.' in phase4 at the result's decimal point position (isDot), inside the result segment (in12 - in1)"),
+        pr.relu_unit({"phase4": 1.0, "padzero": 1.0, "one": -1.0}, {"O_oh0": 1.0},
+                     label="emit '0' in phase4 for a left-pad zero of a result shorter than its fraction (2 with f'=2 -> 0.02)"),
+        pr.relu_unit({"phase4": 1.0, "end4": 1.0, "cont2": 1.0, "one": -2.0}, {"out_eq": 1.0},
+                     label="emit '=' at the end of the rewritten line (end4) when work remains (cont2): another reduction follows"),
+        pr.relu_unit({"phase4": 1.0, "end4": 1.0, "cont2": -1.0, "one": -1.0}, {"out_nl": 1.0},
+                     label="emit newline at the end of the rewritten line (end4) when no work remains (not cont2): the answer is final"),
     ]
 
     for byte, d in NAMES.items():

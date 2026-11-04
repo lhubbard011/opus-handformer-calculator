@@ -6,7 +6,9 @@ looked up without their circuit prefix (``mul.J`` -> ``J`` in MUL).
 """
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 
 SHARED = {
     # ---- input (set by the byte embedding)
@@ -168,6 +170,11 @@ OPS = {
             "odd": "Case: odd exponent → (a*a^(n-1)).", "even": "Case: even exponent → (a*a)^(n/2).",
             "ld": "Exponent's last digit.", "src": "Which byte to copy into the expansion.", "lead": "1 if halving drops a leading 0."},
 }
+
+# One-sentence docs for the rest of each calculator's private dims (data, kept beside this file).
+for _ns, _docs in json.loads((Path(__file__).with_name("op_dims.json")).read_text()).items():
+    for _k, _v in _docs.items():
+        OPS.setdefault(_ns, {}).setdefault(_k, _v)
 
 
 CHAR = {"is_plus": "+", "is_minus": "-", "is_star": "*", "is_slash": "/", "is_caret": "^",

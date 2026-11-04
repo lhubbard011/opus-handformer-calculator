@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .. import arith, common as cm, expr, frame
+from .. import ablate, arith, common as cm, expr, frame
 from ..model import Form, Tracer
 from . import sources
 from .glossary import describe_dim, describe_head
@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 
 MAX_TOKENS = 3000
 MAX_RUNS = 4
+MAX_KNOCKOUT_MODELS = 4
 TOP_KEYS = 3
 TOP_LOGITS = 5
 
@@ -117,6 +118,8 @@ class Run:
     prompt_len: int
     rec: _Recorder
     logits: np.ndarray
+    model: object = None  # the (possibly knocked-out) Transformer that produced this run
+    knockout: dict = field(default_factory=dict)
 
 
 class Runner:
@@ -127,6 +130,7 @@ class Runner:
         self.layout = self.model.layout
         self.names = self.layout.names
         self.runs: OrderedDict[str, Run] = OrderedDict()
+        self.ko_models: OrderedDict[str, object] = OrderedDict()  # knockout key -> model
         # Identifies this exact model, so a page loaded against an older server can tell.
         self.model_id = (f"d{len(self.layout)}-L{len(self.model.layers)}-h{sum(len(l.heads) for l in self.model.layers)}"
                          f"-u{sum(l.w_in.shape[1] for l in self.model.layers)}-nz{self.model.nonzero_params()}")
@@ -184,11 +188,14 @@ class Runner:
                 "key": [form_str(f) for f in h.key],
                 "value": {src: form_str(dst) for src, dst in h.value.items()},
                 "src": h.where,
+                "reads": sorted({d for f in [*h.query, *h.key] for d in f} | set(h.value)),
+                "writes": sorted({d for dst in h.value.values() for d in dst}),
             } for h in spec.heads]
             units = [{"read": form_str(u.read), "write": form_str(u.write), "label": u.label,
                       "doc": u.label or ("Writes " + "; ".join(f"{d}: {describe_dim(d) or 'working value'}"
                                                               for d in u.write)),
-                      "circuit": _circuit(list(u.write), list(u.read)), "src": u.where} for u in spec.units]
+                      "circuit": _circuit(list(u.write), list(u.read)), "src": u.where,
+                      "reads": sorted(u.read), "writes": sorted(u.write)} for u in spec.units]
             layers.append({"index": li, "name": spec.name, "heads": heads, "units": units})
         return {
             "name": "handformer",
@@ -205,7 +212,18 @@ class Runner:
 
     # ------------------------------------------------------------- runs
 
-    def run(self, expression: str) -> dict:
+    def _model_for(self, ko: "ablate.Knockout"):
+        if not ko:
+            return self.model
+        key = ko.key()
+        if key not in self.ko_models:
+            self.ko_models[key] = ablate.apply(self.model, ko)
+            while len(self.ko_models) > MAX_KNOCKOUT_MODELS:
+                self.ko_models.popitem(last=False)
+        self.ko_models.move_to_end(key)
+        return self.ko_models[key]
+
+    def run(self, expression: str, knockout: dict | None = None) -> dict:
         expression = expression.replace(" ", "").removesuffix("=")  # the page adds the '=' itself
         if not expression:
             raise ValueError("empty expression")
@@ -213,21 +231,23 @@ class Runner:
         if bad:
             raise ValueError(f"unsupported characters: {''.join(bad)!r} (use digits . + - * / ( ) and ~N)")
         prompt = arith.prompt(expression)
+        ko = ablate.Knockout.from_request(knockout)
+        model = self._model_for(ko)
         t0 = time.perf_counter()
-        budget = MAX_TOKENS - len(prompt)  # the model stops itself at '\n' 
-        tokens = self.model.generate(prompt, stop=cm.EOS, max_new=budget)
+        budget = MAX_TOKENS - len(prompt)  # the model stops itself at '\n'
+        tokens = model.generate(prompt, stop=cm.EOS, max_new=budget)
         t1 = time.perf_counter()
         rec = _Recorder()
-        logits = self.model.residual(tokens, trace=rec) @ self.model.unembed
+        logits = model.residual(tokens, trace=rec) @ model.unembed
         t2 = time.perf_counter()
-        run = Run(uuid.uuid4().hex[:12], expression, tokens, len(prompt), rec, logits)
+        run = Run(uuid.uuid4().hex[:12], expression, tokens, len(prompt), rec, logits, model, ko.as_request())
         self.runs[run.run_id] = run
         while len(self.runs) > MAX_RUNS:
             evicted, _ = self.runs.popitem(last=False)
             log.info("evicted run %s", evicted)
         finished = tokens[-1] == cm.EOS
-        log.info("run %s %r: %d bytes generated in %.2fs, traced in %.2fs, finished=%s",
-                 run.run_id, expression, len(tokens) - len(prompt), t1 - t0, t2 - t1, finished)
+        log.info("run %s %r: %d bytes generated in %.2fs, traced in %.2fs, finished=%s, knockout=%s",
+                 run.run_id, expression, len(tokens) - len(prompt), t1 - t0, t2 - t1, finished, ko.key() if ko else "-")
         return {
             "model_id": self.model_id,
             "run_id": run.run_id,
@@ -235,6 +255,7 @@ class Runner:
             "chars": [chr(t) for t in tokens],
             "prompt_len": run.prompt_len,
             "finished": finished,
+            "knockout": run.knockout,
             "steps": [self._step(run, q) for q in range(len(tokens))],
             "snapshots": [label for label, _ in rec.snapshots],
         }
@@ -262,7 +283,7 @@ class Runner:
         values = np.stack([x[q] for _, x in rec.snapshots], axis=1)  # (d, n_snapshots)
 
         heads = []
-        for li, layer in enumerate(self.model.layers):
+        for li, layer in enumerate(run.model.layers):
             x_in = rec.snapshots[2 * li][1][: q + 1]  # residual entering layer li, keys 0..q
             for hi, h in enumerate(layer.heads):
                 idx = rec.top_idx[(li, hi)][q]
@@ -305,7 +326,7 @@ class Runner:
         x_in = run.rec.snapshots[2 * layer][1]
         n = len(x_in)
         causal = np.triu(np.ones((n, n), dtype=bool), k=1)
-        attn = self.model.head_attention(x_in, self.model.layers[layer].heads[head], causal)
+        attn = run.model.head_attention(x_in, run.model.layers[layer].heads[head], causal)
         return attn, {"layer": layer, "head": head, "name": self.builder.layers[layer].heads[head].name}
 
     def residual_map(self, run_id: str, snapshot: int) -> tuple[np.ndarray, dict]:

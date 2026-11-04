@@ -179,3 +179,68 @@ match = '    def unit(self, u: UnitSpec)'
 [src."merge.no_shadow"]
 file = "handformer/arith.py"
 match = 'shadow shared dims'
+
+# --- Hello world (handformer/hello.py)
+[src."hello.features"]
+file = "handformer/hello.py"
+match = 'l1.units += pr.latest_feature({"is_plus": 1.0}, "f_P")'
+
+[src."hello.locate"]
+file = "handformer/hello.py"
+match = '''l2.heads += [pr.latest_head("latest '+'", "f_P", "P")'''
+
+[src."hello.phase"]
+file = "handformer/hello.py"
+match = '# [S > E]'
+
+[src."hello.address"]
+file = "handformer/hello.py"
+match = 'i = {"pos": 1.0, "E": -1.0}'
+
+[src."hello.gather"]
+file = "handformer/hello.py"
+match = 'l3.heads += [pr.gather_head("a_i"'
+
+[src."hello.carry"]
+file = "handformer/hello.py"
+match = '{"carry": 1.0})     # [y >= 10]'
+
+[src."hello.carry9"]
+file = "handformer/hello.py"
+match = "[y == 9, wrote '0']"
+
+[src."hello.top"]
+file = "handformer/hello.py"
+match = 'pr.latest_head("top nonzero working digit"'
+
+[src."hello.digit"]
+file = "handformer/hello.py"
+match = 'l4.units += cm.ramp_mod10_units({"A": 1.0, "B": 1.0, "carry": 1.0}'
+
+[src."hello.semi"]
+file = "handformer/hello.py"
+match = '{"work_end": 1.0}, "write'
+
+[src."hello.answer"]
+file = "handformer/hello.py"
+match = 'l5.heads.append(pr.gather_head("answer digit"'
+
+[src."hello.done"]
+file = "handformer/hello.py"
+match = '{"done": 1.0})  # [j > Zo]'
+
+[src."hello.logits"]
+file = "handformer/hello.py"
+match = 'b.logit("work_end", cm.WORK_END, cm.CONTROL_LOGIT)'
+
+[src."prim.latest_head_def"]
+file = "handformer/primitives.py"
+match = "def latest_head"
+
+[src."prim.ramp"]
+file = "handformer/common.py"
+match = "def ramp_mod10_units"
+
+[src."ablate.apply"]
+file = "handformer/ablate.py"
+match = "def apply("

@@ -61,8 +61,12 @@ def builder() -> ModelBuilder:
 
     l3 = b.at(3)
     l3.units += [
-        pr.relu_unit(pr.add(X, pr.scale(S_, -1.0), pr.const(2.0)), {"tPrev1": 1.0}),
-        pr.relu_unit(pr.add(X, pr.scale(S_, -1.0), pr.const(1.0)), {"tPrev0": 1.0}),
+        pr.relu_unit(pr.add(X, pr.scale(S_, -1.0), pr.const(2.0)), {"tPrev1": 1.0},
+                     "address of T_(j-1)[m+1] (previous line, one column up) as offset from E: x - s + 2; on "
+                     "line 0 it clamps to 0, so the gather reads '=' (value 0, T_(-1) = 0)"),
+        pr.relu_unit(pr.add(X, pr.scale(S_, -1.0), pr.const(1.0)), {"tPrev0": 1.0},
+                     "address of T_(j-1)[m] (previous line, same column) as offset from E: x - s + 1, for the "
+                     "previous column's sum; clamps to 0 ('=', value 0) on line 0"),
         pr.pos_if({"nz": 1.0, "seen_bar": 1.0, "seen_semi": -1.0}, 2.0, "zkey"),
         pr.pos_if({"is_bar": 1.0}, 1.0, "zkey"),
     ]
@@ -78,7 +82,9 @@ def builder() -> ModelBuilder:
         pr.latest_head("top nonzero of C", "zkey", "Z"),
     ]
     l4.units += pr.clamp01_units(pr.add(LB, pr.const(-1.0), pr.scale(K, -1.0)), {"low": 1.0})
-    l4.units.append(pr.relu_unit(pr.add({"Z": 1.0, "R": -1.0}, pr.const(-1.0)), {"Zo": 1.0}))
+    l4.units.append(pr.relu_unit(pr.add({"Z": 1.0, "R": -1.0}, pr.const(-1.0)), {"Zo": 1.0},
+                                 "answer length minus 1: Z - R - 1, how far the top nonzero digit of C sits past its "
+                                 "first digit; 0 for a zero product (Z falls back to R)"))
     # sign = sa XOR sb, suppressed for a zero product (Z falls back to R)
     nz = {"Z": 1.0, "R": -1.0}
     l4.units += pr.clamp01_units(pr.add(nz, pr.scale({"sa": 1.0}, pr.BIG), pr.scale({"sb": 1.0}, -pr.BIG),
@@ -94,11 +100,14 @@ def builder() -> ModelBuilder:
     ]
     low_src = pr.add({"E": 1.0}, pr.const(1.0), KS)  # T_k[0] at E+1+k*s
     high_src = pr.add({"R": 1.0, "F": 1.0, "sa": 1.0, "sb": 1.0, "E": -1.0}, K, pr.const(2.0))  # last line
-    l5.units.append(pr.relu_unit(high_src, {"csrc": 1.0}))
+    l5.units.append(pr.relu_unit(high_src, {"csrc": 1.0},
+                                 "collect address for a high product digit k: last line at R+F+sa+sb-E+k+2 (the "
+                                 "select below swaps in E+1+k*s while 'low')"))
     l5.units += pr.times_flag_units(pr.add(low_src, pr.scale(high_src, -1.0)), {"low": 1.0}, {"csrc": 1.0})
     l5.units += pr.clamp01_units(pr.gated({"pos": 1.0, "S": -1.0, "sgn": -1.0, "Zo": -1.0}, answer),
                                  {"frame_end": 1.0})
-    l5.units.append(pr.relu_unit({"sgn": 1.0, "is_semi": 1.0, "one": -1.0}, {"emit_minus": 1.0}))
+    l5.units.append(pr.relu_unit({"sgn": 1.0, "is_semi": 1.0, "one": -1.0}, {"emit_minus": 1.0},
+                                 "on the ';' byte of a negative product (sgn): write '-' before the answer digits"))
     l5.units += pr.hat_units(pr.gated(pr.add(K, pr.scale(LA, -1.0), pr.scale(LB, -1.0)), collect), 0.0,
                              {"work_end": 1.0})
 
@@ -117,8 +126,12 @@ def builder() -> ModelBuilder:
     ]
     # This MLP reads JS2/J2 written by this layer's heads (heads run first).
     l6.units += [
-        pr.relu_unit(pr.add({"P": 1.0, "F": -1.0, "sa": -1.0}, pr.const(-1.0), pr.scale(M, -1.0)), {"tAm": 1.0}),
-        pr.relu_unit(pr.add({"P": 1.0, "F": -1.0, "sa": -1.0}, pr.scale(M, -1.0)), {"tAm1": 1.0}),
+        pr.relu_unit(pr.add({"P": 1.0, "F": -1.0, "sa": -1.0}, pr.const(-1.0), pr.scale(M, -1.0)), {"tAm": 1.0},
+                     "address of a_m as offset from a's fence F+sa: la - m; 0 at m = la (the line's extra top "
+                     "digit), so the gather reads the fence, value 0"),
+        pr.relu_unit(pr.add({"P": 1.0, "F": -1.0, "sa": -1.0}, pr.scale(M, -1.0)), {"tAm1": 1.0},
+                     "address of a_(m-1) as offset from F+sa: la - m + 1; at m = 0 it lands on the operator P "
+                     "(value 0: no column below the units)"),
     ]
     l6.units += pr.hat_units(pr.add(M, pr.scale(S_, -1.0), pr.const(1.0)), 0.0, {"sep_slot": 1.0})
     l6.units += pr.hat_units(pr.add({"J": 1.0}, pr.scale(LB, -1.0), pr.const(1.0)), 0.0, {"lastline": 1.0})
@@ -130,12 +143,18 @@ def builder() -> ModelBuilder:
     ]
     for v in range(10):  # exactly one Boh_v is 1
         off = pr.add(pr.scale({f"Boh{v}": 1.0}, 99.0), pr.const(-99.0))
-        l7.units.append(pr.relu_unit(pr.add({"T0": 1.0, "Am1": float(v)}, off), {"Yp": 1.0}))
-        l7.units.append(pr.relu_unit(pr.add({"T1": 1.0, "Am": float(v)}, off), {"Ym": 1.0}))
+        l7.units.append(pr.relu_unit(pr.add({"T0": 1.0, "Am1": float(v)}, off), {"Yp": 1.0},
+                                     f"previous column's sum if b_j = {v}: T[m] + {v}*a_(m-1); silenced by -99 "
+                                     f"when Boh{v} is 0 (the sum is at most 90)"))
+        l7.units.append(pr.relu_unit(pr.add({"T1": 1.0, "Am": float(v)}, off), {"Ym": 1.0},
+                                     f"this column's sum before carry if b_j = {v}: T[m+1] + {v}*a_m; silenced by -99 "
+                                     f"when Boh{v} is 0"))
     l7.units.append(pr.relu_unit(pr.gated({"sep_slot": 1.0, "lastline": -1.0}, lines, 0.0),
-                                 {"emit_comma": 1.0}))
+                                 {"emit_comma": 1.0},
+                                 "lines phase, end of a line that is not the last (sep_slot, not lastline): write ','"))
     l7.units.append(pr.relu_unit(pr.gated({"sep_slot": 1.0, "lastline": 1.0, "one": -1.0}, lines, 0.0),
-                                 {"emit_bar": 1.0}))
+                                 {"emit_bar": 1.0},
+                                 "lines phase, end of the last line (sep_slot and lastline): write '|' to start collecting"))
 
     l8 = b.at(8)
     for t in range(1, 10):
@@ -143,7 +162,9 @@ def builder() -> ModelBuilder:
 
     l9 = b.at(9)
     not_digit = {"one": 1.0, "is_digit": -1.0}  # first column of a line: no carry in
-    l9.units.append(pr.relu_unit(pr.add({"Fl": 1.0}, pr.scale(not_digit, -9.0)), {"carry": 1.0}))
+    l9.units.append(pr.relu_unit(pr.add({"Fl": 1.0}, pr.scale(not_digit, -9.0)), {"carry": 1.0},
+                                 "carry part 1: floor(Yp/10) from Fl; zeroed when this byte is not a digit (the next "
+                                 "byte starts a line, no carry in)"))
     l9.units += pr.clamp01_units(pr.add({"Yp": 1.0, "Fl": -10.0, "val": -1.0},
                                         pr.scale(not_digit, -pr.BIG)), {"carry": 1.0})
 

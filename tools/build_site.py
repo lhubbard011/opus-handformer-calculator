@@ -28,7 +28,7 @@ from handformer import export as npz_export  # noqa: E402
 log = logging.getLogger("build_site")
 STATIC = ROOT / "handformer" / "viz" / "static"
 FLAG = '<script>window.HANDFORMER_STATIC = "data/";</script>\n'
-FRONTEND = ("app.js", "engine.js", "local-api.js", "heatmap.js", "render.js", "style.css")
+FRONTEND = ("app.js", "engine.js", "local-api.js", "heatmap.js", "render.js", "graph.js", "style.css")
 
 
 def build(out: Path) -> None:

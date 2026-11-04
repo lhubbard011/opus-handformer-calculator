@@ -28,6 +28,7 @@
       </label>
     </div>
     <div id="status" class="status" role="status"></div>
+    <div id="ko-bar" class="ko-bar" hidden></div>
   </header>
 
   <section class="sequence">
@@ -105,6 +106,18 @@
       <div id="map-howto-body"></div>
     </details>
     <div class="map-wrap"><canvas id="map"></canvas></div>
+  </section>
+
+  <section class="panel wide">
+    <div class="panel-title" data-tip="The dataflow of one circuit, generated from the weight specs: which values each layer computes from which.">Circuit graph
+      <label class="small muted">circuit <select id="g-circuit">
+        <option value="frame">frame locator</option><option value="parser">parser / rewriter</option>
+        <option value="add" selected>add</option><option value="sub">sub</option><option value="mul">mul</option>
+        <option value="div">div</option><option value="pow">pow</option></select></label>
+    </div>
+    <div id="g-caption" class="muted small"></div>
+    <div id="graph" class="graph-wrap"></div>
+    <div id="g-pick" class="detail muted">click a value to highlight what it is computed from and what it feeds</div>
   </section>
 
   <section class="panel wide">

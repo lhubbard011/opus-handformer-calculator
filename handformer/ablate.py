@@ -1,0 +1,91 @@
+"""Knockouts: a copy of the model with chosen parts switched off, in the weights.
+
+Interpretability claims are strongest when breaking the part breaks the
+behaviour it is said to cause. Knocking a part out here is an edit of the
+weights, so the forward pass, the decoder and the visualizer stay unchanged:
+
+* head (layer, index): its output map W_O is zeroed; it still attends, writes nothing.
+* unit (layer, index): its row of W_out is zeroed; it still fires, writes nothing.
+* dim name: every write into it is zeroed (embedding column, every head's W_O
+  column, every unit's W_out column), so it stays 0 at every position. The
+  position features pos and pos² are added by the forward pass, not by a
+  weight, so they cannot be knocked out.
+
+The in-browser engine (``viz/static/local-api.js``) applies the same three
+rules; ``tests/test_web.py`` checks the two agree.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+
+from .model import Head, Layer, Transformer
+
+log = logging.getLogger(__name__)
+POSITIONAL = ("pos", "pos2")
+
+
+@dataclass(frozen=True)
+class Knockout:
+    heads: frozenset[tuple[int, int]] = field(default_factory=frozenset)
+    units: frozenset[tuple[int, int]] = field(default_factory=frozenset)
+    dims: frozenset[str] = field(default_factory=frozenset)
+
+    @classmethod
+    def from_request(cls, req: dict | None) -> "Knockout":
+        req = req or {}
+        return cls(frozenset((int(l), int(h)) for l, h in req.get("heads", [])),
+                   frozenset((int(l), int(u)) for l, u in req.get("units", [])),
+                   frozenset(str(d) for d in req.get("dims", [])))
+
+    def __bool__(self) -> bool:
+        return bool(self.heads or self.units or self.dims)
+
+    def as_request(self) -> dict:
+        return {"heads": sorted(map(list, self.heads)), "units": sorted(map(list, self.units)),
+                "dims": sorted(self.dims)}
+
+    def key(self) -> str:
+        r = self.as_request()
+        return f"h{r['heads']}u{r['units']}d{r['dims']}"
+
+
+def apply(model: Transformer, ko: Knockout) -> Transformer:
+    """A new Transformer with the knocked-out parts writing nothing (``model`` is untouched)."""
+    if not ko:
+        return model
+    n_layers = len(model.layers)
+    for li, hi in ko.heads:
+        if not (0 <= li < n_layers and 0 <= hi < len(model.layers[li].heads)):
+            raise ValueError(f"no head {hi} in layer {li}")
+    for li, ui in ko.units:
+        if not (0 <= li < n_layers and 0 <= ui < model.layers[li].w_in.shape[1]):
+            raise ValueError(f"no unit {ui} in layer {li}")
+    for d in ko.dims:
+        if d not in model.layout:
+            raise ValueError(f"no residual dim named {d!r}")
+        if d in POSITIONAL:
+            raise ValueError(f"{d} is a position feature added by the forward pass, not a weight; "
+                             "it cannot be knocked out")
+    cols = [model.layout[d] for d in ko.dims]
+
+    embed = model.embed.copy()
+    embed[:, cols] = 0.0
+    layers = []
+    for li, layer in enumerate(model.layers):
+        heads = []
+        for hi, h in enumerate(layer.heads):
+            w_o = h.w_o.copy()
+            if (li, hi) in ko.heads:
+                w_o[:] = 0.0
+            w_o[:, cols] = 0.0
+            heads.append(Head(h.name, h.w_q, h.w_k, h.w_v, w_o))
+        w_out = layer.w_out.copy()
+        for lj, ui in ko.units:
+            if lj == li:
+                w_out[ui, :] = 0.0
+        w_out[:, cols] = 0.0
+        layers.append(Layer(layer.name, heads, layer.w_in, w_out))
+    out = Transformer(model.layout, embed, layers, model.unembed)
+    log.info("knockout %s: %d -> %d nonzero weights", ko.key(), model.nonzero_params(), out.nonzero_params())
+    return out

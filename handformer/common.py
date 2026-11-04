@@ -88,13 +88,16 @@ def digit_offset(lo: Form, hi: Form, i: Form) -> Form:
 
 def digit_target_unit(lo: Form, hi: Form, i: Form, dst: str) -> UnitSpec:
     """``dst = max(hi-1-i - lo, 0)``; the gather target is ``lo + dst``."""
-    return pr.relu_unit(digit_offset(lo, hi, i), {dst: 1.0})
+    return pr.relu_unit(digit_offset(lo, hi, i), {dst: 1.0},
+                        f"digit address into '{dst}': how far digit i sits from the operand's left fence "
+                        "(0 once the operand has no digit i, so the lookup lands on the fence, value 0)")
 
 
 def exhausted_units(lo: Form, hi: Form, i: Form, dst: str) -> list[UnitSpec]:
     """``dst = 1 - [operand has digit i]``."""
     return [
-        pr.relu_unit(pr.const(1.0), {dst: 1.0}),
+        pr.relu_unit(pr.const(1.0), {dst: 1.0},
+                     f"'{dst}' starts at 1 (operand exhausted); the next test subtracts 1 while digit i exists"),
         *pr.clamp01_units(digit_offset(lo, hi, i), {dst: -1.0}),
     ]
 

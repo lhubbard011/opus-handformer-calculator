@@ -18,8 +18,15 @@ log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
 
 
+class Knockout(BaseModel):
+    heads: list[tuple[int, int]] = []
+    units: list[tuple[int, int]] = []
+    dims: list[str] = []
+
+
 class RunBody(BaseModel):
     expression: str = Field(min_length=1, max_length=400)
+    knockout: Knockout | None = None
 
 
 class PositionBody(BaseModel):
@@ -89,7 +96,7 @@ def create_app(runner: Runner) -> FastAPI:
 
     @app.post("/api/run")
     def run(body: RunBody) -> dict:
-        return runner.run(body.expression)
+        return runner.run(body.expression, body.knockout.model_dump() if body.knockout else None)
 
     @app.post("/api/position")
     def position(body: PositionBody) -> dict:

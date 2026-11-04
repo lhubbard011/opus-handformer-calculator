@@ -65,7 +65,9 @@ def builder() -> ModelBuilder:
     l4.units += pr.clamp01_units(pr.add(y, pr.const(-9.0)), {"carry": 1.0})  # [y >= 10]
     y_if_tok0 = pr.add(y, {"is0": -20.0}, pr.const(20.0))
     l4.units += pr.hat_units(y_if_tok0, 9.0, {"carry": 1.0})  # [y == 9 and token '0']
-    l4.units.append(pr.relu_unit(pr.add({"Z": 1.0, "E": -1.0}, pr.const(-1.0)), {"Zo": 1.0}))
+    l4.units.append(pr.relu_unit(pr.add({"Z": 1.0, "E": -1.0}, pr.const(-1.0)), {"Zo": 1.0},
+                                 "answer length minus 1: Z - E - 1, how far the top nonzero working digit sits past "
+                                 "the first one; 0 for an all-zero sum (Z falls back to E)"))
     # Routed here only when both effective signs agree, so the result has a's sign,
     # unless it is zero (no nonzero working digit: Z falls back to E).
     l4.units += pr.clamp01_units(pr.gated({"Z": 1.0, "E": -1.0}, {"sa": 1.0}), {"sgn": 1.0})
@@ -76,8 +78,10 @@ def builder() -> ModelBuilder:
                                                           pr.const(1.0)), "C"))
     l5.units += cm.ramp_mod10_units({"A": 1.0, "B": 1.0, "carry": 1.0}, 0, 19, working, 0.0)
     l5.units.append(pr.relu_unit(
-        pr.gated({"exA": 1.0, "exB": 1.0, "carry": -1.0, "one": -1.0}, working, 0.0), {"work_end": 1.0}))
+        pr.gated({"exA": 1.0, "exB": 1.0, "carry": -1.0, "one": -1.0}, working, 0.0), {"work_end": 1.0},
+        "end of working: both operands exhausted (exA, exB) and no carry left, so write ';'"))
     l5.units += cm.ramp_mod10_units({"C": 1.0}, 0, 9, working, 1.0)
     l5.units += pr.clamp01_units(pr.gated(pr.add(j, {"Zo": -1.0}), working, 1.0), {"frame_end": 1.0})
-    l5.units.append(pr.relu_unit({"sgn": 1.0, "is_semi": 1.0, "one": -1.0}, {"emit_minus": 1.0}))
+    l5.units.append(pr.relu_unit({"sgn": 1.0, "is_semi": 1.0, "one": -1.0}, {"emit_minus": 1.0},
+                                 "on the ';' byte of a negative result (sgn): write '-' before the answer digits"))
     return b

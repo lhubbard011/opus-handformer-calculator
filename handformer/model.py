@@ -98,6 +98,9 @@ class HeadSpec:
     key: list[Form]
     value: dict[str, Form]
     where: str = field(default="", compare=False)  # source line that wrote it (docs only)
+    # When this head's read is exact (tests/test_claims.py): a 0/1 form over dims. None means
+    # the default scope: wherever its calculator is on, or (shared heads) every output position.
+    exact_when: Form | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         if not self.where:
@@ -117,6 +120,10 @@ class UnitSpec:
     write: Form
     label: str = ""
     where: str = field(default="", compare=False)
+    # Checked claims about the pre-activation (tests/test_claims.py), documentation only:
+    #   ("outside", lo, hi)        never strictly inside (lo, hi): a robust step's input
+    #   ("silent_unless", flag)    <= 0 wherever the 0/1 dim ``flag`` is 0: a gated output
+    claims: tuple = field(default=(), compare=False)
 
     def __post_init__(self) -> None:
         if not self.where:

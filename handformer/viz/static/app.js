@@ -5,6 +5,7 @@
 import { decodeF16, SEQ, DIV } from "./render.js";
 import { drawHeatmap, attachHeatmapEvents, isTouch, showSheet, hideSheet } from "./heatmap.js";
 import { LocalApi } from "./local-api.js";
+import { drawGraph } from "./graph.js";
 
 const $ = (id) => document.getElementById(id);
 const log = (...args) => console.info("[handviz]", ...args);
@@ -25,6 +26,8 @@ const state = {
   gen: 0,
   map: "residual",
   maps: new Map(), // cache key -> { meta, data } for binary heatmap payloads
+  ko: { heads: [], units: [], dims: [] }, // knocked-out parts (see handformer/ablate.py)
+  baseline: new Map(), // expression -> answer with nothing knocked out
 };
 
 // ------------------------------------------------------------------ API
@@ -192,13 +195,74 @@ async function loadInfo() {
   $("a-layer").replaceChildren(...state.info.layers.filter((l) => l.heads.length)
     .map((l) => new Option(`${l.index + 1}`, l.index)));
   $("w-layer").dispatchEvent(new Event("input"));
+  renderGraph();
 }
 
-async function runExpression(expression) {
+const answerOf = (run) => run.chars.join("").split("]").pop().trim();
+const koCount = () => state.ko.heads.length + state.ko.units.length + state.ko.dims.length;
+const koHas = (kind, item) => state.ko[kind].some((x) => JSON.stringify(x) === JSON.stringify(item));
+
+/** Switch a head / unit / dim off or back on, then re-run the expression at the same step. */
+async function toggleKnockout(kind, item) {
+  state.ko[kind] = koHas(kind, item) ? state.ko[kind].filter((x) => JSON.stringify(x) !== JSON.stringify(item))
+    : [...state.ko[kind], item];
+  log("knockout", kind, JSON.stringify(item), "now", koCount(), "parts off");
+  const keep = state.q;
+  if (state.run) await runExpression(state.run.expression, keep);
+}
+
+function renderKnockouts() {
+  const bar = $("ko-bar");
+  if (!koCount() || !state.run) { bar.hidden = true; return; }
+  bar.hidden = false;
+  bar.replaceChildren();
+  const add = (text, kind, item, tip) => {
+    const b = document.createElement("button");
+    b.className = "ko-chip";
+    b.textContent = `${text} ✕`;
+    b.dataset.tip = `${tip}\n(click to switch it back on)`;
+    b.addEventListener("click", () => toggleKnockout(kind, item));
+    bar.append(b);
+  };
+  const lbl = document.createElement("span");
+  lbl.className = "ko-label";
+  lbl.textContent = "Knocked out:";
+  bar.append(lbl);
+  for (const [l, h] of state.ko.heads) add(`L${l + 1} ${headSpec(l, h)?.name}`, "heads", [l, h], "This head still attends but writes nothing.");
+  for (const [l, u] of state.ko.units) add(`L${l + 1} unit #${u}`, "units", [l, u], state.info.layers[l].units[u]?.doc || "");
+  for (const d of state.ko.dims) add(d, "dims", d, `Nothing writes ${d}: it stays 0 everywhere.`);
+  const got = answerOf(state.run), want = state.baseline.get(state.run.expression);
+  const res = document.createElement("span");
+  res.className = "ko-result" + (want !== undefined && got !== want ? " changed" : "");
+  res.textContent = want === undefined ? `answer now ${got}` : got === want
+    ? `answer unchanged: ${got} (this part isn't needed here)` : `answer now ${got} · normally ${want}`;
+  const clear = document.createElement("button");
+  clear.textContent = "restore all";
+  clear.addEventListener("click", async () => { state.ko = { heads: [], units: [], dims: [] }; await runExpression(state.run.expression, state.q); });
+  bar.append(res, clear);
+}
+
+/** A small "knock out / restore" button for the detail panels. */
+function koButton(kind, item) {
+  const b = document.createElement("button");
+  b.className = "ko-btn";
+  const on = koHas(kind, item);
+  b.textContent = on ? "restore" : "knock out";
+  b.dataset.tip = on ? "Switch this part back on and re-run." :
+    "Switch this part off (its writes are zeroed in the weights) and re-run, to see what it is needed for.";
+  b.addEventListener("click", (e) => { e.stopPropagation(); toggleKnockout(kind, item); });
+  return b;
+}
+
+async function runExpression(expression, keepStep = null) {
   stopPlay();
   setStatus("running…");
   try {
-    const run = await api("/api/run", { expression });
+    const body = koCount() ? { expression, knockout: state.ko } : { expression };
+    const run = await api("/api/run", body);
+    if (koCount() && !state.baseline.has(run.expression)) {
+      state.baseline.set(run.expression, answerOf(await api("/api/run", { expression })));
+    } else if (!koCount()) state.baseline.set(run.expression, answerOf(run));
     run.steps = run.steps.map((raw, q) => summarize(run, q, raw));
     if (run.model_id !== state.info?.model_id) {
       log("server model changed", state.info?.model_id, "->", run.model_id, "; reloading model description");
@@ -214,11 +278,13 @@ async function runExpression(expression) {
     snap.value = run.snapshots.length - 1;
     $("scrubber").min = run.prompt_len - 1;
     $("scrubber").max = run.chars.length - 2;
-    const answer = run.chars.join("").split("]").pop().trim();
+    const answer = answerOf(run);
     setStatus(`${run.chars.length - run.prompt_len} bytes written by the model · answer ${answer}` +
-      (run.finished ? "" : " · (stopped before EOS)"));
+      (run.finished ? "" : " · (stopped before EOS)") + (koCount() ? ` · ${koCount()} part(s) knocked out` : ""));
     log("run", run.run_id, run.expression, run.chars.length, "bytes");
-    await goto(run.prompt_len - 1);
+    renderKnockouts();
+    const last = run.chars.length - 2;
+    await goto(keepStep === null ? run.prompt_len - 1 : Math.max(run.prompt_len - 1, Math.min(keepStep, last)));
   } catch (e) {
     setStatus(e.message, true);
   }
@@ -412,7 +478,7 @@ function renderHeadDetail(p) {
   const top = h.top.map(([k, w]) => `${k} ${JSON.stringify(state.run.chars[k])} ${(w * 100).toFixed(2)}%`).join(", ");
   const wrote = Object.entries(h.wrote).map(([d, v]) => `${d} += ${fmt(v)}`).join("\n       ") || "(nothing)";
   el.textContent = `L${layer + 1} ${spec.name}\nscore = ${score}\nvalue: ${value}\nreads: ${top}\nwrote: ${wrote}\nsource: `;
-  el.append(srcLinks(spec.src));
+  el.append(srcLinks(spec.src), document.createElement("br"), koButton("heads", [layer, head]));
 }
 
 function renderDims(p) {
@@ -452,6 +518,7 @@ function renderDims(p) {
       t.textContent = labels.map((l, s) => `${l.padEnd(9)} ${fmt(vals[s])}`)
         .filter((_, s) => s === 0 || Math.abs(vals[s] - vals[s - 1]) > 1e-9).join("\n") + "\nwritten at: ";
       t.append(srcLinks(d.src));
+      if (!["pos", "pos2"].includes(d.name)) t.append(" ", koButton("dims", d.name));
       row.appendChild(t);
     }
   });
@@ -479,7 +546,7 @@ function renderUnits(p) {
     row.className = "row unit-row";
     row.dataset.tip = `layer ${u.layer + 1} · unit #${u.unit}\n${spec.doc}\n\nReLU(${spec.read})\n= ${fmt(u.pre)} at this step → adds to ${spec.write}${srcText(spec.src)}`;
     row.innerHTML = `<span class="muted">#${u.unit}</span><span class="num">${fmt(u.pre)}</span><span class="f">ReLU(<b>${spec.read}</b>) → ${spec.write} </span>`;
-    row.querySelector(".f").append(srcLinks(spec.src));
+    row.querySelector(".f").append(srcLinks(spec.src), koButton("units", [u.layer, u.unit]));
     el.appendChild(row);
   }
   if (!el.children.length) el.textContent = "no active units match";
@@ -756,6 +823,7 @@ function wire() {
     $("w-head").replaceChildren(...layer.heads.map((h, i) => new Option(`${i}: ${h.name}`, i)));
   };
   $("w-layer").addEventListener("input", fillHeads);
+  $("g-circuit").addEventListener("input", renderGraph);
   const pickHead = (layer, head) => {
     state.head = [layer, head];
     if (!state.pos.has(state.q)) return;
@@ -781,6 +849,23 @@ function wire() {
     else if (e.key === "End" && state.run) { e.preventDefault(); goto(state.run.chars.length - 2); }
     else if (e.key === " ") { e.preventDefault(); play(); }
   });
+}
+
+function renderGraph() {
+  if (!state.info) return;
+  const circuit = $("g-circuit").value;
+  const pick = $("g-pick");
+  const out = drawGraph($("graph"), state.info, circuit, {
+    onPick: (n) => {
+      pick.classList.remove("muted");
+      pick.textContent = `${n.name}: ${n.doc}\nwritten at: `;
+      pick.append(srcLinks(n.src));
+    },
+  });
+  $("g-caption").textContent = `${out.nodes} values and ${out.edges} dependencies of the ${circuit} circuit, ` +
+    "laid out by the layer that first writes each value (blue: an attention head moves it, orange: an MLP unit " +
+    "computes it). Faded names come from other circuits. one, pos and pos² feed almost everything and are left out. " +
+    "Hover an edge to see which heads or units it stands for.";
 }
 
 /** Phones: the step controls are a fixed bottom bar; keep its height in --bar-h for padding. */

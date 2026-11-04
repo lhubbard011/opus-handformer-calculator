@@ -95,8 +95,12 @@ def builder() -> ModelBuilder:
     ]
     # previous multiples row, same column / column-1 (M_0 = 0: clamp onto '=')
     l4.units += [
-        pr.relu_unit(pr.add({"pos": 1.0, "E": -1.0}, pr.scale(S_, -1.0), pr.const(1.0)), {"tM0": 1.0}),
-        pr.relu_unit(pr.add({"pos": 1.0, "E": -1.0}, pr.scale(S_, -1.0)), {"tM1": 1.0}),
+        pr.relu_unit(pr.add({"pos": 1.0, "E": -1.0}, pr.scale(S_, -1.0), pr.const(1.0)), {"tM0": 1.0},
+                    label="'tM0' = x - s + 1: offset after '=' of the previous multiple's digit at this column; "
+                          "clamps to 0 ('=', M_0 = 0)"),
+        pr.relu_unit(pr.add({"pos": 1.0, "E": -1.0}, pr.scale(S_, -1.0)), {"tM1": 1.0},
+                    label="'tM1' = x - s: offset after '=' of the previous multiple's digit at column - 1 (for the "
+                          "carry); clamps to 0 ('=', M_0 = 0)"),
     ]
 
     l5 = b.at(5)
@@ -125,8 +129,12 @@ def builder() -> ModelBuilder:
     l6.units += pr.clamp01_units(COLS, {"Scolge1": 1.0})
     # B[col], B[col-1] at E-1-col, E-col (clamped onto b's left fence, value 0)
     l6.units += [
-        pr.relu_unit(pr.add({"E": 1.0}, pr.const(-1.0), pr.scale(COL, -1.0), pr.scale(PB, -1.0)), {"tBc": 1.0}),
-        pr.relu_unit(pr.add({"E": 1.0}, pr.scale(COL, -1.0), pr.scale(PB, -1.0)), {"tBc1": 1.0}),
+        pr.relu_unit(pr.add({"E": 1.0}, pr.const(-1.0), pr.scale(COL, -1.0), pr.scale(PB, -1.0)), {"tBc": 1.0},
+                    label="'tBc': offset from b's left fence of B[col] (E-1-col); past B's top digit it clamps to the "
+                          "fence, value 0"),
+        pr.relu_unit(pr.add({"E": 1.0}, pr.scale(COL, -1.0), pr.scale(PB, -1.0)), {"tBc1": 1.0},
+                    label="'tBc1': offset from b's left fence of B[col-1] (E-col, for the carry); clamps to the "
+                          "fence, value 0"),
     ]
 
     l7 = b.at(7)
@@ -151,9 +159,13 @@ def builder() -> ModelBuilder:
     y = {"Mp1": 1.0, "Bc1": 1.0}  # multiples: carry recovered from the previous output digit
     l7.units += pr.clamp01_units(pr.add(y, pr.const(-9.0), {"is_digit": pr.BIG}, pr.const(-pr.BIG)), {"carry": 1.0})
     l7.units += pr.hat_units(pr.add(y, {"is0": -20.0}, pr.const(20.0)), 9.0, {"carry": 1.0})
-    l7.units.append(pr.relu_unit({"Rp": 1.0}, {"Rj": 1.0}))  # R'[j]: a_i when j == 0
+    l7.units.append(pr.relu_unit({"Rp": 1.0}, {"Rj": 1.0},
+                                     label="R'[j] = R_{i-1}[j-1]: copies the shifted remainder digit (a digit, "
+                                           "so ReLU is the identity)"))  # R'[j]: a_i when j == 0
     l7.units += pr.times_flag_units({"ai": 1.0, "Rp": -1.0}, {"col1": 1.0}, {"Rj": 1.0})
-    l7.units.append(pr.relu_unit({"Rp1": 1.0}, {"Rj1": 1.0}))  # R'[j-1]: a_i when j-1 == 0
+    l7.units.append(pr.relu_unit({"Rp1": 1.0}, {"Rj1": 1.0},
+                                     label="R'[j-1] = R_{i-1}[j-2]: copies the shifted remainder digit below "
+                                           "(for the borrow)"))  # R'[j-1]: a_i when j-1 == 0
     l7.units += pr.times_flag_units({"ai": 1.0, "Rp1": -1.0}, {"col2": 1.0}, {"Rj1": 1.0})
 
     l8 = b.at(8)
@@ -174,8 +186,12 @@ def builder() -> ModelBuilder:
     l8.units.append(dummy)
     qs = pr.product_form("QS2", "Q2", S2)
     l8.units += [  # M_q[j], M_q[j-1]; q = 0 clamps onto '=' (value 0)
-        pr.relu_unit(pr.add(qs, pr.scale(S_, -1.0), COL), {"tMq": 1.0}),
-        pr.relu_unit(pr.add(qs, pr.scale(S_, -1.0), COL, pr.const(-1.0)), {"tMq1": 1.0}),
+        pr.relu_unit(pr.add(qs, pr.scale(S_, -1.0), COL), {"tMq": 1.0},
+                    label="'tMq' = (q-1)s + col: offset after '=' of M_q[j] in multiples row q-1; q = 0 clamps to "
+                          "0 ('=', value 0)"),
+        pr.relu_unit(pr.add(qs, pr.scale(S_, -1.0), COL, pr.const(-1.0)), {"tMq1": 1.0},
+                    label="'tMq1' = (q-1)s + col - 1: offset after '=' of M_q[j-1] (for the borrow); q = 0 clamps "
+                          "to 0 ('=')"),
     ]
 
     l9 = b.at(9)
@@ -192,8 +208,11 @@ def builder() -> ModelBuilder:
         pr.latest_head("first nonzero q", "zq", "Zq"),
     ]
     for k in K:  # [R' >= M_k] = top differing digit greater, or all equal and a_i >= M_k[0]
-        l9.units.append(pr.relu_unit({f"GT{k}": 1.0}, {"qd": 1.0}))
-        l9.units.append(pr.relu_unit({f"c0{k}": 1.0, f"GT{k}": -1.0, f"LT{k}": -1.0}, {"qd": 1.0}))
+        l9.units.append(pr.relu_unit({f"GT{k}": 1.0}, {"qd": 1.0},
+                                        label=f"q += 1 if R' > M_{k} at their top differing digit (GT{k})"))
+        l9.units.append(pr.relu_unit({f"c0{k}": 1.0, f"GT{k}": -1.0, f"LT{k}": -1.0}, {"qd": 1.0},
+                                        label=f"q += 1 if all upper digits of R' and M_{k} agree (GT{k}=LT{k}=0) "
+                                              f"and units digit a_i >= M_{k}[0] (c0{k})"))
     yb = {"Rj1": 1.0, "MqJ1": -1.0}  # remainder: borrow recovered from the previous output digit
     not_j0 = pr.scale({"col1": 1.0}, -pr.BIG)
     l9.units += pr.clamp01_units(pr.add(pr.scale(yb, -1.0), not_j0), {"br": 1.0})
@@ -212,8 +231,12 @@ def builder() -> ModelBuilder:
     l10.units.append(pr.relu_unit({"endrow": 1.0, "col0": 1.0, "seen_semi": -1.0, "one": -1.0}, {"work_end": 1.0}))
     # sign = sa XOR sb, only for a nonzero quotient
     for x_, y_ in (("sa", "sb"), ("sb", "sa")):
-        l10.units.append(pr.relu_unit({x_: 1.0, y_: -1.0, "found_q": 1.0, "one": -1.0}, {"sgn": 1.0}))
-    l10.units.append(pr.relu_unit(LQ, {"start": 1.0}))
+        l10.units.append(pr.relu_unit({x_: 1.0, y_: -1.0, "found_q": 1.0, "one": -1.0}, {"sgn": 1.0},
+                                      label=f"sign half of sa XOR sb: 1 when {x_}=1, {y_}=0 and the quotient is "
+                                            f"nonzero (found_q)"))
+    l10.units.append(pr.relu_unit(LQ, {"start": 1.0},
+                                  label="default answer start: position of the last quotient digit, "
+                                        "W + (9 + len A)s (used when the quotient is 0)"))
     l10.units += pr.times_flag_units(pr.add({"Zq": 1.0}, pr.scale(LQ, -1.0)), {"found_q": 1.0}, {"start": 1.0})
 
     t = {"pos": 1.0, "S": -1.0, "sgn": -1.0}  # answer digit index after an optional '-'
@@ -223,7 +246,9 @@ def builder() -> ModelBuilder:
         pr.gather_head("t^2", t, "T2", src="pos2"),
     ]
     src = pr.add({"start": 1.0}, pr.product_form("TS2", "T2", S2))
-    l11.units.append(pr.relu_unit(src, {"src": 1.0}))
+    l11.units.append(pr.relu_unit(src, {"src": 1.0},
+                                  label="'src' = start + t*s: grid position of answer digit t, one row "
+                                        "(stride s) down the q column per digit"))
     l11.units += pr.clamp01_units(pr.gated(pr.add(src, pr.scale(LQ, -1.0)), working), {"frame_end": 1.0})
     l11.units.append(pr.relu_unit({"sgn": 1.0, "is_semi": 1.0, "one": -1.0}, {"emit_minus": 1.0}))
 

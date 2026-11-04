@@ -32,7 +32,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 MAP = ROOT / "docs" / "links.toml"
-DOCS = ("README.md", "DESIGN.md")
+DOCS = ("README.md", "DESIGN.md", "HELLO.md")
 
 log = logging.getLogger("doclinks")
 

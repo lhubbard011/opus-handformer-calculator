@@ -235,7 +235,8 @@ def clamp01_units(x: Form, write: Form) -> list[UnitSpec]:
     z = add(scale(x, STEP_SLOPE), const(-STEP_SLOPE / 2.0))
     names = ", ".join(write)
     return [
-        UnitSpec(read=z, write=dict(write), label=f"yes/no test into {names}: rises from 0 to 1 as the input passes 1/2"),
+        UnitSpec(read=z, write=dict(write), label=f"yes/no test into {names}: rises from 0 to 1 as the input passes 1/2",
+                 claims=(("outside", -1.0, 1.0),)),  # input within 1/4 of an integer: never on the ramp
         UnitSpec(read=add(z, const(-1.0)), write=scale(write, -1.0),
                  label=f"yes/no test into {names}: caps the answer at exactly 1 (input at or above 3/4)"),
     ]
