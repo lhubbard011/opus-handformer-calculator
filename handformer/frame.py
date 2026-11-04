@@ -40,6 +40,8 @@ from .model import Form, HeadSpec, ModelBuilder
 # (digit or '.') and not ')'.
 # "binary minus" as a 0/1 match form: is_minus + prev_digit + prev_rpar - 1 equals 1
 # exactly for a binary '-', 0 for a unary one, <= 0 for any other byte.
+# (prev_digit, prev_rpar: layer-1 heads reading byte pos-1; one byte, so at most one is 1.)
+# The P and Ladd classes match with it in the layer-1 MLP, so a sign '-' is never an operator.
 BINMINUS: Form = {"is_minus": 1.0, "prev_digit": 1.0, "prev_rpar": 1.0, "one": -1.0}
 
 # marker -> the match forms of its byte class (one feature unit each; at most one fires)
@@ -80,9 +82,16 @@ PB: Form = {"P": 1.0, "sb": 1.0}
 
 
 def build(b: ModelBuilder) -> None:
+    """Write the shared locator into layers 1-4: marker positions, frame flags, phases,
+    operand signs sa/sb, precision N, and the act_* flags that gate every operator circuit."""
+    # address of the previous byte; at BOS it is -1 and the gather clamps onto BOS (all zeros)
     prev = pr.add({"pos": 1.0}, pr.const(-1.0))
+    # Layer 1. Heads: is the previous byte part of a number, or ')'? (unary vs binary '-').
+    # MLP: is_unary / is_binminus, and the tags f_<m> that the layer-2 latest heads maximise.
     l1 = b.at(1)
     l1.heads += [
+        # prev_digit = is_digit + is_dot at pos-1 (a gather, score -beta(k-(pos-1))^2); written as a
+        # raw HeadSpec because gather_head takes one source dim. The two are exclusive, so 0/1.
         HeadSpec(  # "digit" here means part of a number: a digit or '.'
             name="prev byte in a number?",
             query=[pr.scale(prev, 2 * pr.GATHER_BETA), pr.const(-pr.GATHER_BETA)],
@@ -91,45 +100,72 @@ def build(b: ModelBuilder) -> None:
         ),
         pr.gather_head("prev byte ')'?", prev, "prev_rpar", src="is_rpar"),
     ]
+    # Same-layer MLP sees these heads. is_unary = ReLU(is_minus - prev_digit - prev_rpar): 1 only for
+    # a sign '-'; read by the parser (sign of a at a_lo, layer 9; '-' before A, layer 12).
+    # is_binminus is read as the "first + or - after p" key class (expr layer 5).
     l1.units.append(pr.relu_unit({"is_minus": 1.0, "prev_digit": -1.0, "prev_rpar": -1.0},
                                  {"is_unary": 1.0},
                                  label="'is_unary': a '-' whose previous byte is not part of a number and not ')', so it is a sign, not subtraction"))
     l1.units.append(pr.relu_unit(BINMINUS, {"is_binminus": 1.0},
                                  label="'is_binminus': a '-' right after a digit, '.' or ')' is binary subtraction; exact 0/1 so later key classes can use it"))  # exact 0/1, for later key classes
+    # f_m = 2(pos+1) on a byte of class m, else 0; BOS adds 1 once per class (bos only for the
+    # first form), so "none yet" reads position 0 and a BOS match (3) never ties pos 1 (4).
     for m, matches in MARKERS.items():
         for k, match in enumerate(matches):
             l1.units += pr.latest_feature(match, f"f_{m}", bos=(k == 0))
 
     # the prompt's '=' is the earliest '=' in the sequence
+    # f_E0 = BIG - pos on an '=', else 0: the latest head's max then lands on the earliest '='
     l1.units.append(pr.earliest_if({"is_eq": 1.0}, 1.0, "f_E0"))
 
+    # Layer 2. Heads: each marker m = position of the latest byte of its class (the key with the
+    # largest f_m, read with beta 40; BOS = 0 if none); E0 = the prompt's '='. MLP: precision
+    # offsets tN_k and the frame flags open / seen_*, computed from this layer's heads.
     l2 = b.at(2)
     l2.heads += [pr.latest_head(f"latest {m}", f"f_{m}", m) for m in MARKERS]
     l2.heads.append(pr.latest_head("prompt '='", "f_E0", "E0"))
     # Precision N: the digits between '~' and the prompt's '=' (N <= 9999).
+    # has_til = [Ptil >= 1] (Ptil reads BOS = 0 without a '~'). The 10^k digit sits at
+    # E0-1-k = Ptil + tN_k, so tN_k = ReLU(E0 - Ptil - 1 - k); a place N lacks gives 0, i.e. the
+    # '~' itself, whose val is 0. Layer 3 gathers those digits (Nd_k) and sums N.
     l2.units += pr.clamp01_units({"Ptil": 1.0}, {"has_til": 1.0})
     for k in range(N_DIGITS):
         l2.units.append(pr.relu_unit({"E0": 1.0, "Ptil": -1.0, "one": -1.0 - k}, {f"tN{k}": 1.0},
                                      label=f"offset 'tN{k}' from '~' to precision digit {k} (10^{k} place): (#digits between '~' and prompt '=') - {k}; 0 points at '~' itself"))
+    # open = [F - Rb >= 1]: a '[' after the latest ']'. seen_eq/semi/bar = [E/S/R - F >= 1]: that
+    # marker was already written inside the current frame. Robust steps give exact 0/1 flags.
     l2.units += pr.clamp01_units({"F": 1.0, "Rb": -1.0}, {"open": 1.0})
     for m, flag in (("E", "seen_eq"), ("S", "seen_semi"), ("R", "seen_bar")):
         l2.units += pr.clamp01_units({m: 1.0, "F": -1.0}, {flag: 1.0})
 
+    # Layer 3. Heads: pointers read at layer-2 markers (line start, innermost group, previous
+    # matches, frame operator, signs, precision digits). MLP: N and the three phase flags.
     l3 = b.at(3)
     l3.heads += [
+        # Ls = latest ']' as seen from the frame's '[' (the previous frame's ']', or BOS);
+        # the source line lies strictly between Ls and Le = F-1 (its '=').
         pr.gather_head("line start", {"F": 1.0}, "Ls", src="Rb"),
+        # p = latest '(' or ']' at Le: the innermost group's '(' (no '(' follows it), else Ls
         pr.gather_head("innermost group", pr.add({"F": 1.0}, pr.const(-1.0)), "p", src="Lg"),
+        # PM_c = latest c-match strictly before this position: the per-key pointer that
+        # next_match_head compares (parser layers 4-5)
         *(pr.gather_head(f"prev {c}", prev, f"PM_{c}", src=c) for c in NEXT_CLASSES),
         # The frame's own operator: the latest binary operator at the frame's '='. Stable even
         # when a frame body writes operators (a power frame writes "a*a^n").
         pr.gather_head("frame operator", {"E": 1.0}, "Pf", src="P"),
+        # neg = [end marker at S is '<']: the subtraction's result is negative (read by subtraction)
         pr.gather_head("borrow sign", {"S": 1.0}, "neg", src="is_lt"),
+        # sa = [byte after '[' is '-'], sb = [byte after the operator P is '-']: the operands' signs.
+        # Circuits work on magnitudes, fenced at F+sa and P+sb (FA, PB above).
         pr.gather_head("sign of a", pr.add({"F": 1.0}, pr.const(1.0)), "sa", src="is_minus"),
         pr.gather_head("sign of b", pr.add({"P": 1.0}, pr.const(1.0)), "sb", src="is_minus"),
+        # Nd_k = digit value (val) at Ptil + tN_k: the 10^k digit of N, 0 where N has no such place
         *(pr.gather_head(f"precision digit {k}", {"Ptil": 1.0, f"tN{k}": 1.0}, f"Nd{k}")
           for k in range(N_DIGITS)),
     ]
+    # N = has_til * sum_k 10^k Nd_k (0 without '~'); read by the parser's division pads (layer 14)
     l3.units += pr.times_flag_units({f"Nd{k}": 10.0 ** k for k in range(N_DIGITS)}, {"has_til": 1.0}, {"N": 1.0})
+    # Phases (exact: ReLUs of 0/1 flags); read by the parser's byte votes in layer 22.
     l3.units += [
         pr.relu_unit({"is_eq": 1.0, "open": -1.0}, {"phase1": 1.0},
                      label="'phase1': at a line-ending '=' with no frame open, so the next byte is '[' (start a new frame)"),
@@ -139,9 +175,14 @@ def build(b: ModelBuilder) -> None:
                      label="'phase4': frame closed and not on '=', so the model is rewriting the expression line after ']'"),
     ]
 
+    # Layer 4. Heads: (P-Fa)^2 for multiplication and the frame operator's one-hot type.
+    # MLP: the act_* routing flags, read by every gated operator-circuit unit (arith.py).
     l4 = b.at(4)
     l4.heads += [
+        # square table: pos2 gathered at x = P - (F+sa) is x^2, x = (digits of |a|) + 1
+        # (read by multiplication.py's S2)
         pr.gather_head("(P-Fa)^2", pr.add({"P": 1.0}, pr.scale(FA, -1.0)), "PF2", src="pos2"),
+        # typ_<op> = [byte at Pf is <op>]: one gather at Pf, a value entry per operator byte
         HeadSpec(
             name="frame operator type",
             query=[pr.scale({"Pf": 1.0}, 2 * pr.GATHER_BETA), pr.const(-pr.GATHER_BETA)],
@@ -151,6 +192,9 @@ def build(b: ModelBuilder) -> None:
     ]
     # Routing. For + and -, b's effective sign is sb XOR [op is -]: equal to sa -> add
     # magnitudes, different -> subtract them. Each case is one exact ReLU over 0/1 flags.
+    # A case is ReLU(plus|minus ± sa ± sb - c): +1 on a flag that must be 1, -1 on one that must
+    # be 0, c = 2 + (number of flags that must be 1); only the exact pattern reaches 1, others <= 0.
+    # work = open + seen_eq == 2 while the frame's working is being written (phase 3)
     work = {"open": 1.0, "seen_eq": 1.0}
     plus = pr.add(work, {"typ_add": 1.0})  # == 3 for a '+' frame
     minus = pr.add(work, {"typ_sub": 1.0})  # == 3 for a '-' frame

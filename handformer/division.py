@@ -74,11 +74,20 @@ def _ruler(name: str, x: dict, sx: dict, dst: str) -> HeadSpec:
 
 
 def builder() -> ModelBuilder:
+    """The long-division circuit at global layers 4..12, on private dims.
+
+    Grid geometry (L4-6), the next cell's operands (L7), the q_i vote (L8-9),
+    the grid digits / ',' / ';' (L10), then the answer copied from the q column
+    (L11-12). Writes D0..D9, emit_comma, work_end, emit_minus, frame_end; arith
+    gates those writes by act_div.
+    """
     lay = Layout()
     lay.add(*PRIVATE)
     b = ModelBuilder(lay)
     working = {"seen_semi": 1.0}
 
+    # Layer 4: squares (pos2 gathered at s, x, x+s, ...) for the products row*s, x*s, nA*s
+    # that place cells, and b_0 (B's units digit, at E-1) as a one-hot for M_k[0].
     l4 = b.at(4)
     l4.heads += [
         pr.gather_head("s^2", S_, "S2", src="pos2"),
@@ -103,9 +112,12 @@ def builder() -> ModelBuilder:
                           "carry); clamps to 0 ('=', M_0 = 0)"),
     ]
 
+    # Layer 5: row = floor(x/s) for the next cell, rowS = floor((x-1)/s) for this byte's own
+    # cell (ruler heads; they need only s^2 and s*x from layer 4).
     l5 = b.at(5)
     l5.heads += [_ruler("row = floor(x/s)", X, SX, "row"), _ruler("own row", XS, SXS, "rowS")]
 
+    # Layer 6: col = x - row*s (COL; COLS for this byte), then exact 0/1 region flags.
     l6 = b.at(6)
     l6.heads += [
         pr.gather_head("(row+s)^2", pr.add({"row": 1.0}, S_), "RS2", src="pos2"),
@@ -114,6 +126,9 @@ def builder() -> ModelBuilder:
         pr.gather_head("rowS^2", {"rowS": 1.0}, "RS2S", src="pos2"),
     ]
     row = {"row": 1.0}
+    # Next cell: rowle8 = [row <= 8] (multiples), row9 = the zero row, rowge10 = q|R rows,
+    # endrow = [row == 10 + nA] (the row after the last q, where ';' goes); col0/1/2 pick the
+    # q cell and R[0], R[1]; colsep = [col == s-1], the ',' closing a multiples row.
     l6.units += pr.clamp01_units(pr.add(pr.const(9.0), pr.scale(row, -1.0)), {"rowle8": 1.0})
     l6.units += pr.hat_units(row, 9.0, {"row9": 1.0})
     l6.units += pr.clamp01_units(pr.add(row, pr.const(-9.0)), {"rowge10": 1.0})
@@ -122,6 +137,8 @@ def builder() -> ModelBuilder:
     l6.units += pr.hat_units(COL, 1.0, {"col1": 1.0})
     l6.units += pr.hat_units(COL, 2.0, {"col2": 1.0})
     l6.units += pr.hat_units(pr.add(COL, pr.scale(S_, -1.0), pr.const(1.0)), 0.0, {"colsep": 1.0})
+    # This byte (S*, own row/col): which cells are comparison keys (L7 gt/lt, L8 dkey/rskey)
+    # and q cells for the answer start (L8 zq); Scolge1 = a digit cell, not the row start.
     l6.units += pr.clamp01_units(pr.add({"rowS": 1.0}, pr.const(-8.0)), {"Srowge9": 1.0})
     l6.units += pr.hat_units({"rowS": 1.0}, 9.0, {"Srow9": 1.0})
     l6.units += pr.clamp01_units(pr.add({"rowS": 1.0}, pr.const(-9.0)), {"Srowge10": 1.0})
@@ -137,6 +154,9 @@ def builder() -> ModelBuilder:
                           "fence, value 0"),
     ]
 
+    # Layer 7: gather the next cell's operands; cell c sits at position E+1+c and this byte at
+    # cell x-1, so pos - s is one row up and one column left of the next cell (R_{i-1}[j-1] = R'[j]),
+    # pos+1-col is this row's q cell, and a_i (row 9+i) is A's i-th digit at FA + i.
     l7 = b.at(7)
     l7.heads += [
         pr.gather_head("M_k[col]", {"E": 1.0, "tM0": 1.0}, "Mp0"),
@@ -152,10 +172,17 @@ def builder() -> ModelBuilder:
     # This remainder digit vs multiple k at the next row's alignment. Only remainder
     # cells (column >= 1) carry flags: the row-start cell is the comparison heads'
     # "all upper digits equal" fallback and must read gt = lt = 0.
+    # Byte R_{i-1}[c-1] at column c becomes R'_i[c] one row later, so it compares with M_k[c]
+    # (m_k): gt_k = [val - m_k >= 1], lt_k = [m_k - val >= 1]. rem_cell = -BIG*(1 - Scolge1)
+    # forces both to 0 at column 0. Read in L8 (dkey_k) and by L9's comparison heads.
     rem_cell = pr.add(pr.scale({"Scolge1": 1.0}, pr.BIG), pr.const(-pr.BIG))
     for k in K:
         l7.units += pr.clamp01_units(pr.add({"val": 1.0, f"m{k}": -1.0}, rem_cell), {f"gt{k}": 1.0})
         l7.units += pr.clamp01_units(pr.add({f"m{k}": 1.0, "val": -1.0}, rem_cell), {f"lt{k}": 1.0})
+    # M_k[col] = M_{k-1}[col] + B[col] + carry. The carry into col is recovered from the digit
+    # just written (this byte) and y = M_{k-1}[col-1] + B[col-1] (<= 18, carry-in <= 1):
+    # carry = [y >= 10] (gated to digit bytes: col 0 has no carry-in) + [y == 9 and this byte is 0].
+    # The +20 - 20*is0 shift moves y out of the hat's range unless this byte is '0'.
     y = {"Mp1": 1.0, "Bc1": 1.0}  # multiples: carry recovered from the previous output digit
     l7.units += pr.clamp01_units(pr.add(y, pr.const(-9.0), {"is_digit": pr.BIG}, pr.const(-pr.BIG)), {"carry": 1.0})
     l7.units += pr.hat_units(pr.add(y, {"is0": -20.0}, pr.const(20.0)), 9.0, {"carry": 1.0})
@@ -168,22 +195,31 @@ def builder() -> ModelBuilder:
                                            "(for the borrow)"))  # R'[j-1]: a_i when j-1 == 0
     l7.units += pr.times_flag_units({"ai": 1.0, "Rp1": -1.0}, {"col2": 1.0}, {"Rj1": 1.0})
 
+    # Layer 8: q*s squares (for M_q addresses), the key features of L9's latest heads
+    # (dkey_k, rskey, zq) and the units test c0_k = [a_i >= M_k[0]].
     l8 = b.at(8)
     l8.heads += [
         pr.gather_head("(q+s)^2", pr.add({"qv": 1.0}, S_), "QS2", src="pos2"),
         pr.gather_head("q^2", {"qv": 1.0}, "Q2", src="pos2"),
     ]
     key_base = pr.add(IN_WORK, {"is_digit": 1.0, "Srowge9": 1.0, "Scolge1": 1.0})  # == 4 on remainder digits
+    # dkey_k = pos on remainder digits (rows >= 9, col >= 1) that differ from M_k (gt_k or lt_k);
+    # rskey = pos on q cells (col 0, rows >= 9), the "all upper digits agree" fallback.
     for k in K:
         l8.units.append(pr.pos_if(pr.add(key_base, {f"gt{k}": 1.0, f"lt{k}": 1.0}), 5.0, f"dkey{k}"))
         m0 = {f"Bo{v}": float((k * v) % 10) for v in range(10)}  # M_k[0] = (k*b_0) mod 10
         l8.units += pr.clamp01_units(pr.add({"ai": 1.0}, pr.scale(m0, -1.0), pr.const(1.0)), {f"c0{k}": 1.0})
     l8.units.append(pr.pos_if(pr.add(IN_WORK, {"Scol0": 1.0, "Srowge9": 1.0}), 3.0, "rskey"))
+    # zq: the earliest nonzero q (rows >= 10) of the newest frame = the answer's first digit.
+    # The dummy tags row 9's q_0 cell at BIG*F - pos - BIG/2: below every real q of this frame,
+    # above all older frames, so with q = 0 the L9 head still has a definite in-frame target.
     l8.units.append(pr.newest_frame_earliest(pr.add(IN_WORK, {"Scol0": 1.0, "Srowge10": 1.0, "nz": 1.0}),
                                              4.0, "F", "zq"))
     dummy = pr.newest_frame_earliest(pr.add(IN_WORK, {"Scol0": 1.0, "Srow9": 1.0}), 3.0, "F", "zq")
     dummy.read = pr.add(dummy.read, pr.const(-pr.BIG / 2))  # loses to any real nonzero q of this frame
     l8.units.append(dummy)
+    # qs = q*s, q = this row's quotient digit (qv). M_q is multiples row q-1 and its digit j
+    # sits at column j, i.e. at E + (q-1)s + col, since R[j] is at col = j+1.
     qs = pr.product_form("QS2", "Q2", S2)
     l8.units += [  # M_q[j], M_q[j-1]; q = 0 clamps onto '=' (value 0)
         pr.relu_unit(pr.add(qs, pr.scale(S_, -1.0), COL), {"tMq": 1.0},
@@ -194,6 +230,10 @@ def builder() -> ModelBuilder:
                           "to 0 ('=')"),
     ]
 
+    # Layer 9: decide q_i = sum_k [R'_i >= M_k] in one pass, and the remainder's borrow.
+    # Querying from the top cell of row 8+i, head k reads the latest key <= the query: digits
+    # are LSB first, so that is the most significant differing digit of R' vs M_k, or (none
+    # differ) the previous row's q cell, whose gt = lt = 0. Older rows sit earlier and lose.
     l9 = b.at(9)
     for k in K:
         l9.heads.append(HeadSpec(
@@ -207,18 +247,27 @@ def builder() -> ModelBuilder:
         pr.gather_head("M_q[j-1]", {"E": 1.0, "tMq1": 1.0}, "MqJ1"),
         pr.latest_head("first nonzero q", "zq", "Zq"),
     ]
+    # The vote: GT_k, LT_k are exclusive 0/1, so GT_k + ReLU(c0_k - GT_k - LT_k) = [R' >= M_k]
+    # exactly; the nine sum into qd, which L10 writes as the q digit (0..9).
     for k in K:  # [R' >= M_k] = top differing digit greater, or all equal and a_i >= M_k[0]
         l9.units.append(pr.relu_unit({f"GT{k}": 1.0}, {"qd": 1.0},
                                         label=f"q += 1 if R' > M_{k} at their top differing digit (GT{k})"))
         l9.units.append(pr.relu_unit({f"c0{k}": 1.0, f"GT{k}": -1.0, f"LT{k}": -1.0}, {"qd": 1.0},
                                         label=f"q += 1 if all upper digits of R' and M_{k} agree (GT{k}=LT{k}=0) "
                                               f"and units digit a_i >= M_{k}[0] (c0{k})"))
+    # R_i[j] = R'[j] - M_q[j] - borrow. With yb = R'[j-1] - M_q[j-1]: borrow = [yb <= -1]
+    # + [yb == 0 and the digit just written is 9] (the +20 - 20*is9 shift). not_j0 = -BIG*col1:
+    # no borrow into j = 0 (this byte is then the q digit, not a remainder digit).
     yb = {"Rj1": 1.0, "MqJ1": -1.0}  # remainder: borrow recovered from the previous output digit
     not_j0 = pr.scale({"col1": 1.0}, -pr.BIG)
     l9.units += pr.clamp01_units(pr.add(pr.scale(yb, -1.0), not_j0), {"br": 1.0})
     l9.units += pr.hat_units(pr.add(yb, {"is9": -20.0}, pr.const(20.0), not_j0), 0.0, {"br": 1.0})
+    # found_q = [Zq > W + 9s]: the first-nonzero-q head landed past row 9's dummy, i.e. q != 0.
     l9.units += pr.clamp01_units(pr.add({"Zq": 1.0}, pr.scale(W, -1.0), pr.scale(S_, -9.0)), {"found_q": 1.0})
 
+    # Layer 10: write the grid. Each digit source is gated to its region (before ';'):
+    # multiples (M_{k-1} + B + carry) mod 10, row 9 zeros, q_i = qd at col 0, and
+    # R_i[j] = (R'[j] - M_q[j] - borrow) mod 10; then ',' / ';', the sign and the answer start.
     l10 = b.at(10)
     l10.units += cm.ramp_mod10_units(pr.add({"Mp0": 1.0, "Bc": 1.0, "carry": 1.0}), 0, 19,
                                      {"rowle8": 1.0, "colsep": -1.0, "seen_semi": -1.0}, 1.0)
@@ -237,9 +286,12 @@ def builder() -> ModelBuilder:
     l10.units.append(pr.relu_unit(LQ, {"start": 1.0},
                                   label="default answer start: position of the last quotient digit, "
                                         "W + (9 + len A)s (used when the quotient is 0)"))
+    # start = LQ + (Zq - LQ)*found_q: the first nonzero q digit, else the last q digit (a '0').
     l10.units += pr.times_flag_units(pr.add({"Zq": 1.0}, pr.scale(LQ, -1.0)), {"found_q": 1.0}, {"start": 1.0})
 
     t = {"pos": 1.0, "S": -1.0, "sgn": -1.0}  # answer digit index after an optional '-'
+    # Layer 11: answer address src = start + t*s; ']' once src passes the last q digit (LQ);
+    # '-' right after ';' when sgn (control logit 20 beats the digit logit 10).
     l11 = b.at(11)
     l11.heads += [
         pr.gather_head("(t+s)^2", pr.add(t, S_), "TS2", src="pos2"),
@@ -252,6 +304,7 @@ def builder() -> ModelBuilder:
     l11.units += pr.clamp01_units(pr.gated(pr.add(src, pr.scale(LQ, -1.0)), working), {"frame_end": 1.0})
     l11.units.append(pr.relu_unit({"sgn": 1.0, "is_semi": 1.0, "one": -1.0}, {"emit_minus": 1.0}))
 
+    # Layer 12: copy the q digit at src as the next answer digit (after ';' only).
     l12 = b.at(12)
     l12.heads.append(pr.gather_head("answer digit", {"src": 1.0}, "Av"))
     l12.units += cm.ramp_mod10_units({"Av": 1.0}, 0, 9, working, 1.0)

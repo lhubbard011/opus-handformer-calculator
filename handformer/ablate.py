@@ -51,7 +51,24 @@ class Knockout:
 
 
 def apply(model: Transformer, ko: Knockout) -> Transformer:
-    """A new Transformer with the knocked-out parts writing nothing (``model`` is untouched)."""
+    """A new Transformer with the knocked-out parts writing nothing (``model`` is untouched).
+
+    Only write maps change, so a knockout removes a part's contribution to the
+    residual stream and nothing else:
+
+    * head (l, h): W_O = 0, so its term attn @ (x W_V) W_O is 0; W_Q/W_K are
+      kept, so its attention pattern is still computed and can be shown;
+    * unit (l, u): row u of W_out = 0, so ReLU(x W_in)[u] still fires but adds 0;
+    * dim d: column d of the embedding, of every head's W_O and of every W_out
+      is 0, so x[d] = 0 at every position and every layer; readers of d
+      (W_Q, W_K, W_V, W_in, unembedding) are unchanged and simply read 0.
+
+    Example: knocking out dim ``act_add`` silences every gated output unit of
+    the add circuit (``arith._Namespace.unit``). Unknown heads, units or dims
+    raise ValueError; ``pos``/``pos2`` cannot be knocked out (see module doc).
+    An empty knockout returns ``model`` itself, not a copy. Unchanged matrices
+    are shared with ``model``, not copied.
+    """
     if not ko:
         return model
     n_layers = len(model.layers)

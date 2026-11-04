@@ -41,7 +41,14 @@ OP_OUTPUTS = {
 
 
 class _Namespace:
-    """Prefix a circuit's private dims; gate its output-writing units."""
+    """Prefix a circuit's private dims; gate its output-writing units.
+
+    Each operator circuit is built standalone (its own ``Layout``). Merging
+    renames every dim in ``private`` to ``<ns>.<dim>`` (``mul.J``) and leaves
+    every other name alone, so the circuit's reads of shared dims (input
+    features, frame dims such as ``act_mul``) bind to the shared copies and its
+    writes into ``OP_OUTPUTS`` / ``expr.OUT_DIMS`` land on the common outputs.
+    """
 
     def __init__(self, ns: str, private: set[str]) -> None:
         self.ns, self.private = ns, private
@@ -63,6 +70,20 @@ class _Namespace:
         )
 
     def unit(self, u: UnitSpec) -> UnitSpec:
+        """Rename ``u`` into the namespace and, if it writes an output, gate it.
+
+        This is where gating replaces operator dispatch. Nothing chooses which
+        circuit runs: all five compute at every position. A unit that writes
+        any output dim (a digit ``D<d>``, a control byte, an ``expr`` output)
+        gets ``pr.gated(read, act_<ns>)``, i.e. ReLU(read - BIG*(1 - act_<ns>)).
+        ``act_<ns>`` is an exact 0/1 flag from the frame locator and every
+        ungated input is below BIG, so with the flag off the unit outputs
+        exactly 0 and the circuit adds nothing to the logits; with it on the
+        unit is unchanged. Heads and internal units stay ungated: they only
+        write the circuit's private dims, which nothing outside reads.
+        The added ``("silent_unless", act_<ns>)`` claim is checked by
+        tests/test_claims.py; the label tells the visualizer reader.
+        """
         read, write = self.form(u.read), self.form(u.write)
         label, claims = u.label, u.claims
         if any(d in OP_OUTPUTS or d in expr.OUT_DIMS for d in write):
@@ -80,6 +101,10 @@ def builder() -> ModelBuilder:
     lay.add(*frame.DIMS, *expr.DIMS)
     shared = set(lay.names) | set(OP_OUTPUTS) | set(expr.OUT_DIMS)
     for ns, cb in circuits.items():
+        # _Namespace.dim prefixes every name in the circuit's layout. If that layout
+        # held a shared name (``one``, ``neg``, an output dim), the circuit's reads and
+        # writes of it would go to a private copy instead: never written (reads 0)
+        # or never read (writes lost), with no error. So refuse it here.
         clash = shared & set(cb.layout.names)
         if clash:  # a private name equal to a shared dim would silently capture every use of it
             raise ValueError(f"circuit {ns} declares private dims that shadow shared dims: {sorted(clash)}")

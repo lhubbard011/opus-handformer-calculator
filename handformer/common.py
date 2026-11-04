@@ -54,6 +54,20 @@ def add_input_dims(lay: Layout) -> None:
 
 
 def embed(b: ModelBuilder) -> None:
+    """Write the 256-row token embedding: each byte's row is its input features.
+
+    Every byte sets ``one`` = 1 (the bias channel: the model has no biases, so
+    every constant is a coefficient on ``one``). Digits add ``val`` = d, the
+    one-hot ``oh<d>`` and the flags ``is_digit``, ``nz``, ``n9``, ``is0``,
+    ``is9``. Each marker byte sets its one flag; '<' sets both ``is_semi`` (it
+    ends an op's working like ';') and ``is_lt`` (the result is negative).
+    Each operator sets its own flag plus ``is_opany``. Any other byte is just
+    ``one``. ``embed_byte`` adds, so rows accumulate across these loops.
+    Example: '7' -> one=1, val=7, oh7=1, is_digit=1, nz=1, n9=1.
+    ``pos`` and ``pos2`` are not here: the forward pass adds them from the
+    integer index (``Transformer.positional``). Unary and binary '-' share one
+    row; frame layer 1 tells them apart by the previous byte.
+    """
     for byte in range(VOCAB):
         b.embed_byte(byte, {"one": 1.0})
     for d in range(10):
@@ -108,6 +122,18 @@ def ramp_mod10_units(x: Form, lo: int, hi: int, gate: Form | None, on_when: floa
 
     hat_k(x) = R(k-1) - 2R(k) + R(k+1) with R(c) = ReLU(x - c); summing hats
     by residue class means each ramp is one unit with a combined write.
+
+    For integer x, hat_k(x) is 1 at x = k and 0 elsewhere (at x >= k+1 the
+    three ramps cancel: (x-k+1) - 2(x-k) + (x-k-1) = 0). So ``D<x mod 10>``
+    gets exactly 1 and the other nine 0; an x outside [lo, hi] writes nothing.
+    Ramp c serves the hats k = c-1, c, c+1, so one unit writes up to three D
+    dims and the whole lookup costs at most hi - lo + 3 units, not 3 per value.
+    Example: x = A + B + carry in 0..19 (addition): x = 13 -> D3 = 1.
+    Limit: x must be an exact integer; hats are triangles, so an error e on x
+    leaks e into a neighbouring digit (unlike ``clamp01_units``, not robust).
+    ``gate`` / ``on_when`` silence every ramp unless the gate holds
+    (``pr.gated``); the D dims are output dims, so this is how a circuit
+    keeps its digits off at positions where it should not write.
     """
     coefs: dict[int, dict[str, float]] = {}
     for k in range(lo, hi + 1):

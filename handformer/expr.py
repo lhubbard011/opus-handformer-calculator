@@ -72,6 +72,7 @@ BSTART: Form = {"o": 1.0, "sb_x": 1.0}  # byte before b's digits (o, or b's sign
 
 
 def _copy_head(name: str, src: Form, prefix: str) -> HeadSpec:
+    """Gather at position ``src``: ``<prefix>_<d>`` = [byte at src is d] for every alphabet byte d."""
     return HeadSpec(
         name=name,
         query=[pr.scale(src, 2 * pr.GATHER_BETA), pr.const(-pr.GATHER_BETA)],
@@ -86,15 +87,21 @@ def _lt(x: Form, y: Form, dst: str, sign: float = 1.0) -> list:
 
 
 def build(b: ModelBuilder) -> None:
+    """Write the parser and rewriter into layers 4-22: choose the redex (p, c, o, a, b), its
+    decimal pads and result format, then the frame copy (layer 17) and line rewrite (layer 22)."""
     neg = lambda f: pr.scale(f, -1.0)  # noqa: E731
 
     # ---------------------------------------------------------- redex search
+    # Layer 4 heads (frame's PM_c, p are from layer 3): PM2_c = PM_c^2 (square table: pos2 at
+    # PM_c) and Lt_c = latest c-match at or before p, the key and query terms of layer 5.
     l4 = b.at(4)
     for c in ("Lrp", "Lmul", "Ladd", "Lnd"):
         l4.heads.append(pr.gather_head(f"pm^2 {c}", {f"PM_{c}": 1.0}, f"PM2_{c}", src="pos2"))
     for c in ("Lrp", "Lmul", "Ladd"):
         l4.heads.append(pr.gather_head(f"latest {c} at p", {"p": 1.0}, f"Lt_{c}", src=c))
 
+    # Layer 5. Heads: the first ')', '*'/'/', '+'/binary '-' after p (next_match: the one matching
+    # key whose PM_c == Lt_c), each with a found flag (fc, fm, fa; ~0 if none). MLP: c.
     l5 = b.at(5)
     l5.heads += [
         pr.next_match_head("first ) after p", "PM_Lrp", "PM2_Lrp", {"is_rpar": 1.0},
@@ -106,11 +113,15 @@ def build(b: ModelBuilder) -> None:
     ]
     # c = min(first ')' after p, Le): a ')' beyond the line (e.g. inside a frame body that
     # wrote "(a*a)^n") must not end the group. fc * ReLU(x) is one ReLU silenced by BIG.
+    # c = ReLU(Le) - ReLU(Le - c_raw - BIG(1 - fc)); Le > 0, so the first is just Le.
+    # Read by layer 6 (opw at c-1, use_mul) and layer 9 (e2 = [b_hi == c]).
     l5.units.append(pr.relu_unit(LE, {"c": 1.0},
                                  label="'c' base: Le (the line's '=' minus 1); the paired unit subtracts the excess when a ')' before Le is found"))
     l5.units.append(pr.relu_unit(pr.add(LE, {"c_raw": -1.0, "fc": pr.BIG}, pr.const(-pr.BIG)), {"c": -1.0},
                                  label="'c' correction: minus ReLU(Le - c_raw) when a ')' was found (fc), giving c = min(c_raw, Le); silenced by BIG otherwise"))
 
+    # Layer 6. Head: opw = latest '^' before c. MLP: use_mul = [fm AND om < c], i.e.
+    # [c - om + BIG(fm - 1) >= 1] (no '*'/'/' found: -BIG keeps it 0); pw = [opw > p].
     l6 = b.at(6)
     l6.heads.append(pr.gather_head("latest ^ before c", pr.add({"c": 1.0}, pr.const(-1.0)), "opw", src="Lpow"))
     l6.units += pr.clamp01_units(pr.add({"c": 1.0, "om": -1.0}, pr.scale({"fm": 1.0}, pr.BIG),
@@ -119,6 +130,7 @@ def build(b: ModelBuilder) -> None:
 
     # o: latest '^' in the group (right-associative), else first * or /, else first + or -.
     # Positions are >= 0, so each choice is one ReLU silenced by BIG unless selected.
+    # Layer 7 MLP: o, the redex operator (exactly one choice passes); read from layer 8 on.
     l7 = b.at(7)
     l7.units += [
         pr.relu_unit({"oa": 1.0, "use_mul": -pr.BIG, "pw": -pr.BIG}, {"o": 1.0},
@@ -130,12 +142,18 @@ def build(b: ModelBuilder) -> None:
     ]
 
     # ---------------------------------------------------------- operands
+    # Layer 8. Heads read around o: a's fence, b's sign, the operator type, and the latest binary
+    # operators for cont. MLP: e3 and cont_raw.
     l8 = b.at(8)
     l8.heads += [
+        # a_lo = latest non-number byte before o: the byte before a, or a's own '-'
         pr.gather_head("a fence", pr.add({"o": 1.0}, pr.const(-1.0)), "a_lo", src="Lnd"),
+        # sb_x = [byte after o is '-']: b is signed
         pr.gather_head("sign of b?", pr.add({"o": 1.0}, pr.const(1.0)), "sb_x", src="is_minus"),
+        # LopLe, LopO = latest binary operator in the line / before o (cont, below)
         pr.gather_head("latest op at Le", LE, "LopLe", src="P"),
         pr.gather_head("latest op before o", pr.add({"o": 1.0}, pr.const(-1.0)), "LopO", src="P"),
+        # op_div, op_pow, op_md = [byte at o is '/'], ['^'], ['*' or '/']
         pr.gather_head("redex is a division?", {"o": 1.0}, "op_div", src="is_slash"),
         pr.gather_head("redex is a power?", {"o": 1.0}, "op_pow", src="is_caret"),
         HeadSpec(name="redex is * or /?",
@@ -143,51 +161,77 @@ def build(b: ModelBuilder) -> None:
                  key=[{"pos": 1.0}, {"pos2": 1.0}],
                  value={"is_star": {"op_md": 1.0}, "is_slash": {"op_md": 1.0}}),
     ]
+    # e3 = [p > Ls]: the group is a real '(' rather than the line start
     l8.units += pr.clamp01_units({"p": 1.0, "Ls": -1.0}, {"e3": 1.0})
+    # cont_raw = [LopLe > o] + [LopO > Ls]: another operator after or before o in the line
+    # (the sum can be 2; layer 9 clamps it to the 0/1 cont)
     l8.units += pr.clamp01_units({"LopLe": 1.0, "o": -1.0}, {"cont_raw": 1.0})
     l8.units += pr.clamp01_units({"LopO": 1.0, "Ls": -1.0}, {"cont_raw": 1.0})
 
+    # Layer 9. Heads: a's sign, b's end, a's '.', and two facts about the frame's result.
+    # MLP: e1, e2 (the redex fills the group), cont, has_a.
     l9 = b.at(9)
     l9.heads += [
+        # sa_x = [byte at a_lo is a unary '-']: a is signed, its fence is AF = a_lo - sa_x
         pr.gather_head("sign of a?", {"a_lo": 1.0}, "sa_x", src="is_unary"),
+        # b_hi = first non-number byte after BSTART = o + sb_x. BSTART is itself a non-number
+        # (o, or b's '-'), so it is the "latest match at or before t" next_match needs.
         pr.next_match_head("b fence", "PM_Lnd", "PM2_Lnd", ND, BSTART, "b_hi"),
+        # a_dot = latest '.' before o; it is a's '.' iff a_dot > a_lo
         pr.gather_head("a's '.'", pr.add({"o": 1.0}, pr.const(-1.0)), "a_dot", src="Ldot"),
     ]
+    # e1 = [AF == p]: signed a starts right after the group start; e2 = [b_hi == c]: b ends at it
     l9.units += pr.hat_units(pr.add(AF, {"p": -1.0}), 0.0, {"e1": 1.0})
     l9.units += pr.hat_units({"b_hi": 1.0, "c": -1.0}, 0.0, {"e2": 1.0})
+    # Read at Rb-1, the frame result's last byte (used by the rewrite after ']'):
+    # res_op = latest binary operator up to there (in the result iff > S), res_wrap = [it is ')'].
     l9.heads += [
         pr.gather_head("operator inside the result?", pr.add({"Rb": 1.0}, pr.const(-1.0)), "res_op", src="P"),
         pr.gather_head("result ends in ')'?", pr.add({"Rb": 1.0}, pr.const(-1.0)), "res_wrap", src="is_rpar"),
     ]
     l9.units += pr.clamp01_units({"cont_raw": 1.0}, {"cont": 1.0})
+    # has_a = [a_dot - a_lo >= 1]; -BIG*op_pow forces 0 for '^', whose frame copies the base
+    # verbatim, '.' included (no decimal normalisation for powers)
     l9.units += pr.clamp01_units({"a_dot": 1.0, "a_lo": -1.0, "op_pow": -pr.BIG}, {"has_a": 1.0})  # '.' in a
 
+    # Layer 10. Heads: rneg = [byte after S is '-'] (the frame's result is negative); b_dot =
+    # latest '.' before b_hi, b's '.' iff b_dot > BSTART. MLP: res_expr, frac_a.
     l10 = b.at(10)
     l10.heads += [
         pr.gather_head("result negative?", pr.add({"S": 1.0}, pr.const(1.0)), "rneg", src="is_minus"),
         pr.gather_head("b's '.'", pr.add({"b_hi": 1.0}, pr.const(-1.0)), "b_dot", src="Ldot"),
     ]
+    # res_expr = [res_op > S]: the result holds an operator, so it is an expression (power frames)
     l10.units += pr.clamp01_units({"res_op": 1.0, "S": -1.0}, {"res_expr": 1.0})
     # (drop also needs res_expr; both are only read by the rewrite, from layer 11 on)
+    # frac_a = has_a * (o - 1 - a_dot): digits after a's '.', 0 without one
     l10.units += pr.times_flag_units(pr.add({"o": 1.0, "a_dot": -1.0}, pr.const(-1.0)), {"has_a": 1.0},
                                      {"frac_a": 1.0})
 
     # The group's parentheses go when the redex is the whole group and the result is a plain
     # number, or is itself fully parenthesised (ends in ')': power expansions "(a*a^n)", "(1/a^n)").
+    # Layer-11 MLP: drop = ReLU(e1+e2+e3 - res_expr + res_wrap - 2). (res_expr, res_wrap) is (0,0)
+    # for a number, (1,1) for a ')'-ended expression: 1 iff e1=e2=e3=1. (1,0) keeps it <= 0.
     b.at(11).units.append(pr.relu_unit({"e1": 1.0, "e2": 1.0, "e3": 1.0, "res_expr": -1.0, "res_wrap": 1.0,
                                         "one": -2.0}, {"drop": 1.0},
                                        label="'drop': redex is the whole group (e1,e2,e3) AND result is a plain number or ends in ')', so the parentheses go too"))
+    # A..B = the bytes the result replaces: AF+1..b_hi-1, or p..c on drop (then AF = p, b_hi = c)
     A = pr.add(AF, {"drop": -1.0}, pr.const(1.0))
     B = pr.add({"b_hi": 1.0, "drop": 1.0}, pr.const(-1.0))
 
     # Double negation: a negative result replacing bytes right after a unary '-'
     # ("-(1-4)", "2*-(1-4)") drops both signs.
+    # Layer 11 (also holds drop). Head: Lnzr = latest nonzero digit up to Rb-1 (end of result).
+    # MLP: has_b = [b_dot > BSTART] (forced 0 for '^', as has_a); found_nz = [Lnzr > S + rneg]:
+    # a nonzero digit lies after the sign, so the result is nonzero.
     l11 = b.at(11)
     l11.heads.append(
         pr.gather_head("result's last nonzero digit", pr.add({"Rb": 1.0}, pr.const(-1.0)), "Lnzr", src="Lnz"))
     l11.units += pr.clamp01_units(pr.add({"b_dot": 1.0, "op_pow": -pr.BIG}, neg(BSTART)), {"has_b": 1.0})
     l11.units += pr.clamp01_units({"Lnzr": 1.0, "S": -1.0, "rneg": -1.0}, {"found_nz": 1.0})
 
+    # Layer 12. Head: prevA_unary = [byte at A-1 is a unary '-']. MLP: cancel = prevA_unary AND
+    # rneg, cont2, frac_b = has_b * (b_hi - 1 - b_dot).
     l12 = b.at(12)
     l12.heads.append(pr.gather_head("unary '-' before A?", pr.add(A, pr.const(-1.0)), "prevA_unary", src="is_unary"))
     l12.units.append(pr.relu_unit({"prevA_unary": 1.0, "rneg": 1.0, "one": -1.0}, {"cancel": 1.0},
@@ -198,6 +242,7 @@ def build(b: ModelBuilder) -> None:
                                      {"frac_b": 1.0})
 
     # ---------------------------------------------------------- decimal geometry
+    # Layer 13 MLP: raw alignment pads, the zeros that give a and b equal fraction lengths.
     l13 = b.at(13)
     l13.units += [
         pr.relu_unit({"frac_b": 1.0, "frac_a": -1.0}, {"pad_a_raw": 1.0},
@@ -206,6 +251,9 @@ def build(b: ModelBuilder) -> None:
                      label="'pad_b_raw' = ReLU(frac_a - frac_b): zeros to append to b so its fraction lines up with a's (pair of pad_a_raw)"),
     ]
 
+    # Layer 14 MLP: per-operator pads and f_res (fractional digits of the result).
+    #   + -: pads = raw pads, f_res = max(frac_a, frac_b)    *: no pads, f_res = frac_a + frac_b
+    #   /: pad_a = frac_b + N, pad_b = frac_a, f_res = N     ^: has_a = has_b = 0, so all are 0
     l14 = b.at(14)
     l14.units += [
         pr.relu_unit(pr.gated({"pad_a_raw": 1.0}, {"op_md": 1.0}, 0.0), {"pad_a": 1.0},
@@ -215,15 +263,21 @@ def build(b: ModelBuilder) -> None:
         pr.relu_unit({"frac_a": 1.0, "pad_a_raw": 1.0}, {"f_res": 1.0},
                      label="'f_res' base: frac_a + ReLU(frac_b - frac_a) = max(frac_a, frac_b), the result's fraction digits for + and -"),  # max(frac_a, frac_b)
     ]
+    # * and /: f_res += frac_b - pad_a_raw, turning max(frac_a, frac_b) into frac_a + frac_b
     l14.units += pr.times_flag_units({"frac_b": 1.0, "pad_a_raw": -1.0}, {"op_md": 1.0}, {"f_res": 1.0})
     # a/b: the frame holds a*10^(frac_b+N) / b*10^frac_a, so the integer quotient has N fractional digits
     l14.units += pr.times_flag_units({"frac_b": 1.0, "N": 1.0}, {"op_div": 1.0}, {"pad_a": 1.0})
     l14.units += pr.times_flag_units({"frac_a": 1.0}, {"op_div": 1.0}, {"pad_b": 1.0})
+    # /: f_res += N - frac_a - frac_b, so f_res = N
     l14.units += pr.times_flag_units({"N": 1.0, "frac_a": -1.0, "frac_b": -1.0}, {"op_div": 1.0}, {"f_res": 1.0})
 
     # frame copy segments, t = q - F
+    # t = bytes of the frame copied so far (the query at '[' predicts the first). Segments by t:
+    # [0,T1) signed a without '.', [T1,T2) pad_a zeros, T2 the operator, [T3,T4) signed b
+    # without '.', [T4,T5) pad_b zeros, then '=' at t = T5.
     t = {"pos": 1.0, "F": -1.0}
     la_ = pr.add({"o": 1.0, "has_a": -1.0}, neg(AF), pr.const(-1.0))  # signed a without '.'
+    # lb_ = b_hi - o - 1 - has_b: signed b without '.'
     lb_ = pr.add({"b_hi": 1.0, "o": -1.0, "has_b": -1.0}, pr.const(-1.0))
     T1 = la_
     T2 = pr.add(T1, {"pad_a": 1.0})
@@ -232,6 +286,8 @@ def build(b: ModelBuilder) -> None:
     T5 = pr.add(T4, {"pad_b": 1.0})
     u = pr.add(t, neg(T3))  # index inside b's segment
 
+    # Layer 15 MLP: tzx; segment flags as differences of robust steps [t < T_j]
+    # (e.g. inPA = [t < T2] - [t < T1]); end2 = [t == T5]; the '.' skips.
     l15 = b.at(15)
     l15.units.append(pr.relu_unit({"Rb": 1.0, "Lnzr": -1.0, "f_res": -1.0, "one": -1.0},
                                   {"tzx": 1.0},
@@ -243,14 +299,21 @@ def build(b: ModelBuilder) -> None:
     l15.units += _lt(t, T5, "inPB") + _lt(t, T4, "inPB", -1.0)
     l15.units += pr.hat_units(pr.add(t, neg(T5)), 0.0, {"end2": 1.0})
     # skip the operand's '.': from its offset on, read one byte further
+    # skipA = has_a AND [AF+1+t >= a_dot]; skipB = has_b AND [o+1+u >= b_dot]
+    # (gated adds -BIG(1 - has_x), so no '.' means no skip)
     l15.units += pr.clamp01_units(pr.gated(pr.add(t, {"a_dot": -1.0}, AF, pr.const(2.0)), {"has_a": 1.0}),
                                   {"skipA": 1.0})
     l15.units += pr.clamp01_units(pr.gated(pr.add(u, {"b_dot": -1.0, "o": 1.0}, pr.const(2.0)),
                                            {"has_b": 1.0}), {"skipB": 1.0})
 
+    # Layer 16 MLP: tz and src2, the frame copy's source position (read by the layer-17 head).
     l16 = b.at(16)
+    # tzraw = Rb - 1 - Lnzr: the result's trailing zeros. tz = found_nz * (tzraw - tzx)
+    # = min(tzraw, f_res): only fractional zeros are stripped; 0 for a zero result.
     tzraw = pr.add({"Rb": 1.0, "Lnzr": -1.0}, pr.const(-1.0))
     l16.units += pr.times_flag_units(pr.add(tzraw, {"tzx": -1.0}), {"found_nz": 1.0}, {"tz": 1.0})
+    # src2 = inA*(AF+1+t+skipA) + atOp*o + inB*(o+1+u+skipB); 0 in the pads, whose zeros are
+    # written directly in layer 22
     src_a = pr.add(AF, t, {"skipA": 1.0}, pr.const(1.0))
     src_b = pr.add({"o": 1.0, "skipB": 1.0}, u, pr.const(1.0))
     l16.units += pr.times_flag_units(src_a, {"inA": 1.0}, {"src2": 1.0})
@@ -258,19 +321,26 @@ def build(b: ModelBuilder) -> None:
     l16.units += pr.times_flag_units(src_b, {"inB": 1.0}, {"src2": 1.0})
 
     # ---------------------------------------------------------- result formatting
+    # The result S+1..Rb-1 is an optional '-' then m digits; the rewrite writes the sign (rs),
+    # wd = max(m', f'+1) digits left-padded with zeros, with '.' before the last f'.
     rs = {"rneg": 1.0, "cancel": -1.0}  # sign byte kept in the rewrite
     m = pr.add({"Rb": 1.0, "S": -1.0, "rneg": -1.0}, pr.const(-1.0))  # result digits
     mp = pr.add(m, {"tz": -1.0})  # digits after stripping trailing zeros
 
+    # Layer 17. Head: frame copy, Y2_d = [byte at src2 is d]. MLP: fp and til_line.
     l17 = b.at(17)
     l17.heads.append(_copy_head("frame copy", {"src2": 1.0}, "Y2"))
+    # fp = f' = found_nz * (f_res - tz): fraction digits left after stripping; 0 for a zero result
     l17.units += pr.times_flag_units({"f_res": 1.0, "tz": -1.0}, {"found_nz": 1.0}, {"fp": 1.0})
     # the prompt line carries "~N" after the expression; the rewrite does not copy it
+    # til_line = [Ptil > Ls]: the '~' lies in the source line, so this is the prompt line
     l17.units += pr.clamp01_units({"Ptil": 1.0, "Ls": -1.0}, {"til_line": 1.0})
 
+    # Layer 18 MLP: Lend, the result width wd and dotf = [f' >= 1] (the result has a '.').
     l18 = b.at(18)
     l18.units.append(pr.relu_unit(LE, {"Lend": 1.0},
                                   label="'Lend' base: Le, where the suffix copy stops; the prompt line's '~N' correction is added next"))  # where the line's suffix copy stops
+    # Lend += til_line * (Ptil - F + 1) = til_line * (Ptil - Le): Lend = Ptil on the prompt line
     l18.units += pr.times_flag_units({"Ptil": 1.0, "F": -1.0, "one": 1.0}, {"til_line": 1.0}, {"Lend": 1.0})
     l18.units += [  # width of the zero-padded digit string: max(m', f'+1)
         pr.relu_unit({"fp": 1.0, "one": 1.0}, {"wd": 1.0},
@@ -280,14 +350,21 @@ def build(b: ModelBuilder) -> None:
     ]
     l18.units += pr.clamp01_units({"fp": 1.0}, {"dotf": 1.0})
 
+    # Rewrite regions, indexed by r = pos - Rb (bytes of the new line written so far):
+    # prefix n1 = |Ls+1..A-1| less the cancelled '-' at A-1, result n2 = sign + wd digits + '.',
+    # suffix n3 = |B+1..Lend-1|.
     n1 = pr.add(A, {"Ls": -1.0, "cancel": -1.0}, pr.const(-1.0))
     n2 = pr.add(rs, {"wd": 1.0, "dotf": 1.0})
     n3 = pr.add({"Lend": 1.0}, neg(B), pr.const(-1.0))
     r = {"pos": 1.0, "Rb": -1.0}
     ur = pr.add(r, neg(n1))  # index inside the result segment
     v = pr.add(ur, neg(rs))  # index inside the number (after its sign)
+    # intlen = wd - f': digits before the '.'
     intlen = {"wd": 1.0, "fp": -1.0}
 
+    # Layer 19 MLP: cumulative region flags in1 = [r < n1], in12 = [r < n1+n2], in123, end4 =
+    # [r == n1+n2+n3]; in the result: isSign = [ur == 0] if rs, isDot = [v == intlen] if dotf,
+    # afterdot = [v > intlen] if dotf (gated: -BIG unless the flag is 1).
     l19 = b.at(19)
     l19.units += _lt(r, n1, "in1")
     l19.units += _lt(r, pr.add(n1, n2), "in12")
@@ -298,11 +375,16 @@ def build(b: ModelBuilder) -> None:
     l19.units += pr.clamp01_units(pr.gated(pr.add(v, neg(intlen)), {"dotf": 1.0}), {"afterdot": 1.0})
 
     k = pr.add(v, {"afterdot": -1.0})  # index into the zero-padded digit string
+    # in_res = in12 - in1: inside the result segment
     in_res = {"in12": 1.0, "in1": -1.0}
+    # Layer 20 MLP: padzero = [k < wd - mp] on a digit slot of the result: a left-pad zero.
+    # off = -BIG unless in_res = 1 and isSign = isDot = 0.
     l20 = b.at(20)
     off = pr.add(pr.scale(in_res, pr.BIG), {"isSign": -pr.BIG, "isDot": -pr.BIG}, pr.const(-pr.BIG))
     l20.units += pr.clamp01_units(pr.add({"wd": 1.0}, neg(mp), neg(k), off), {"padzero": 1.0})
 
+    # Layer 21 MLP: src4, the rewrite's source position (read by the layer-22 head):
+    # prefix Ls+1+r; result digit S+rneg+1 + (k - (wd - mp)); suffix B+1 + (r - n1 - n2).
     l21 = b.at(21)
     resdig = pr.add(in_res, {"isSign": -1.0, "isDot": -1.0, "padzero": -1.0})  # copied result digit
     src_res = pr.add({"S": 1.0, "rneg": 1.0, "wd": -1.0}, k, mp, pr.const(1.0))
@@ -312,8 +394,12 @@ def build(b: ModelBuilder) -> None:
                                      {"in123": 1.0, "in12": -1.0}, {"src4": 1.0})
 
     # ---------------------------------------------------------- outputs
+    # Layer 22. Head: rewrite copy, Y4_d = [byte at src4 is d]. MLP: the byte votes, each an AND
+    # ReLU(byte + phase + region - 2), or a fixed byte ('[', '0', '-', '.', '=', newline) per phase.
     l22 = b.at(22)
     l22.heads.append(_copy_head("rewrite copy", {"src4": 1.0}, "Y4"))
+    # copy regions (disjoint flags, so each sum is 0/1): frame copy a, operator, b;
+    # rewrite prefix, suffix (in123 - in12), or a copied result digit
     copy2 = {"inA": 1.0, "atOp": 1.0, "inB": 1.0}
     copy4 = pr.add({"in1": 1.0, "in123": 1.0, "in12": -1.0}, resdig)
     for d in NAMES.values():
@@ -342,6 +428,8 @@ def build(b: ModelBuilder) -> None:
                      label="emit newline at the end of the rewritten line (end4) when no work remains (not cont2): the answer is final"),
     ]
 
+    # Copied bytes vote with COPY_LOGIT (= DIGIT_LOGIT 10); '[', '=' and newline with
+    # CONTROL_LOGIT 20, which wins if a byte vote fires at the same position (common.py).
     for byte, d in NAMES.items():
         b.logit(f"O_{d}", byte, COPY_LOGIT)
     b.logit("out_lbr", cm.FRAME_OPEN, cm.CONTROL_LOGIT)

@@ -26,50 +26,50 @@ else is written by a layer.
 
 ## Layer by layer
 
-**1. Tag the landmarks** [hello.py:48](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L48 "src:hello.features"). An MLP unit writes
+**1. Tag the landmarks** [hello.py:55](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L55 "src:hello.features"). An MLP unit writes
 `f_P = 2·(pos+1)` on a `+` byte and 0 elsewhere (`f_E` for `=` and `f_S` for
 `;` likewise). The start byte gets 1, so "not found yet" means position 0. The
 factor 2 keeps the start byte from tying with a match at position 1.
 
-**2. Find them** [hello.py:54](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L54 "src:hello.locate"). A *latest* head has query `40·one` and
+**2. Find them** [hello.py:64](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L64 "src:hello.locate"). A *latest* head has query `40·one` and
 key `f_P`, so its score is 40·`f_P`, which grows with position. Softmax picks
 the most recent `+`, and the head copies that key's `pos` into `P`. That is
 attention as a lookup, not as similarity
-([primitives.py:167](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L167 "src:prim.latest_head_def")). The MLP then sets two flags:
+([primitives.py:220](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L220 "src:prim.latest_head_def")). The MLP then sets two flags:
 - `seen_eq = [E ≥ 1]` (we are past the prompt);
-- `working_done = [S > E]` (`;` has been written) [hello.py:57](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L57 "src:hello.phase").
+- `working_done = [S > E]` (`;` has been written) [hello.py:70](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L70 "src:hello.phase").
 
 Both are robust steps: the slope is 4 around ½, so noise of up to ¼ can never
 push a flag off 0 or 1. Finally it computes where digit i of each operand
 sits, with i = pos − E: the next working digit is digit i
-[hello.py:58](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L58 "src:hello.address").
+[hello.py:74](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L74 "src:hello.address").
 
-**3. Read the digits** [hello.py:68](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L68 "src:hello.gather"). A *gather* head scores keys by
+**3. Read the digits** [hello.py:91](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L91 "src:hello.gather"). A *gather* head scores keys by
 −30·(k − t)², written as a query of [60t, −30] against keys [pos, pos²]. The
 score peaks at exactly one position t, and the head reads that byte's `val`.
 An operand that has run out of digits points at its fence (`+` or the start
 byte), whose `val` is 0.
 
-**The carry is recovered, never stored** [hello.py:73](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L73 "src:hello.carry"). With y = the
+**The carry is recovered, never stored** [hello.py:98](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L98 "src:hello.carry"). With y = the
 sum of the digits one column lower:
 
 - carry = [y ≥ 10] + [y = 9 and the previous output digit is `0`]
-  [hello.py:74](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L74 "src:hello.carry9").
+  [hello.py:103](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L103 "src:hello.carry9").
 
 When y = 9, the lower column carried exactly when it wrote a 0. So the model
 reads its own previous output and needs no memory beyond the text.
 
-**4. Write a working digit** [hello.py:85](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L85 "src:hello.digit"). Shared ReLU ramps turn
+**4. Write a working digit** [hello.py:121](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L121 "src:hello.digit"). Shared ReLU ramps turn
 `A + B + carry` (0–19) into a one-hot vote for its last digit `D0`–`D9`
-([common.py:105](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/common.py#L105 "src:prim.ramp")). A separate unit writes `;` once both operands are used up
-and no carry is left [hello.py:87](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L87 "src:hello.semi"). A latest head finds the top nonzero
-working digit [hello.py:81](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L81 "src:hello.top"), which gives the answer's length.
+([common.py:119](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/common.py#L119 "src:prim.ramp")). A separate unit writes `;` once both operands are used up
+and no carry is left [hello.py:125](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L125 "src:hello.semi"). A latest head finds the top nonzero
+working digit [hello.py:115](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L115 "src:hello.top"), which gives the answer's length.
 
-**5. Read it back** [hello.py:92](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L92 "src:hello.answer"). A gather head reads the working
+**5. Read it back** [hello.py:132](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L132 "src:hello.answer"). A gather head reads the working
 digits from the top down. When the copy is complete, `done` writes `\n`
-[hello.py:95](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L95 "src:hello.done").
+[hello.py:137](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L137 "src:hello.done").
 
-The unembedding [hello.py:99](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L99 "src:hello.logits") maps `D0`–`D9` to the digit bytes with
+The unembedding [hello.py:143](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L143 "src:hello.logits") maps `D0`–`D9` to the digit bytes with
 weight 10, and `;` and `\n` with weight 20. When a control byte and a digit
 fire at the same step, the control byte wins.
 

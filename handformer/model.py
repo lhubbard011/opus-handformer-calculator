@@ -91,6 +91,19 @@ class HeadSpec:
     ``query[c]`` and ``key[c]`` are linear forms for head column ``c``; the score
     is ``sum_c query[c](x_q) * key[c](x_k)``. ``value`` maps source dims to
     destination dims: {src_dim: {dst_dim: coefficient}} (the fused OV circuit).
+
+    So W_Q, W_K are (d_model, n_columns) with column c = the form's vector, and
+    the head adds, at query q,
+
+        out_q[dst] += sum_k attn_qk * sum_src x_k[src] * value[src][dst]
+        attn_q = softmax over k <= q of score(q, k)   (no 1/sqrt(d) scaling)
+
+    Scores are unscaled on purpose: the primitives set the logit margins
+    themselves (beta = 30..60). Example, ``primitives.gather_head`` with target
+    t: query ``[2*beta*t, {one: -beta}]``, key ``[{pos: 1}, {pos2: 1}]``,
+    score = -beta*(k - t)^2 + const, value ``{"val": {dst: 1}}``.
+    Head widths are tiny (1-3 columns); ``build`` factors value into W_V
+    (one column per source dim) and W_O (where it is written).
     """
 
     name: str
@@ -110,6 +123,13 @@ class HeadSpec:
 @dataclass
 class UnitSpec:
     """One MLP hidden unit: ``out += ReLU(read(x)) * write``.
+
+    ``read`` becomes a column of the layer's W_in and ``write`` a row of W_out,
+    so for residual x the unit adds ``max(sum_d read[d]*x[d], 0) * write``.
+    There is no bias: a threshold is a coefficient on the always-1 dim
+    ``one``. Example: ``read={"pos": 1, "one": -5}``, ``write={"y": 1}`` gives
+    y += max(pos - 5, 0). Steps, gates and lookups (primitives.py) are sums of
+    such units.
 
     ``label`` says what the unit computes (set by the primitive that built it)
     and ``where`` is the source line that wrote it; both are documentation only
@@ -160,7 +180,21 @@ class Layer:
 
 
 class ModelBuilder:
-    """Collects sparse, named weight specifications for a ``Transformer``."""
+    """Collects sparse, named weight specifications for a ``Transformer``.
+
+    Every weight is given as a linear form ``{dim_name: coef}``, never as a
+    matrix index. ``build`` turns each form into a dense float64 vector over
+    the ``Layout`` (``_vec``: v[layout[dim]] += coef) and stacks them:
+
+    * ``embed_byte(byte, form)``: row ``byte`` of the embedding (accumulates);
+    * ``at(i)`` / ``layer(name)``: a ``LayerSpec`` whose ``HeadSpec``s become
+      W_Q/W_K/W_V/W_O and whose ``UnitSpec``s become W_in/W_out columns/rows;
+    * ``logit(dim, byte, coef)``: unembedding entry, logit[byte] += coef * x[dim].
+
+    So a weight is nonzero only where some named formula put it, and every
+    entry can be traced back to its spec (``HeadSpec.where``/``UnitSpec.where``).
+    A dim name missing from the layout raises KeyError at build time.
+    """
 
     def __init__(self, layout: Layout) -> None:
         self.layout = layout
@@ -297,6 +331,17 @@ class Transformer:
         Standard multi-head attention: every head in a layer reads the same
         layer input and their outputs are summed into the stream; then the MLP.
 
+            x_0 = embed[token] + [pos, pos^2 features]   (positional)
+            x  += sum_h softmax(causal(x W_Q (x W_K)^T)) (x W_V) W_O
+            x  += ReLU(x W_in) W_out
+
+        No LayerNorm, no biases, no score scaling, float64 throughout, so each
+        named dim keeps the exact value a primitive put there. Because heads
+        read the pre-layer x, a dim written by a head of layer i is visible to
+        the MLP of layer i but only to heads of layer i+1; a dim written by an
+        MLP is visible from layer i+1. Any length works: positions enter only
+        as the features ``pos`` and ``pos2``.
+
         ``trace`` (optional) observes the same computation, it never alters it:
         ``trace.residual(label, x)`` after the embedding and after each
         sublayer, ``trace.attention(layer, head, attn)`` per head, and
@@ -356,7 +401,17 @@ class Transformer:
 
 
 class _DecodeCache:
-    """Per-layer residual inputs and per-head keys for incremental decoding."""
+    """Per-layer residual inputs and per-head keys for incremental decoding.
+
+    ``step`` runs one new position q through the same layers as ``residual``:
+    it stores the layer input ``x_in[l][q]`` and key ``keys[l][h][q] = x W_K``,
+    then attends with q's query over the cached keys 0..q and forms values as
+    ``(attn @ x_in[l][:q+1]) @ W_V @ W_O`` (the same product as ``residual``,
+    associated differently). Exact, not approximate: under the causal mask an
+    earlier position's layer inputs never depend on later tokens, so caching
+    them changes nothing. Cost per token is O(q * d) instead of a full rerun.
+    Storage starts at ``capacity`` positions and doubles when full (``_grow``).
+    """
 
     def __init__(self, model: Transformer, capacity: int) -> None:
         self.m = model
