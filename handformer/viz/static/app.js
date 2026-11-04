@@ -1751,8 +1751,10 @@ function setupColumnResizers() {
 }
 
 const PIN_KEY = "handviz.pinned";
-const MAX_PINS = 3;
-const BIG_PANELS = new Set(["p-maps", "p-graph"]);
+// Pinned panels: any number, in one grid under the slider (as many per row as fit, or the
+// columns the viewer picks); the big ones take two columns on wide screens.
+const BIG_PANELS = new Set(["p-maps", "p-graph", "p-model", "p-code", "p-tree", "p-board"]);
+const PIN_COLS_KEY = "handviz.pincols";
 const pinHome = new Map(); // panel id -> placeholder comment marking its usual place
 let pins = []; // pinned panel ids, oldest first
 
@@ -1760,35 +1762,39 @@ function unpinOne(id) {
   const panel = $(id);
   pinHome.get(id).replaceWith(panel);
   pinHome.delete(id);
-  panel.classList.remove("is-pinned");
+  panel.classList.remove("is-pinned", "pin-big");
   panel.querySelector(".pin").textContent = "📌";
   pins = pins.filter((x) => x !== id);
 }
 
 function pinOne(id) {
-  if (pins.length >= MAX_PINS) unpinOne(pins[0]);
   const panel = $(id);
   const home = document.createComment(`home of ${id}`);
   panel.replaceWith(home);
   pinHome.set(id, home);
-  $(BIG_PANELS.has(id) ? "pinned-big" : "pinned-small").append(panel);
+  $("pinned-grid").append(panel);
   panel.classList.add("is-pinned");
+  panel.classList.toggle("pin-big", BIG_PANELS.has(id));
   panel.querySelector(".pin").textContent = "✕ unpin";
   pins.push(id);
 }
 
-/** Pin ``id`` (or unpin it if it is pinned); ``ids`` restores a saved set. */
-function togglePin(id, { ids = null, scroll = true } = {}) {
-  if (ids) ids.filter((x) => $(x)?.dataset.pin).slice(-MAX_PINS).forEach(pinOne);
+/** The pinned grid's columns: "auto" (as many as fit) or a fixed count. */
+function applyPinCols(v) {
+  const grid = $("pinned-grid");
+  grid.dataset.cols = v;
+  if (v === "auto") grid.style.removeProperty("--cols"); else grid.style.setProperty("--cols", v);
+}
+
+/** Pin ``id`` (or unpin it if it is pinned); ``ids`` restores a saved set; ``all: false`` unpins all. */
+function togglePin(id, { ids = null, scroll = true, all = null } = {}) {
+  if (ids) ids.filter((x) => $(x)?.dataset.pin && !pins.includes(x)).forEach(pinOne);
+  else if (all === false) [...pins].forEach(unpinOne);
   else if (pins.includes(id)) unpinOne(id);
   else pinOne(id);
   const slot = $("pinned");
-  const nBig = pins.filter((x) => BIG_PANELS.has(x)).length, nSmall = pins.length - nBig;
   slot.hidden = !pins.length;
-  slot.dataset.layout = nBig && nSmall ? "big+small" : nBig ? "big" : "small";
-  $("pinned-small").style.setProperty("--n", String(Math.max(1, nSmall)));
-  $("pinned-big").hidden = !nBig;
-  $("pinned-small").hidden = !nSmall;
+  $("pin-count").textContent = `${pins.length} pinned`;
   try { pins.length ? localStorage.setItem(PIN_KEY, JSON.stringify(pins)) : localStorage.removeItem(PIN_KEY); }
   catch { /* private mode */ }
   log("pinned", pins.join(", ") || "nothing");
@@ -1805,10 +1811,24 @@ function setupPins() {
     b.className = "pin";
     b.textContent = "📌";
     b.dataset.tip = `Pin "${panel.dataset.pin}" right under the slider, so it stays next to the step controls ` +
-      `(up to ${MAX_PINS} panels; pinning another sends the oldest back; remembered on this device). ` +
+      "(pin as many as you like: they share rows, as many per row as fit; remembered on this device). " +
       "Press again to put it back.";
     b.addEventListener("click", (e) => { e.stopPropagation(); togglePin(panel.id); });
     panel.querySelector(".panel-title")?.prepend(b);
+  });
+  $("unpin-all").addEventListener("click", () => togglePin(null, { all: false, scroll: false }));
+  let cols = "auto";
+  try { cols = localStorage.getItem(PIN_COLS_KEY) || "auto"; } catch { /* private mode */ }
+  if (![...$("pin-cols").options].some((o) => o.value === cols)) cols = "auto";
+  $("pin-cols").value = cols;
+  applyPinCols(cols);
+  $("pin-cols").addEventListener("change", () => {
+    const v = $("pin-cols").value;
+    applyPinCols(v);
+    try { localStorage.setItem(PIN_COLS_KEY, v); } catch { /* private mode */ }
+    log("pinned columns", v);
+    if (state.pos.has(state.q)) renderMap(state.pos.get(state.q)); // widths changed
+    renderGraph();
   });
   let saved = [];
   try {
