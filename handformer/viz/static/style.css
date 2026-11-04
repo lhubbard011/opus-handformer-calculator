@@ -237,17 +237,12 @@ button.try { font-size: 11px; padding: 1px 8px; margin-left: 4px; border-color: 
 .pinned[hidden] { display: none; }
 .pin-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
 .pin-bar button { font-size: 11px; padding: 1px 8px; }
-/* a wrapping row: each panel's width is its basis (the columns menu, or the width the viewer
-   dragged it to), and panels grow to fill what is left of their row */
-.pin-grid { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; --basis: 420px; }
-.pin-grid[data-cols]:not([data-cols="auto"]) { --basis: calc((100% - (var(--cols) - 1) * 10px) / var(--cols)); }
-.pin-grid > .panel { margin: 0; border-color: var(--accent); min-width: min(100%, 240px); position: relative;
-                     flex: 1 1 var(--basis); max-width: 100%; box-sizing: border-box; }
-@media (min-width: 1400px) {
-  .pin-grid > .panel.pin-big { flex-basis: calc(2 * var(--basis) + 10px); }
-  .pin-grid[data-cols="1"] > .panel.pin-big { flex-basis: var(--basis); }
-}
-.pin-grid > .panel.pin-sized { flex: 0 0 var(--w); }
+/* a dashboard grid (app.js placePin): equal columns, rows of 6px; each panel spans its columns and
+   the rows its height needs, and dense packing fills the space under short panels */
+.pin-grid { display: grid; column-gap: 10px; row-gap: 0; grid-auto-rows: 6px; grid-auto-flow: row dense;
+            grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr)); align-items: start; }
+.pin-grid[data-cols]:not([data-cols="auto"]) { grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); }
+.pin-grid > .panel { margin: 0 0 10px; border-color: var(--accent); min-width: 0; position: relative; box-sizing: border-box; }
 .pin-edge { position: absolute; top: 0; right: -6px; width: 10px; height: 100%; cursor: ew-resize; touch-action: none; z-index: 2; }
 .pin-edge::after { content: ""; position: absolute; top: 50%; left: 4px; width: 3px; height: 40px; margin-top: -20px;
                    border-radius: 2px; background: var(--border); }
@@ -256,7 +251,7 @@ button.try { font-size: 11px; padding: 1px 8px; margin-left: 4px; border-color: 
 button.pin { font-size: 11px; padding: 1px 6px; border-color: var(--border); }
 .panel.is-pinned button.pin { border-color: var(--accent); color: var(--accent); }
 @media (max-width: 700px) { .pinned { padding: 8px 8px 0; }
-  .pin-grid > .panel, .pin-grid > .panel.pin-sized { flex: 1 1 100%; } .pin-edge { display: none; } }
+  .pin-grid { grid-template-columns: 1fr !important; } .pin-edge { display: none; } }
 .diff-ctl { display: flex; gap: 6px; align-items: center; font-size: 12px; font-weight: 600; color: #e07bd0; }
 .diff-ctl[hidden] { display: none; }
 /* Game of Life phases */

@@ -1755,27 +1755,51 @@ const PIN_KEY = "handviz.pinned";
 // columns the viewer picks); the big ones take two columns on wide screens.
 const BIG_PANELS = new Set(["p-maps", "p-graph", "p-model", "p-code", "p-tree", "p-board"]);
 const PIN_COLS_KEY = "handviz.pincols";
-const PIN_W_KEY = "handviz.pinwidths"; // panel id -> width (px) the viewer dragged it to
-const PIN_MIN_W = 240;
+// The pinned grid packs like a dashboard: columns of equal width, and rows of PIN_ROW px. Each
+// panel spans the columns it is given (dragged with its right-edge handle) and as many rows as
+// its own height needs (measured, kept up to date by a ResizeObserver), and "dense" packing lets
+// a short panel's leftover space take a later panel: no row is as tall as its tallest panel.
+const PIN_SPAN_KEY = "handviz.pinspans"; // panel id -> columns the viewer gave it
+const PIN_ROW = 6, PIN_GAP = 10; // px; = style.css .pin-grid grid-auto-rows / gap
 
-function pinWidths() {
-  try { return JSON.parse(localStorage.getItem(PIN_W_KEY) || "{}") || {}; } catch { return {}; }
+function pinSpans() {
+  try { return JSON.parse(localStorage.getItem(PIN_SPAN_KEY) || "{}") || {}; } catch { return {}; }
 }
-function savePinWidth(id, w) {
+function savePinSpan(id, n) {
   try {
-    const all = pinWidths();
-    if (w === null) delete all[id]; else all[id] = w;
-    Object.keys(all).length ? localStorage.setItem(PIN_W_KEY, JSON.stringify(all)) : localStorage.removeItem(PIN_W_KEY);
+    const all = pinSpans();
+    if (n === null) delete all[id]; else all[id] = n;
+    Object.keys(all).length ? localStorage.setItem(PIN_SPAN_KEY, JSON.stringify(all)) : localStorage.removeItem(PIN_SPAN_KEY);
   } catch { /* private mode: not remembered */ }
 }
-/** A pinned panel's width: px (fixed, flex 0 0) or null (its usual basis: grows to fill its row). */
-function setPinWidth(panel, w) {
-  if (w === null) { panel.classList.remove("pin-sized"); panel.style.removeProperty("--w"); return; }
-  const max = $("pinned-grid").clientWidth;
-  panel.style.setProperty("--w", `${Math.round(Math.min(max, Math.max(PIN_MIN_W, w)))}px`);
-  panel.classList.add("pin-sized");
+/** The grid's column count and width (px), read from the laid-out grid. */
+function pinTracks() {
+  const t = getComputedStyle($("pinned-grid")).gridTemplateColumns.split(" ").map(parseFloat).filter((x) => x > 0);
+  return { n: Math.max(1, t.length), w: t[0] || 0 };
 }
-/** The drag handle on a pinned panel's right edge: wider or narrower; double-click or Enter resets. */
+/** How many columns a pinned panel spans: the viewer's choice, else 2 for a big panel when 3+ fit. */
+function pinCols(panel) {
+  const { n } = pinTracks();
+  const want = panel.dataset.span ? Number(panel.dataset.span) : BIG_PANELS.has(panel.id) && n >= 3 ? 2 : 1;
+  return Math.min(n, Math.max(1, want));
+}
+/** Lay one pinned panel out: its columns, and the rows its height needs. */
+function placePin(panel) {
+  panel.style.gridColumn = `span ${pinCols(panel)}`;
+  const h = panel.getBoundingClientRect().height;
+  panel.style.gridRowEnd = `span ${Math.max(1, Math.ceil((h + PIN_GAP) / PIN_ROW))}`;
+}
+function placeAllPins() { document.querySelectorAll("#pinned-grid > .panel").forEach(placePin); }
+// a panel's height changes with its content (each step) and its grips: re-measure it
+const pinSizer = new ResizeObserver((entries) => entries.forEach((e) => placePin(e.target)));
+let pinColsSeen = 0; // re-place everything when the column count changes (window resize, menu)
+new ResizeObserver(() => {
+  const { n } = pinTracks();
+  if (n !== pinColsSeen) { pinColsSeen = n; placeAllPins(); }
+}).observe(document.documentElement);
+
+/** The drag handle on a pinned panel's right edge: span more or fewer columns (it snaps); the
+ *  rest repack. Double-click or Enter resets; arrow keys step a column. */
 function pinEdge(panel) {
   const edge = document.createElement("div");
   edge.className = "pin-edge";
@@ -1783,11 +1807,14 @@ function pinEdge(panel) {
   edge.setAttribute("role", "separator");
   edge.setAttribute("aria-orientation", "vertical");
   edge.setAttribute("aria-label", `Resize the width of ${panel.dataset.pin}`);
-  edge.dataset.tip = "Drag to make this pinned panel wider or narrower (the others reflow). Double-click (or Enter) for its usual width; arrow keys work too.";
+  edge.dataset.tip = "Drag to make this pinned panel span more or fewer columns (it snaps; the others repack into the free space). Double-click (or Enter) for its usual width; arrow keys step a column.";
+  const setSpan = (n) => {
+    if (n === null) delete panel.dataset.span; else panel.dataset.span = String(Math.max(1, Math.min(pinTracks().n, n)));
+    placePin(panel);
+  };
   const done = () => {
-    const w = panel.classList.contains("pin-sized") ? parseFloat(panel.style.getPropertyValue("--w")) : null;
-    savePinWidth(panel.id, w);
-    log("pinned", panel.id, w === null ? "back to its usual width" : `${w}px wide`);
+    savePinSpan(panel.id, panel.dataset.span ? Number(panel.dataset.span) : null);
+    log("pinned", panel.id, panel.dataset.span ? `spans ${panel.dataset.span} columns` : "back to its usual width");
     if (state.pos.has(state.q)) renderMap(state.pos.get(state.q)); // canvases size to their panel
     renderGraph();
   };
@@ -1800,7 +1827,11 @@ function pinEdge(panel) {
     document.body.classList.add("resizing-x");
     e.preventDefault();
   });
-  edge.addEventListener("pointermove", (e) => { if (drag) setPinWidth(panel, drag.w + e.clientX - drag.x); });
+  edge.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    const { w } = pinTracks(); // snap: the nearest whole number of columns (gaps included)
+    setSpan(Math.round((drag.w + e.clientX - drag.x + PIN_GAP) / (w + PIN_GAP)));
+  });
   const stop = () => {
     if (!drag) return;
     drag = null;
@@ -1810,11 +1841,10 @@ function pinEdge(panel) {
   };
   edge.addEventListener("pointerup", stop);
   edge.addEventListener("pointercancel", stop);
-  edge.addEventListener("dblclick", () => { setPinWidth(panel, null); done(); });
+  edge.addEventListener("dblclick", () => { setSpan(null); done(); });
   edge.addEventListener("keydown", (e) => {
-    const w = panel.getBoundingClientRect().width;
-    if (e.key === "ArrowLeft" || e.key === "ArrowRight") setPinWidth(panel, w + (e.key === "ArrowRight" ? KEY_STEP : -KEY_STEP));
-    else if (e.key === "Enter") setPinWidth(panel, null);
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") setSpan(pinCols(panel) + (e.key === "ArrowRight" ? 1 : -1));
+    else if (e.key === "Enter") setSpan(null);
     else return;
     e.preventDefault();
     done();
@@ -1830,7 +1860,10 @@ function unpinOne(id) {
   pinHome.delete(id);
   panel.classList.remove("is-pinned", "pin-big");
   panel.querySelector(":scope > .pin-edge")?.remove();
-  setPinWidth(panel, null); // back home it takes its usual layout (the width stays remembered for next time)
+  pinSizer.unobserve(panel);
+  delete panel.dataset.span; // back home it takes its usual layout (the span stays remembered for next time)
+  panel.style.removeProperty("grid-column");
+  panel.style.removeProperty("grid-row-end");
   panel.querySelector(".pin").textContent = "📌";
   pins = pins.filter((x) => x !== id);
 }
@@ -1844,8 +1877,10 @@ function pinOne(id) {
   panel.classList.add("is-pinned");
   panel.classList.toggle("pin-big", BIG_PANELS.has(id));
   panel.append(pinEdge(panel));
-  const w = pinWidths()[id];
-  if (typeof w === "number") setPinWidth(panel, w);
+  const n = pinSpans()[id];
+  if (typeof n === "number") panel.dataset.span = String(n);
+  placePin(panel);
+  pinSizer.observe(panel);
   panel.querySelector(".pin").textContent = "✕ unpin";
   pins.push(id);
 }
@@ -1855,6 +1890,7 @@ function applyPinCols(v) {
   const grid = $("pinned-grid");
   grid.dataset.cols = v;
   if (v === "auto") grid.style.removeProperty("--cols"); else grid.style.setProperty("--cols", v);
+  placeAllPins();
 }
 
 /** Pin ``id`` (or unpin it if it is pinned); ``ids`` restores a saved set; ``all: false`` unpins all. */
