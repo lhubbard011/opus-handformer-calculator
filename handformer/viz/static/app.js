@@ -7,6 +7,8 @@ import { drawHeatmap, attachHeatmapEvents, isTouch, showSheet, hideSheet, setTip
 import { LocalApi } from "./local-api.js";
 import { drawGraph, drawOverview } from "./graph.js";
 import { renderModelGraph, refreshKnockouts } from "./model-graph.js";
+import { TracePlayer } from "./trace.js";
+let tracer = null; // the Token pass player (main() makes it)
 
 const $ = (id) => document.getElementById(id);
 // The input is a one-line box (calculator, Life) or a code box (C): read and write it through these.
@@ -624,6 +626,7 @@ async function goto(q) {
     renderDims(p);
     renderUnits(p);
     renderHeadDetail(p);
+    tracer?.load(p, run, state.info);
     await renderMap(p);
     if (gen === state.gen) restoreView();
   } catch (e) {
@@ -1753,7 +1756,7 @@ function setupColumnResizers() {
 const PIN_KEY = "handviz.pinned";
 // Pinned panels: any number, in one grid under the slider (as many per row as fit, or the
 // columns the viewer picks); the big ones take two columns on wide screens.
-const BIG_PANELS = new Set(["p-maps", "p-graph", "p-model", "p-code", "p-tree", "p-board"]);
+const BIG_PANELS = new Set(["p-maps", "p-graph", "p-model", "p-trace", "p-code", "p-tree", "p-board"]);
 const PIN_COLS_KEY = "handviz.pincols";
 // The pinned grid packs like a dashboard: columns of equal width, and rows of PIN_ROW px. Each
 // panel spans the columns it is given (dragged with its right-edge handle) and as many rows as
@@ -2015,6 +2018,19 @@ function trackBar() {
 
 async function main() {
   wire();
+  tracer = new TracePlayer($("trace"), {
+    srcLinks, koButton,
+    onDim: (name) => { // open the dim in the Residual stream panel
+      state.openDim = name;
+      if (state.pos.has(state.q)) renderDims(state.pos.get(state.q));
+      $("p-dims").scrollIntoView({ behavior: "smooth", block: "nearest" });
+    },
+    onHead: (layer, head) => { // its attention pattern in the heatmap panel
+      state.head = [layer, head];
+      document.querySelector('[data-map="attention"]').click();
+      $("p-maps").scrollIntoView({ behavior: "smooth", block: "start" });
+    },
+  });
   setupPins();
   setupResizers();
   setupColumnResizers();

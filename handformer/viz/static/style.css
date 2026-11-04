@@ -371,3 +371,61 @@ body.resizing-x { user-select: none; -webkit-user-select: none; cursor: ew-resiz
 .mg-item.mg-off > summary .mg-item-name { color: #ff8a65; text-decoration: line-through; }
 .mg-item.mg-off > summary .mg-item-name::before { content: "⊘ "; display: inline-block; text-decoration: none; }
 
+/* token pass (trace.js) */
+.tr-bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+.tr-bar button { font-size: 12px; padding: 2px 8px; }
+.tr-bar input[type=range] { flex: 1 1 200px; min-width: 120px; }
+.tr-caption { margin: 6px 0; font: 600 13px var(--mono); }
+/* the views sit side by side as long as each has room, else they wrap: diagram | residual | details */
+.tr-body { display: grid; gap: 12px; align-items: start; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); }
+.tr-body > [hidden] { display: none; }
+.tr-dims { max-height: 460px; }
+.tr-group { color: var(--accent); font-size: 11px; text-transform: uppercase; margin: 6px 0 2px; }
+.tr-row, .tr-logit { display: grid; grid-template-columns: minmax(0, 9em) minmax(0, 8em) minmax(0, 1fr); gap: 6px;
+                     align-items: center; padding: 1px 4px; border-radius: 3px; cursor: pointer; transition: background 0.25s; }
+.tr-row.changed { background: rgba(242, 165, 65, 0.22); }
+.tr-row.changed .tr-val { color: var(--accent); font-weight: 600; }
+.tr-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tr-val { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tr-barwrap { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
+.tr-fill { display: block; height: 100%; background: #f2a541; transition: width 0.25s; }
+.tr-fill.neg { background: #5ec8e5; }
+.tr-detail { font: 12px/1.5 var(--mono); overflow-wrap: anywhere; min-width: 0; }
+.tr-title { font-weight: 600; margin-bottom: 4px; }
+.tr-item { display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; padding: 2px 0; border-bottom: 1px solid var(--border); }
+.tr-item-name { color: var(--text); font-weight: 600; }
+.tr-wrote { color: var(--good, #7bd88f); }
+.tr-links { display: inline-flex; gap: 6px; align-items: center; margin-left: auto; }
+.tr-links button { font-size: 11px; padding: 0 6px; }
+.tr-sub, .tr-list { margin-top: 6px; color: #aab2c0; }
+.tr-logit.win .tr-name, .tr-logit.win .tr-val { color: var(--accent); font-weight: 600; }
+.tr-item.focus { outline: 1px solid var(--accent); border-radius: 3px; }
+
+/* the pass diagram (pass-diagram.js) */
+.pd-scroll { max-height: 70vh; overflow: auto; background: var(--bg); border-radius: 6px; }
+.pd-root { min-width: 0; }
+.pd-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 6px 8px; font-size: 11px; position: sticky; top: 0;
+             background: var(--bg); z-index: 1; border-bottom: 1px solid var(--border); }
+.pd-key::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; background: var(--c); }
+svg.pd { display: block; font: 11px var(--mono); }
+.pd-spine { stroke: #333a46; stroke-width: 4; stroke-linecap: round; }
+.pd-fill { stroke: var(--accent); stroke-width: 4; stroke-linecap: round; transition: y2 0.35s ease; }
+.pd-row { cursor: pointer; }
+.pd-box { fill: var(--panel); stroke: var(--border); transition: stroke 0.2s, fill 0.2s; }
+.pd-row:hover .pd-box { stroke: #4a5363; }
+.pd-row.quiet .pd-label { opacity: 0.45; }
+.pd-row.now .pd-box { stroke: var(--accent); stroke-width: 2; fill: #1c2029; filter: drop-shadow(0 0 6px rgba(242, 165, 65, 0.45)); }
+.pd-label { fill: #aab2c0; } .pd-row.now .pd-label { fill: var(--text); font-weight: 600; }
+.pd-layer { fill: #8a93a3; font-size: 10px; }
+.pd-branch { stroke: #333a46; stroke-width: 2; } .pd-row.done .pd-branch, .pd-row.now .pd-branch { stroke: #8a6a3a; }
+.pd-row.now .pd-branch { stroke: var(--accent); }
+.pd-add { fill: var(--bg); stroke: #4a5363; stroke-width: 1.5; }
+.pd-row.done .pd-add, .pd-row.now .pd-add { stroke: var(--accent); }
+.pd-plus { fill: #aab2c0; font-size: 11px; pointer-events: none; }
+.pd-item { fill: var(--c); opacity: 0.14; transition: opacity 0.2s, transform 0.2s; transform-box: fill-box; transform-origin: center; }
+.pd-item.on { opacity: 0.75; }
+.pd-row.now .pd-item.on { opacity: 1; transform: scale(1.35); }
+.pd-item:hover { opacity: 1; }
+.pd-logit { fill: #4a5363; } .pd-logit.win { fill: var(--accent); }
+.pd-logit-label { fill: #aab2c0; font-size: 10px; }
+

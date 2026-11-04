@@ -207,6 +207,12 @@
     </section>
   </main>
 
+  <section id="p-trace" data-pin="Token pass" class="panel wide">
+    <div class="panel-title" data-tip="The selected byte's trip through the network, one computation at a time: the embedding, each layer's attention and MLP, then the logits. Play it, pause it or step through it; the residual dims each computation changes light up. Pick the byte with the step slider above.">Token pass
+      <span class="muted small">one byte through every computation; play, pause, step</span></div>
+    <div id="trace" class="trace"></div>
+  </section>
+
   <section id="p-maps" data-pin="Heatmaps" class="panel wide">
     <div class="panel-title">Heatmaps
       <nav class="tabs" role="tablist">
