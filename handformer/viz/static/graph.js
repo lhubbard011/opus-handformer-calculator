@@ -121,3 +121,140 @@ export function drawGraph(container, info, circuit, { onPick } = {}) {
   log(`${circuit}: ${nodes.length} dims, ${edges.length} edges, ${cols} columns in ${(performance.now() - t0).toFixed(0)}ms`);
   return { nodes: nodes.length, edges: edges.length, highlight };
 }
+
+// ---------------------------------------------------------------- overview
+
+const STAGES = [ // column, and the order circuits stack in it
+  ["input"], ["frame"], ["parser"], ["add", "sub", "mul", "div", "pow"], ["output"],
+];
+const CIRCUIT_NAME = { input: "byte embedding + position", frame: "frame locator", parser: "parser / rewriter",
+  add: "add", sub: "sub", mul: "mul", div: "div", pow: "pow", output: "output votes → logits" };
+const CALCS = ["frame", "parser", "add", "sub", "mul", "div", "pow"];
+
+/** Circuit-level dataflow: {nodes: {c: {heads, units, dims}}, edges: [{from, to, dims:[...]}], layers}. */
+export function overviewGraph(info) {
+  const cat = new Map(info.dims.map((d) => [d.name, d.cat]));
+  const writers = new Map(); // dim -> Set of circuits whose specs write it
+  const parts = info.layers.flatMap((L) => [...L.heads.map((h) => ({ ...h, kind: "head", layer: L.index })),
+                                           ...L.units.map((u) => ({ ...u, kind: "unit", layer: L.index }))]);
+  for (const d of info.dims) if (d.cat === "input") writers.set(d.name, new Set(["input"]));
+  for (const s of parts) for (const w of s.writes) {
+    if (!writers.has(w)) writers.set(w, new Set());
+    writers.get(w).add(s.circuit);
+  }
+  const nodes = Object.fromEntries(STAGES.flat().map((c) => [c, { heads: 0, units: 0, dims: 0 }]));
+  for (const d of info.dims) if (nodes[d.cat]) nodes[d.cat].dims++;
+  const layers = Object.fromEntries(CALCS.map((c) => [c, info.layers.map(() => ({ heads: 0, units: 0 }))]));
+  const edges = new Map();
+  const edge = (from, to, d) => {
+    const k = `${from}>${to}`;
+    if (!edges.has(k)) edges.set(k, { from, to, dims: new Set() });
+    edges.get(k).dims.add(d);
+  };
+  for (const s of parts) {
+    if (!nodes[s.circuit]) continue;
+    nodes[s.circuit][s.kind === "head" ? "heads" : "units"]++;
+    if (layers[s.circuit]) layers[s.circuit][s.layer][s.kind === "head" ? "heads" : "units"]++;
+    for (const r of s.reads) {
+      if (HIDDEN.has(r)) continue;
+      for (const w of writers.get(r) || []) if (w !== s.circuit && nodes[w]) edge(w, s.circuit, r);
+    }
+    for (const w of s.writes) if (cat.get(w) === "output") edge(s.circuit, "output", w);
+  }
+  return { nodes, layers, edges: [...edges.values()].map((e) => ({ ...e, dims: [...e.dims].sort() })) };
+}
+
+/** Draw the overview: circuits as boxes joined by the values they pass, then the layer-sharing strip. */
+export function drawOverview(container, info) {
+  const t0 = performance.now();
+  const { nodes, layers, edges } = overviewGraph(info);
+  container.replaceChildren();
+  const BOX_W = 170, BOX_H = 46, GAP_X = 120, GAP_Y = 16, TOP = 30;
+  const pos = {};
+  const colH = Math.max(...STAGES.map((col) => col.length * (BOX_H + GAP_Y)));
+  STAGES.forEach((col, ci) => {
+    const h = col.length * (BOX_H + GAP_Y) - GAP_Y;
+    col.forEach((c, ri) => {
+      pos[c] = { x: PAD + ci * (BOX_W + GAP_X), y: TOP + (colH - h) / 2 + ri * (BOX_H + GAP_Y) };
+    });
+  });
+  pos.parser.y = TOP - 6; // above the frame → calculator flows: the parser does not feed them values
+  const flowH = TOP + colH + 10;
+  const nL = info.layers.length, CELL = 34, ROW = 20, LABEL = 110;
+  const stripTop = flowH + 40;
+  const width = Math.max(PAD * 2 + STAGES.length * (BOX_W + GAP_X), PAD * 2 + LABEL + nL * CELL);
+  const height = stripTop + 22 + CALCS.length * ROW + 30;
+  const svg = el("svg", { width, height, viewBox: `0 0 ${width} ${height}`, class: "graph overview" });
+  svg.append(el("text", { x: PAD, y: 16, class: "g-col" },
+    "who feeds whom: solid arrows carry residual values (width = how many); dashed ones go through the text"));
+
+  const maxDims = Math.max(...edges.map((e) => e.dims.length));
+  const gEdges = el("g");
+  for (const e of edges.sort((a, b) => b.dims.length - a.dims.length)) {
+    const a = pos[e.from], b = pos[e.to];
+    const fwd = b.x > a.x;
+    const x1 = fwd ? a.x + BOX_W : a.x + BOX_W / 2, y1 = fwd ? a.y + BOX_H / 2 : a.y + BOX_H;
+    const x2 = fwd ? b.x : b.x + BOX_W / 2, y2 = fwd ? b.y + BOX_H / 2 : b.y + BOX_H;
+    const d = fwd ? `M${x1},${y1} C${x1 + GAP_X / 2},${y1} ${x2 - GAP_X / 2},${y2} ${x2},${y2}`
+      : `M${x1},${y1} C${x1},${y1 + 60} ${x2},${y2 + 60} ${x2},${y2}`; // same column or backwards: loop below
+    const w = 1 + 7 * Math.sqrt(e.dims.length / maxDims);
+    const p = el("path", { d, class: "g-flow", "stroke-width": w.toFixed(1) });
+    p.dataset.tip = `${CIRCUIT_NAME[e.from]} → ${CIRCUIT_NAME[e.to]}: ${e.dims.length} value(s)\n` +
+      e.dims.slice(0, 40).join(", ") + (e.dims.length > 40 ? ", …" : "");
+    gEdges.append(p);
+  }
+  svg.append(gEdges);
+  // The parser and the calculators share no residual values: they cooperate through the text the
+  // model writes (the copied sub-expression in the frame; the result bytes the rewrite copies back).
+  const gText = el("g");
+  for (const c of STAGES[3]) {
+    const a = pos.parser, b = pos[c];
+    const x1 = a.x + BOX_W, y1 = a.y + BOX_H / 2, x2 = b.x, y2 = b.y + 10;
+    const p = el("path", { d: `M${x1},${y1} C${x1 + GAP_X / 2},${y1} ${x2 - GAP_X / 2},${y2} ${x2},${y2}`, class: "g-text" });
+    p.dataset.tip = `parser ⇄ ${c}, through the written text (no shared values):\n` +
+      `· the parser copies the chosen sub-expression into the frame as bytes; ${c} reads those bytes\n` +
+      `· ${c} writes its result as bytes; the parser's rewrite copies them into the next line`;
+    gText.append(p);
+  }
+  svg.append(gText);
+  svg.append(el("text", { x: pos.parser.x + 8, y: pos.parser.y + BOX_H + 14, class: "g-box-sub" },
+    "dashed → calculators: through the written text"));
+  for (const [c, n] of Object.entries(nodes)) {
+    const { x, y } = pos[c];
+    const g = el("g", { class: `g-box g-box-${c}`, transform: `translate(${x},${y})` });
+    g.append(el("rect", { width: BOX_W, height: BOX_H, rx: 6 }));
+    g.append(el("text", { x: 8, y: 18, class: "g-box-title" }, CIRCUIT_NAME[c]));
+    const stats = c === "input" ? `${n.dims} values from the byte and its position`
+      : c === "output" ? `${n.dims} votes, read by the unembedding`
+      : `${n.heads} heads · ${n.units} units · ${n.dims} own values`;
+    g.append(el("text", { x: 8, y: 36, class: "g-box-sub" }, stats));
+    const ins = edges.filter((e) => e.to === c), outs = edges.filter((e) => e.from === c);
+    g.dataset.tip = `${CIRCUIT_NAME[c]}\nreads from: ${ins.map((e) => `${e.from} (${e.dims.length})`).join(", ") || "—"}\n` +
+      `feeds: ${outs.map((e) => `${e.to} (${e.dims.length})`).join(", ") || "—"}` +
+      (CALCS.includes(c) ? "\n(pick it in the circuit menu for its own graph)" : "");
+    svg.append(g);
+  }
+
+  // layer strip: which circuits own heads (blue) and units (orange) at each layer
+  svg.append(el("text", { x: PAD, y: stripTop - 12, class: "g-col" },
+    "working together in depth: heads (blue) and MLP units (orange) per layer; every position runs every layer"));
+  for (let l = 0; l < nL; l++) svg.append(el("text", { x: PAD + LABEL + l * CELL + 4, y: stripTop + 6, class: "g-col" }, `L${l + 1}`));
+  const maxH = Math.max(...CALCS.flatMap((c) => layers[c].map((v) => v.heads)), 1);
+  const maxU = Math.max(...CALCS.flatMap((c) => layers[c].map((v) => v.units)), 1);
+  CALCS.forEach((c, r) => {
+    const y = stripTop + 14 + r * ROW;
+    svg.append(el("text", { x: PAD, y: y + 13, class: "g-box-sub" }, CIRCUIT_NAME[c]));
+    layers[c].forEach((v, l) => {
+      if (!v.heads && !v.units) return;
+      const x = PAD + LABEL + l * CELL;
+      const g = el("g");
+      if (v.heads) g.append(el("rect", { x, y: y + 2, width: Math.max(2, (CELL - 6) * Math.sqrt(v.heads / maxH)), height: 7, class: "g-h" }));
+      if (v.units) g.append(el("rect", { x, y: y + 10, width: Math.max(2, (CELL - 6) * Math.sqrt(v.units / maxU)), height: 7, class: "g-u" }));
+      g.dataset.tip = `layer ${l + 1} · ${CIRCUIT_NAME[c]}: ${v.heads} heads, ${v.units} units`;
+      svg.append(g);
+    });
+  });
+  container.append(svg);
+  log(`overview: ${edges.length} circuit-to-circuit flows in ${(performance.now() - t0).toFixed(0)}ms`);
+  return { edges };
+}

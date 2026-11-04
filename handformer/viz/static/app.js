@@ -5,7 +5,7 @@
 import { decodeF16, SEQ, DIV } from "./render.js";
 import { drawHeatmap, attachHeatmapEvents, isTouch, showSheet, hideSheet } from "./heatmap.js";
 import { LocalApi } from "./local-api.js";
-import { drawGraph } from "./graph.js";
+import { drawGraph, drawOverview } from "./graph.js";
 
 const $ = (id) => document.getElementById(id);
 const log = (...args) => console.info("[handviz]", ...args);
@@ -855,6 +855,16 @@ function renderGraph() {
   if (!state.info) return;
   const circuit = $("g-circuit").value;
   const pick = $("g-pick");
+  if (circuit === "all") {
+    const { edges } = drawOverview($("graph"), state.info);
+    pick.classList.add("muted");
+    pick.textContent = "hover an arrow to list the values it carries, a box for what it reads and feeds";
+    $("g-caption").textContent = `How the ${state.info.layers.length} layers' circuits work together: the frame locator ` +
+      "finds the current step's landmarks and switches one calculator on (act_*); the parser picks the sub-expression, " +
+      "copies it into the frame and rewrites the line; each calculator reads the frame and writes its votes for the next " +
+      `byte. ${edges.length} circuit-to-circuit flows; one, pos and pos² are left out.`;
+    return;
+  }
   const out = drawGraph($("graph"), state.info, circuit, {
     onPick: (n) => {
       pick.classList.remove("muted");

@@ -1021,6 +1021,15 @@ into 75, and leaves `12+34` (no carry) unchanged.
   the other. It is generated from the specs, so it cannot drift from the
   weights. `one`, `pos` and `pos²` are left out because they feed almost
   everything.
+- **All circuits together** (the default view): one box per circuit, joined
+  by the residual values one circuit reads from another (arrow width = how
+  many; hover for the list), plus a 22-layer strip of each circuit's heads and
+  units. It shows a design fact that is easy to miss: **the parser and the
+  calculators share no residual values.** They cooperate only through the text
+  the model writes. The parser copies the sub-expression into the frame as
+  bytes, which the calculator reads, and the calculator's result bytes are
+  copied back by the rewrite (dashed arrows). The frame locator is the only
+  circuit every calculator reads.
 - **Hello world** (`handformer/hello.py`, `HELLO.md`): addition alone in 5
   layers (9 heads, 66 units, 761 weights), built from the same primitives,
   with a layer-by-layer walkthrough and a knockout that breaks the carry chain

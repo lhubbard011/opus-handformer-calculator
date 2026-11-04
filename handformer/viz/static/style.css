@@ -205,3 +205,13 @@ svg.graph { display: block; font: 10px var(--mono); }
 .g-both { stroke: var(--text); }
 .g-edge.on { opacity: 1; stroke-width: 2; }
 .g-edge.off { opacity: .05; }
+.g-flow { fill: none; stroke: var(--accent-2); opacity: .45; }
+.g-flow:hover { opacity: 1; }
+.g-box rect { fill: var(--panel-2); stroke: var(--border); }
+.g-box-frame rect { stroke: var(--ph-open); } .g-box-parser rect { stroke: var(--ph-rewrite); }
+.g-box-add rect { stroke: var(--ph-add); } .g-box-sub rect { stroke: var(--ph-sub); } .g-box-mul rect { stroke: var(--ph-mul); }
+.g-box-div rect { stroke: var(--ph-div); } .g-box-pow rect { stroke: var(--ph-pow); }
+.g-box-title { fill: var(--text); font: 600 12px var(--sans); }
+.g-box-sub { fill: var(--muted); font: 10px var(--sans); }
+.g-h { fill: var(--accent-2); } .g-u { fill: #ff8a65; }
+.g-text { fill: none; stroke: var(--ph-rewrite); stroke-width: 1.5; stroke-dasharray: 5 4; opacity: .8; } .g-text:hover { stroke-width: 3; }
