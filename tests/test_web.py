@@ -226,6 +226,26 @@ class TestWebParity(unittest.TestCase):
                     self.assertEqual(j["meta"][key], meta[key], key)
                 close(np.array(j["data"]).reshape(mat.shape), mat.astype(np.float32), kind)
 
+    def test_logit_attribution(self):
+        """Direct logit attribution: in both engines, each top byte's parts sum exactly to its logit,
+        and the engines agree part by part."""
+        r = self.runner
+        py = r.run("2+3*(4-1)")
+        qs = [10, 15, 30, len(py["chars"]) - 2]
+        js = self.node([["/api/run", {"expression": "2+3*(4-1)"}],
+                        *(["/api/position", {"run_id": "$run", "q": q}] for q in qs)])
+        for q, jp in zip(qs, js[1:]):
+            pp = r.position(py["run_id"], q)
+            self.assertEqual([e["byte"] for e in jp["dla"]], [e["byte"] for e in pp["dla"]], f"q={q}")
+            for je, pe in zip(jp["dla"], pp["dla"]):
+                for e in (je, pe):
+                    close(sum(x[3] for x in e["by_part"]), e["logit"], f"q={q} {e['byte']!r} parts sum to the logit")
+                    close(sum(x[3] for x in e["by_dim"]), e["logit"], f"q={q} {e['byte']!r} dims sum to the logit")
+                key = lambda e: {(x[0], x[1], x[2]): x[3] for x in e["by_part"]}  # noqa: E731
+                self.assertEqual(set(key(je)), set(key(pe)), f"q={q} {pe['byte']!r} parts")
+                close_dict(key(je), key(pe), f"q={q} {pe['byte']!r} contributions")
+                close_dict({x[0]: x[3] for x in je["by_dim"]}, {x[0]: x[3] for x in pe["by_dim"]}, f"q={q} dims")
+
     def test_errors_match(self):
         """The calculator takes any input as its bytes, unknown ones included (spaces, letters, '=',
         UTF-8), and both engines run it the same way, list the unknown bytes and cut a run that

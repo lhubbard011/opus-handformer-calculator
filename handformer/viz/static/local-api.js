@@ -9,6 +9,7 @@ import { Model } from "./engine.js";
 const log = (...a) => console.info("[local-api]", ...a);
 const MAX_RUNS = 4;
 const MAX_KNOCKOUT_MODELS = 4;
+const TOP_DLA = 3; // = handformer/viz/runner.py TOP_DLA
 const POSITIONAL = ["pos", "pos2"];
 // A knocked-out model may never write its final '\n': cap it near the intact answer's length
 // (same rule as handformer/viz/runner.py knockout_budget).
@@ -215,11 +216,59 @@ export class LocalApi {
     });
     const lg = tr.logits[q];
     const order = [...lg.keys()].sort((a, b) => lg[b] - lg[a] || a - b).slice(0, this.cfg.top_logits);
+    const dla = order.slice(0, TOP_DLA).map((t) => this._dla(tr, q, t, values, heads, units, lg[t]));
     log(`position ${runId} q=${q}: ${heads.length} heads, ${units.length} active units`);
     return {
       model_id: this.cfg.model_id, q, values, heads, units,
       logits: order.map((t) => [String.fromCharCode(t), lg[t]]),
+      dla,
     };
+  }
+
+  /** The unembedding column of byte b (one weight per dim), dense. */
+  _ucol(b) {
+    this._ucols ||= new Map();
+    if (!this._ucols.has(b)) {
+      const col = new Float64Array(this.model.d);
+      for (const { r, cols, vals } of this.model.unembed) {
+        for (let i = 0; i < cols.length; i++) if (cols[i] === b) col[r] = vals[i];
+      }
+      this._ucols.set(b, col);
+    }
+    return this._ucols.get(b);
+  }
+
+  /** Direct logit attribution for byte t at q (same definition as handformer/viz/runner.py _dla). */
+  _dla(tr, q, t, values, heads, units, logit) {
+    const col = this._ucol(t), d = this.model.d, names = this.model.names, S = this.labels.length;
+    const byDim = [];
+    for (let j = 0; j < d; j++) {
+      const c = values[j][S - 1] * col[j];
+      if (col[j] !== 0 && Math.abs(c) > 1e-9) byDim.push([names[j], values[j][S - 1], col[j], c]);
+    }
+    let e = 0;
+    for (let j = 0; j < d; j++) e += values[j][0] * col[j];
+    const parts = [["embed", -1, -1, e]];
+    this.model.layers.forEach((L, li) => L.heads.forEach((_, hi) => {
+      const w = tr.headWrote(li, hi, q);
+      let c = 0;
+      for (let j = 0; j < d; j++) c += w[j] * col[j];
+      parts.push(["head", li, hi, c]);
+    }));
+    for (const u of units) {
+      const Ly = this.model.layers[u.layer];
+      const wout = Ly.woutRow || (Ly.woutRow = new Map(Ly.wout.map((w) => [w.r, w])));
+      const w = wout.get(u.unit);
+      let c = 0;
+      if (w) for (let i = 0; i < w.cols.length; i++) c += w.vals[i] * col[w.cols[i]];
+      parts.push(["unit", u.layer, u.unit, u.pre * c]);
+    }
+    const kind = { embed: 0, head: 1, unit: 2 };
+    const r6 = (x) => Math.round(Math.abs(x) * 1e6) / 1e6;
+    const byPart = parts.filter((x) => Math.abs(x[3]) > 1e-9)
+      .sort((a, b) => r6(b[3]) - r6(a[3]) || a[1] - b[1] || kind[a[0]] - kind[b[0]] || a[2] - b[2]);
+    byDim.sort((a, b) => r6(b[3]) - r6(a[3]) || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    return { byte: String.fromCharCode(t), logit, by_dim: byDim, by_part: byPart };
   }
 
   // ------------------------------------------------------------- heatmaps

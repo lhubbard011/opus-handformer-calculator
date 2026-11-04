@@ -43,6 +43,7 @@ def unknown_budget(prompt_len: int, budget: int) -> int:
 MAX_KNOCKOUT_MODELS = 4
 TOP_KEYS = 3
 TOP_LOGITS = 5
+TOP_DLA = 3  # bytes whose score is broken into direct contributions (same in local-api.js)
 
 
 
@@ -260,6 +261,8 @@ class Runner:
             "multiline": self.spec.multiline, "node_names": dict(self.spec.node_names),
             "model_id": self.model_id,
             "d_model": len(self.layout),
+            # the dims the unembedding reads: the only ones a logit depends on directly
+            "readout": [self.names[j] for j in np.flatnonzero(np.abs(self.model.unembed).sum(axis=1))],
             "nonzero_params": self.model.nonzero_params(),
             "source": sources.repo(),  # GitHub repo + branch for "view source" links
             "dims": [{"name": n, "cat": self.spec.category(n), "doc": self._doc(n),
@@ -365,7 +368,7 @@ class Runner:
         rec = run.rec
         values = rec.row_history(q)  # (d, n_snapshots)
 
-        heads = []
+        heads, head_out = [], {}
         inputs = {s: x[: q + 1].copy() for s, x in rec.sweep() if s % 2 == 0}  # layer inputs, keys 0..q
         for li, layer in enumerate(run.model.layers):
             x_in = inputs[2 * li]  # residual entering layer li
@@ -378,6 +381,7 @@ class Runner:
                 attn /= attn.sum()
                 wrote = ((attn @ x_in) @ h.w_v) @ h.w_o
                 nz = np.flatnonzero(np.abs(wrote) > 1e-9)
+                head_out[(li, hi)] = wrote
                 heads.append({
                     "layer": li, "head": hi,
                     "top": [[int(k), float(wt)] for k, wt in zip(idx, w)],
@@ -389,7 +393,8 @@ class Runner:
             active = np.flatnonzero(pre[q] > 1e-9)
             units += [{"layer": li, "unit": int(u), "pre": float(pre[q, u])} for u in active]
 
-        top = np.argsort(-run.logits[q])[:TOP_LOGITS]
+        top = np.argsort(-run.logits[q], kind="stable")[:TOP_LOGITS]  # ties by byte value, as local-api.js
+        dla = self._dla(run, q, values, head_out, units, top[:TOP_DLA])
         log.info("position %s q=%d: %d heads, %d active units", run_id, q, len(heads), len(units))
         return {
             "model_id": self.model_id,
@@ -398,7 +403,31 @@ class Runner:
             "heads": heads,
             "units": units,
             "logits": [[chr(int(t)), float(run.logits[q, t])] for t in top],
+            "dla": dla,
         }
+
+    def _dla(self, run: Run, q: int, values: np.ndarray, head_out: dict, units: list[dict], tops) -> list[dict]:
+        """Direct logit attribution: each top byte's score as an exact sum of direct contributions.
+
+        logit(b) = x_final · W_U[:, b], and x_final = (embedding + position) + every head's output
+        + every fired unit's output (no LayerNorm, so the split is exact). by_dim: final value ×
+        weight for each dim the readout uses; by_part: each component's output · W_U[:, b]."""
+        U = run.model.unembed
+        x_final, x_embed = values[:, -1], values[:, 0]
+        out = []
+        for t in tops:
+            col = U[:, t]
+            by_dim = [[self.names[j], float(x_final[j]), float(col[j]), float(x_final[j] * col[j])]
+                      for j in np.flatnonzero(col) if abs(x_final[j] * col[j]) > 1e-9]
+            parts = [["embed", -1, -1, float(x_embed @ col)]]
+            parts += [["head", li, hi, float(v @ col)] for (li, hi), v in head_out.items()]
+            parts += [["unit", u["layer"], u["unit"], float(u["pre"] * (run.model.layers[u["layer"]].w_out[u["unit"]] @ col))]
+                      for u in units]
+            kind = {"embed": 0, "head": 1, "unit": 2}
+            parts = sorted((x for x in parts if abs(x[3]) > 1e-9), key=lambda x: (-round(abs(x[3]), 6), x[1], kind[x[0]], x[2]))
+            by_dim.sort(key=lambda x: (-round(abs(x[3]), 6), x[0]))
+            out.append({"byte": chr(int(t)), "logit": float(run.logits[q, t]), "by_dim": by_dim, "by_part": parts})
+        return out
 
     # ------------------------------------------------------------- heatmaps
 

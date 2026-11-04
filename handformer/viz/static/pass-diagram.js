@@ -144,6 +144,17 @@ export class PassDiagram {
     });
   }
 
+  /** Mark the parts that contribute directly to the chosen byte's score (null: clear). */
+  setAttribution(parts) {
+    if (!this.rows) return;
+    this.svgEl.querySelectorAll(".dla-pos, .dla-neg").forEach((e) => e.classList.remove("dla-pos", "dla-neg"));
+    this.svgEl.classList.toggle("dla", !!parts);
+    for (const [kind, layer, idx, c] of parts || []) {
+      const e = kind === "embed" ? this.rows[0].g : this.rows[kind === "head" ? 1 + 2 * layer : 2 + 2 * layer]?.items[idx];
+      e?.classList.add(c >= 0 ? "dla-pos" : "dla-neg");
+    }
+  }
+
   /** Glow the computation being played and fill the spine down to it; keep it in view. */
   setStage(s, scroll = true) {
     this.stage = s;

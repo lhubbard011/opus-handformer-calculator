@@ -23,7 +23,8 @@ function el(tag, cls, text) {
   if (text !== undefined) e.textContent = text;
   return e;
 }
-const fmt = (v) => (Math.abs(v - Math.round(v)) < 1e-6 ? String(Math.round(v)) : v.toFixed(4));
+// display only: within 1e-4 of an integer shows the integer (the model's gates leave ~1e-6 residue)
+const fmt = (v) => (Math.abs(v - Math.round(v)) < 1e-4 ? String(Math.round(v)) : String(Number(v.toFixed(4))));
 const showChar = (c) => (c === "\n" ? "⏎" : c === undefined ? "" : c);
 /** A byte as text: printable as itself (quoted), control bytes as \\xNN. */
 const byteText = (c) => (c === "\n" ? "⏎" : c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127
@@ -121,6 +122,7 @@ export class TracePlayer {
     const labels = run.snapshots;
     const used = info.dims.map((d, i) => ({ ...d, i, vals: p.values[i] })).filter((d) => d.vals.some((v) => Math.abs(v) > TOL));
     const scale = used.map((d) => Math.max(...d.vals.map(Math.abs)) || 1);
+    this.readout = new Set(info.readout || []);
     this.data = { p, run, info, labels, used, scale, q: p.q };
     if (this.modelId !== info.model_id) { this.modelId = info.model_id; this.diagram.setModel(info, labels); }
     const changed = labels.map((_, st) => st > 0 && used.some((d) => Math.abs(d.vals[st] - d.vals[st - 1]) > TOL));
@@ -143,6 +145,10 @@ export class TracePlayer {
       const fill = el("span", "tr-fill");
       barWrap.append(fill);
       row.append(name, val, barWrap);
+      if (this.readout.has(d.name)) {
+        row.classList.add("readout");
+        name.dataset.tip = "The unembedding reads this dim: it is one of the values the next byte's score is computed from.";
+      }
       row.dataset.tip = `${d.name}: ${d.doc || ""}\n(click to open it in the Residual stream panel)`;
       row.addEventListener("click", () => this.hooks.onDim?.(d.name));
       this.dims.append(row);
@@ -199,6 +205,8 @@ export class TracePlayer {
     const snap = Math.min(s, endStage - 1); // the logits stage shows the final residual
     this.range.value = String(s);
     this.diagram.setStage(s);
+    const dla = D.p.dla?.[this.dlaPick || 0];
+    this.diagram.setAttribution(s === this.last() && dla ? dla.by_part : null);
     const label = s === endStage ? "logits" : D.labels[s];
     const ch = D.run.chars;
     this.caption.textContent = `position ${D.q} ${JSON.stringify(showChar(ch[D.q]))} → writes ${JSON.stringify(showChar(ch[D.q + 1]))} · ` +
@@ -239,6 +247,7 @@ export class TracePlayer {
         r.append(el("span", "tr-name", byteText(b)), el("span", "tr-val", fmt(v)), bw);
         box.append(r);
       });
+      this.renderAttribution(box);
       return;
     }
     const label = D.labels[s];
@@ -307,5 +316,61 @@ export class TracePlayer {
       box.insertBefore(item, box.children[1] || null);
     }
     item.classList.add("focus");
+  }
+
+  /** Direct logit attribution at the logits stage: a top byte's score as an exact sum of what
+   *  each part wrote (by part) and of what each read dim holds (by dim). */
+  renderAttribution(box) {
+    const D = this.data, H = this.hooks, dla = D.p.dla || [];
+    if (!dla.length) return;
+    const pick = Math.min(this.dlaPick || 0, dla.length - 1);
+    const e = dla[pick];
+    const head = el("div", "tr-title tr-dla-title", "Why this score: direct logit attribution");
+    head.dataset.tip = "The score is the final residual stream times the unembedding, and that stream is the sum of what " +
+      "the embedding, every head and every unit wrote (no LayerNorm here, so the split is exact). Each line is one " +
+      "part's direct share; they add up to the score. Parts that only feed later parts show up as 0 here: use knock-outs for those.";
+    const tabs = el("div", "tr-dla-tabs");
+    dla.forEach((x, i) => {
+      const b = el("button", i === pick ? "on" : "", `${byteText(x.byte)} ${fmt(x.logit)}`);
+      b.addEventListener("click", () => { this.dlaPick = i; this.render(); });
+      tabs.append(b);
+    });
+    box.append(head, tabs);
+    const parts = e.by_part, mx = Math.max(...parts.map((x) => Math.abs(x[3])), 1e-9);
+    const list = el("div", "tr-dla");
+    for (const [kind, layer, idx, c] of parts) {
+      const r = el("div", "tr-dla-row " + (c >= 0 ? "pos" : "neg"));
+      let name, src = null;
+      if (kind === "embed") name = "embedding + position";
+      else if (kind === "head") { const h = D.info.layers[layer].heads[idx]; name = `L${layer + 1} head ${h.name}`; src = h.src; }
+      else { const u = D.info.layers[layer].units[idx]; name = `L${layer + 1} unit #${idx} → ${u.write}`; src = u.src; }
+      const bw = el("span", "tr-barwrap"), f = el("span", "tr-fill");
+      f.style.width = `${(100 * Math.abs(c)) / mx}%`;
+      bw.append(f);
+      r.append(el("span", "tr-name", name), el("span", "tr-val", `${c >= 0 ? "+" : ""}${fmt(c)}`), bw);
+      if (src) { const l = el("span", "tr-links"); l.append(H.srcLinks(src)); r.append(l); }
+      if (kind !== "embed") {
+        r.dataset.tip = "Click to play the computation this part belongs to.";
+        r.addEventListener("click", (ev) => {
+          if (ev.target.closest("a")) return;
+          this.focus = { kind: kind === "head" ? "heads" : "units", layer, i: idx };
+          this.go(kind === "head" ? 1 + 2 * layer : 2 + 2 * layer);
+        });
+      }
+      list.append(r);
+    }
+    const sum = parts.reduce((t, x) => t + x[3], 0);
+    list.append(el("div", "tr-dla-sum", `sum ${fmt(sum)} = score ${fmt(e.logit)} (${parts.length} part${parts.length === 1 ? "" : "s"})`));
+    box.append(el("div", "tr-sub", "by part"), list);
+    const dims = el("div", "tr-dla");
+    for (const [name, v, w, c] of e.by_dim) {
+      const r = el("div", "tr-dla-row tr-dla-dim " + (c >= 0 ? "pos" : "neg"));
+      r.append(el("span", "tr-name", name), el("span", "tr-val", `${fmt(v)} × ${fmt(w)} = ${c >= 0 ? "+" : ""}${fmt(c)}`));
+      r.addEventListener("click", () => H.onDim?.(name));
+      r.dataset.tip = "Its final value times its unembedding weight for this byte. Click to open the dim.";
+      dims.append(r);
+    }
+    if (!e.by_dim.length) dims.append(el("div", "muted", "no dim the unembedding reads is set for this byte"));
+    box.append(el("div", "tr-sub", "by dim (final value × unembedding weight)"), dims);
   }
 }
