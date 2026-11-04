@@ -82,7 +82,79 @@ for labelling.
 Each step's trace is the model's own forward pass, through an observe-only
 hook, so the visualizer shows exactly the computation the tests check.
 
-## The ideas that made it work
+## How to read the visualizer (plain language)
+
+**The big picture.** This is a small AI model that does arithmetic, but
+nobody trained it: every one of its numbers was written by hand. You type
+something like `2+3*(4-1)` and it writes the answer one character at a time,
+showing its working along the way, like you would on paper.
+
+**The residual stream.** Every character the model reads or writes gets its
+own notepad. As the model works, it writes notes on that notepad: "this
+character is the digit 7", "the nearest bracket is 5 characters back", "we're
+in the middle of a multiplication". Every note has a fixed line on the
+notepad, and every line has one job. The residual stream is all of those
+notepads together.
+
+**The residual-stream heatmap** lays every notepad side by side, like a big
+spreadsheet:
+
+- **Each column is one character** in the sequence, left to right. The first
+  few are what you typed; the rest are what the model wrote.
+- **Each row is one line of the notepad**, one kind of note. Hover over a cell
+  to see what that note is called and what it says.
+- **The colour says how big the note is.** Black means nothing written, orange
+  a positive number, blue a negative one, and the brighter, the bigger. Each
+  row is scaled on its own, so compare brightness along a row, not between rows.
+
+**The rows come in groups:**
+
+- **input:** what the character *is* ("I'm a 7", "I'm a plus sign"). Every 7
+  lights up the same way.
+- **frame:** where the model is in the problem ("where did the current step
+  start?", "where's the equals sign?"). These appear as long horizontal
+  stripes: the note stays the same until something new happens, then jumps.
+- **parser** and the operator groups (**add**, **sub**, **mul**, **div**,
+  **pow**): the working for choosing the next step and doing the arithmetic.
+  With "focus active circuit" on, only the groups in use at the current
+  moment are shown.
+- **output:** the model's vote for the next character. The brightest cell in a
+  column is what it writes next.
+
+**The outlined column** is the moment you're looking at: the model sitting on
+that character, deciding what to write next. **Everything to the right is
+dimmed** because, at that moment, it hasn't happened yet. Press → to step
+forward and watch it move. The "after" menu shows the notepads at an earlier
+layer, so you can watch notes appear as each layer writes them.
+
+**In one sentence:** each column is one character, each row is one kind of
+note the model keeps about it, and the colour shows how strongly that note is
+set. You're watching the model's scratch paper fill up as it solves the
+problem.
+
+**Questions people usually ask:**
+
+- *Why is most of it black?* Each note has one specific job and is only
+  written when it's needed. That's what makes it readable: nothing is hidden
+  in a blur of numbers.
+- *Is it looking anything up?* No. Everything comes from the hand-set numbers.
+  `tools/run_weights.py`, a separate 60-line script that only loads those
+  numbers, gets the same answers.
+- *Why does it write so much working?* Like a person, it can only do a little
+  thinking per character, so longer problems need written working.
+
+**The other views:**
+
+- **This step · dims × layers:** one character's notepad, with each column a
+  layer, so you can see which layer wrote each note.
+- **Attention · selected head:** for one "lookup" in the model, which earlier
+  character each position read from. Each row is almost a single bright dot:
+  the lookup points at exactly one place.
+- **MLP activations:** which small calculating units fired at each character.
+- **Raw weights:** the hand-written numbers themselves, labelled by what they
+  connect.
+
+
 
 - **Attention does addressing, not similarity.** Every head answers "which
   position do I read?" A score of `−β(k − t)²`, built from the positional
