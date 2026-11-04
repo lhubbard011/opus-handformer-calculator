@@ -269,3 +269,27 @@ button.pin { font-size: 11px; padding: 1px 6px; border-color: var(--border); }
 .bcell.is-nb { border-color: var(--accent-2); }
 .bcell.is-next { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
 @media (pointer: coarse) { .bcell { width: 20px; height: 20px; } }
+/* C syntax highlighter */
+:root { --ph-keyword: #c792ea; --ph-ident: #d8dde6; --ph-number: #f78c6c; --ph-string: #c3e88d; --ph-char: #ffcb6b;
+        --ph-comment: #697098; --ph-preproc: #89ddff; --ph-punct: #7d8696; --ph-space: #3a404b; }
+.ph-keyword { border-bottom-color: var(--ph-keyword); } .lg.ph-keyword { background: var(--ph-keyword); }
+.ph-ident { border-bottom-color: var(--ph-ident); } .lg.ph-ident { background: var(--ph-ident); }
+.ph-number { border-bottom-color: var(--ph-number); } .lg.ph-number { background: var(--ph-number); }
+.ph-string { border-bottom-color: var(--ph-string); } .lg.ph-string { background: var(--ph-string); }
+.ph-char { border-bottom-color: var(--ph-char); } .lg.ph-char { background: var(--ph-char); }
+.ph-comment { border-bottom-color: var(--ph-comment); } .lg.ph-comment { background: var(--ph-comment); }
+.ph-preproc { border-bottom-color: var(--ph-preproc); } .lg.ph-preproc { background: var(--ph-preproc); }
+.ph-punct { border-bottom-color: var(--ph-punct); } .lg.ph-punct { background: var(--ph-punct); }
+.ph-space { border-bottom-color: var(--ph-space); }
+.code-input { flex: 1; min-width: 0; font: 13px var(--mono); background: var(--panel-2); color: var(--text);
+              border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; resize: vertical; }
+.code-input[hidden], .code-panel[hidden] { display: none; }
+.code-view { margin: 6px 0 0; padding: 10px; background: var(--bg); border-radius: 6px; font: 13px/1.5 var(--mono);
+             white-space: pre; overflow-x: auto; max-height: 60vh; }
+.code-view span { cursor: pointer; }
+.code-view .later { color: #4a5060; }
+.code-view .now { outline: 2px solid var(--accent); border-radius: 2px; }
+.code-view .t-keyword { color: var(--ph-keyword); font-weight: 600; } .code-view .t-ident { color: var(--ph-ident); }
+.code-view .t-number { color: var(--ph-number); } .code-view .t-string { color: var(--ph-string); }
+.code-view .t-char { color: var(--ph-char); } .code-view .t-comment { color: var(--ph-comment); font-style: italic; }
+.code-view .t-preproc { color: var(--ph-preproc); } .code-view .t-punct { color: #a9b1c2; }

@@ -26,7 +26,7 @@ class Knockout(BaseModel):
 
 class RunBody(BaseModel):
     model: str = "calc"
-    expression: str = Field(min_length=1, max_length=400)
+    expression: str = Field(min_length=1, max_length=8000)  # each model checks its own limit
     knockout: Knockout | None = None
 
 

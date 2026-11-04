@@ -297,3 +297,28 @@ match = 'l5 = b.at(5)'
 [src."life.next_count"]
 file = "handformer/life/circuit.py"
 match = 'for v in range(1, 10):'
+
+# --- C syntax highlighter (handformer/csyntax/circuit.py)
+[src."c.state"]
+file = "handformer/csyntax/circuit.py"
+match = 'st = lambda letter:'
+
+[src."c.lookups"]
+file = "handformer/csyntax/circuit.py"
+match = 'x = pr.gather_head("the source byte being classified"'
+
+[src."c.compile"]
+file = "handformer/csyntax/circuit.py"
+match = 'def _rule_unit(r: Rule) -> UnitSpec:'
+
+[src."c.keywords"]
+file = "handformer/csyntax/circuit.py"
+match = 'for kw in KEYWORDS:'
+
+[src."c.start"]
+file = "handformer/csyntax/circuit.py"
+match = 'l1.units.append(pr.relu_unit({"one": 1.0, "pos": -1.0}'
+
+[src."c.rules"]
+file = "handformer/csyntax/circuit.py"
+match = 'RULES = ['

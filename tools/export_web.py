@@ -55,6 +55,7 @@ def export(out: Path, model: str = "calc") -> None:
         "chars_hint": spec.chars_hint,
         "input_pattern": spec.input_pattern,
         "pattern_error": spec.pattern_error,
+        "strip_spaces": spec.strip_spaces, "prompt_end": spec.prompt_end, "max_input": spec.max_input,
         "max_tokens": spec.max_tokens,
         "top_keys": rn.TOP_KEYS,
         "top_logits": rn.TOP_LOGITS,

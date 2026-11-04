@@ -170,6 +170,26 @@ class TestWebParity(unittest.TestCase):
         bad = self.node([["/api/run", {"expression": ".#./###"}]], life_dir)
         self.assertIn("start with the number of generations", bad[0]["error"])
 
+    def test_c_matches(self):
+        """The C highlighter: same letters, step values and traces in both engines (spaces and newlines kept)."""
+        c_dir = self.tmp / "c"
+        export_web.export(c_dir, "c")
+        r = Runner("c")
+        for src in ('int main(void) { /* hi */\n  return 0x1F; // x\n}\n', '#define S "a\\"b" \\\n  more\nchar c = \'\\n\';'):
+            with self.subTest(src=src):
+                py = r.run(src)
+                q = len(py["chars"]) - 3
+                js = self.node([["/api/run", {"expression": src}], ["/api/position", {"run_id": "$run", "q": q}]], c_dir)
+                self.assertNotIn("error", js[0], js[0])
+                self.assertEqual(js[0]["chars"], py["chars"])
+                self.assertEqual(js[0]["expression"], src)
+                for a, b in zip(js[0]["steps"], py["steps"]):
+                    self.assertEqual(a["pred"], b["pred"])
+                    close_dict(a["v"], b["v"], "c step")
+                close(js[1]["values"], r.position(py["run_id"], q)["values"], f"c values q={q}")
+        bad = self.node([["/api/run", {"expression": "int\x01x;"}]], c_dir)
+        self.assertIn("unsupported characters", bad[0]["error"])
+
     def test_weights_match(self):
         r = self.runner
         cases = [("embed", None, None), ("unembed", None, None), ("wq", 4, 0), ("wk", 2, 1), ("wov", 7, 2),

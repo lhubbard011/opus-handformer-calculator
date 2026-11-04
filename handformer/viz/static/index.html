@@ -10,10 +10,11 @@
   <header class="topbar">
     <div class="brand">handformer <span class="brand-sub">visualizer</span></div>
     <select id="model-sel" aria-label="Model" data-tip="Which hand-written model to look at. Both are built with the same engine and primitives, and every view below works for either.">
-      <option value="calc">calculator</option><option value="life">game of life</option>
+      <option value="calc">calculator</option><option value="life">game of life</option><option value="c">C syntax highlighter</option>
     </select>
     <form id="expr-form" class="prompt">
       <input id="expr-input" type="text" value="2+3*(4-1)" spellcheck="false" autocomplete="off" aria-label="Expression">
+      <textarea id="code-input" class="code-input" rows="7" spellcheck="false" aria-label="C source" hidden></textarea>
       <button type="submit" class="primary" data-tip="Run the expression through the model and record every internal value.">Run</button>
     </form>
     <div class="controls">
@@ -40,6 +41,12 @@
       <span class="label">Sequence</span>
       <span id="step-label" class="muted"></span>
       <span class="spacer"></span>
+      <span class="legend" data-model="c" hidden>
+        <span class="lg ph-keyword" data-tip="A C11 keyword.">keyword</span><span class="lg ph-ident" data-tip="An identifier.">ident</span>
+        <span class="lg ph-number" data-tip="A number (pp-number: digits, letters, '.', exponent signs).">number</span><span class="lg ph-string" data-tip="A string literal, its escapes and quotes.">string</span>
+        <span class="lg ph-char" data-tip="A character constant.">char</span><span class="lg ph-comment" data-tip="A block or line comment.">comment</span>
+        <span class="lg ph-preproc" data-tip="A preprocessing directive: a line starting with '#'.">directive</span><span class="lg ph-punct" data-tip="A punctuator or operator.">punct</span>
+      </span>
       <span class="legend" data-model="life" hidden>
         <span class="lg ph-prompt" data-tip="The count and the starting grid you typed.">prompt</span><span class="lg ph-cell" data-tip="A cell of the next generation, from the rule: born with 3 live neighbours, survives with 2 or 3.">cell</span>
         <span class="lg ph-rowend" data-tip="A row end ('/') or grid end ('='), copied from the same offset one generation back.">row end</span><span class="lg ph-count" data-tip="The count digit (one less than the last block's) and its ':', or the final newline.">count</span>
@@ -139,6 +146,12 @@
     </div>
   </details>
 
+
+  <section id="p-code" data-pin="Code" class="panel wide code-panel" hidden>
+    <div class="panel-title" data-tip="The source coloured by the state letters the model has written so far. The outlined byte is the one being classified now; click any byte to step to it.">Code
+      <span class="muted small" id="code-caption"></span></div>
+    <pre id="code-view" class="code-view"></pre>
+  </section>
 
   <section id="p-board" data-pin="Board" class="panel wide board-panel" hidden>
     <div class="panel-title" data-tip="The grid one generation back and the generation being written. The cell being written and the nine cells its heads read are outlined.">Board

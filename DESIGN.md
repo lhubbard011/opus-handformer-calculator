@@ -1057,3 +1057,15 @@ The visualizer shows both models (`viz/models.py`: each model brings its builder
 circuit grouping, pointers and docs; everything else is shared). Life adds a Board panel and
 its own step explanations, all derived from the written text and the model's own values.
 Unlike the calculator, Life has no known claim exceptions (`tests/test_life.py`).
+
+## 32. A third model: a C syntax highlighter (`handformer/csyntax/`, `CSYNTAX.md`)
+
+The lexer is a table of 32 rules (`RULES`). The prompt is the source and an end marker; for each
+source byte the model writes a state letter. The state is the model's own previous letter (the
+current byte at each output step), so each rule is an AND of 0/1 conditions on that letter and
+on exact lookups of the source byte and its neighbours, one unit with its own dim; fallback rules
+are their group minus their siblings, so exactly one rule dim is 1 at every byte (checked in
+`tests/test_csyntax.py`). Rule dims vote for their letters directly in the unembedding. Keywords:
+one AND unit per C11 keyword over gathered letters at the word's first byte. Because the start
+byte is a newline like those in the source, the "no match yet" fallback of its landmark tags is a
+position test (ReLU(1 − pos)) instead of `is_bos`.

@@ -8,6 +8,10 @@ import { LocalApi } from "./local-api.js";
 import { drawGraph, drawOverview } from "./graph.js";
 
 const $ = (id) => document.getElementById(id);
+// The input is a one-line box (calculator, Life) or a code box (C): read and write it through these.
+const inputBox = () => (state.info?.multiline ? $("code-input") : $("expr-input"));
+const getInput = () => inputBox().value;
+const setInput = (v) => { inputBox().value = v; };
 const log = (...args) => console.info("[handviz]", ...args);
 const logErr = (...args) => console.error("[handviz]", ...args);
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
@@ -16,12 +20,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Tags that are positions computed for display, not dims of their own.
 const PTR_DOCS = {
   cell: "The same cell one generation back (L bytes back): the 'self' head reads it.",
+  src: "The source byte being classified at this step (position = this position - E + 1).",
   nb: "A neighbour of that cell, read by one of the eight neighbour heads ('/' ':' '=' read as dead).",
 };
 // Pointer tags drawn above the sequence, per model (dim -> label).
 const MARK_LABELS_BY = {
   calc: { Ls: "Ls", F: "[", p: "p", c: "c", o: "o", a_lo: "a_lo", b_hi: "b_hi", E: "=", S: ";", Rb: "]" },
   life: { C: ":", cell: "cell", nb: "nb" },
+  c: { E: "end", src: "src" },
 };
 
 const state = {
@@ -98,7 +104,7 @@ function focusSet() {
   if (s.phase === "op" && s.op) set.add(s.op);
   return set;
 }
-const focused = (circuit) => !$("focus").checked || focusSet().has(circuit);
+const focused = (circuit) => !$("focus").checked || state.model === "c" || focusSet().has(circuit);
 
 // One tooltip for every element carrying data-tip (list rows, tags, bytes, controls).
 function wireTips() {
@@ -235,7 +241,25 @@ function summarizeLife(run, q, raw) {
   return { q, phase, op: null, pred: p, explain, marks, nbs };
 }
 
-const summarizeStep = (run, q, raw) => (state.model === "life" ? summarizeLife(run, q, raw) : summarize(run, q, raw));
+// C highlighter: the state letter written, and the one rule dim that is 1 (the model's own values).
+const C_CLASS = { B: "comment", D: "comment", C: "comment", E: "comment", L: "comment", c: "comment", s: "string",
+  S: "string", t: "string", z: "string", a: "char", A: "char", b: "char", y: "char", p: "preproc", n: "number",
+  k: "keyword", i: "ident", o: "punct", _: "space" };
+function summarizeC(run, q, raw) {
+  const v = raw.v, E = Math.round(v.E), src = q - E + 1, p = raw.pred;
+  if (q < run.prompt_len - 1) return { q, phase: "prompt", op: null, pred: p, explain: "Part of the C source you gave: input, not predicted.", marks: {} };
+  const fired = Object.keys(v).filter((k) => k.startsWith("r_") && v[k] > 0.5);
+  const doc = (k) => dimDoc(k)?.doc || k;
+  const ch = run.chars[src] ?? "";
+  const prev = run.chars[q];
+  const was = q === E ? "the start" : `state '${prev}'`;
+  const explain = p === "\n" ? "The source is used up, so the model writes the final newline (rule end)."
+    : `Source byte ${src} ${JSON.stringify(ch)}, after ${was}: ${fired.length === 1 ? doc(fired[0]) : `rules ${fired.join(", ")}`}`;
+  return { q, phase: C_CLASS[p] || "punct", op: null, pred: p, explain, marks: { E, src }, rule: fired[0] };
+}
+
+const summarizeStep = (run, q, raw) => (state.model === "life" ? summarizeLife(run, q, raw)
+  : state.model === "c" ? summarizeC(run, q, raw) : summarize(run, q, raw));
 const phaseClass = (s) => (s.phase === "op" ? `ph-${s.op || "prompt"}` : `ph-${s.phase}`);
 
 // ------------------------------------------------------------------ runs
@@ -244,6 +268,7 @@ const GRAPH_CIRCUITS = {
   calc: [["all", "all circuits together"], ["frame", "frame locator"], ["parser", "parser / rewriter"],
          ["add", "add"], ["sub", "sub"], ["mul", "mul"], ["div", "div"], ["pow", "pow"]],
   life: [["life", "game of life"]],
+  c: [["rules", "the rules"], ["lookups", "lookups"], ["keywords", "keywords"], ["landmarks", "landmarks"]],
 };
 
 /** Show the parts of the page that belong to the current model (legend, guide, graph menu, input hint). */
@@ -255,8 +280,10 @@ function applyModelChrome() {
   const keep = $("g-circuit").value;
   $("g-circuit").replaceChildren(...GRAPH_CIRCUITS[m].map(([v, t]) => new Option(t, v)));
   if (GRAPH_CIRCUITS[m].some(([v]) => v === keep)) $("g-circuit").value = keep;
-  $("expr-input").placeholder = info.input_hint;
-  $("expr-input").dataset.tip = `Input for the ${info.title}: ${info.input_hint}.`;
+  $("expr-input").hidden = !!info.multiline;
+  $("code-input").hidden = !info.multiline;
+  inputBox().placeholder = info.input_hint;
+  inputBox().dataset.tip = `Input for the ${info.title}: ${info.input_hint}.`;
   document.title = `handformer · ${info.title}`;
 }
 
@@ -270,8 +297,8 @@ async function switchModel(key, input = null) {
   state.ko = { heads: [], units: [], dims: [] };
   await loadInfo();
   applyModelChrome();
-  $("expr-input").value = input ?? state.info.default_input;
-  await runExpression($("expr-input").value);
+  setInput(input ?? state.info.default_input);
+  await runExpression(getInput());
 }
 
 async function loadInfo() {
@@ -290,6 +317,10 @@ async function loadInfo() {
 function answerOf(run) {
   const text = run.chars.join("");
   // Life: the last generation's grid; the calculator: the line after the last step
+  if (state.model === "c") {
+    const written = run.chars.length - run.prompt_len - (run.finished ? 1 : 0), source = run.prompt_len - 2;
+    return `${written} of ${source} source bytes classified` + (run.finished ? "" : " (did not finish)");
+  }
   const raw = state.model === "life" ? (text.trim().split("=").filter(Boolean).pop() || "").split(":").pop()
     : text.split("]").pop().trim();
   let a = [...raw].map((c) => (c >= " " && c <= "~" ? c : "·")).join("");
@@ -608,6 +639,38 @@ function renderBoard() {
   $("board-caption").textContent = s.phase === "cell" ? `· ${s.explain.split(":")[0]}` : "";
 }
 
+// ------------------------------------------------------------------ C code view
+// The source coloured by the letters written so far (display only); the outlined byte is the
+// one being classified at this step.
+function renderCode() {
+  const panel = $("p-code");
+  panel.hidden = state.model !== "c";
+  if (panel.hidden || !state.run) return;
+  const run = state.run, q = state.q, E = run.prompt_len - 1, view = $("code-view");
+  view.replaceChildren();
+  for (let s = 1; s < E; s++) {
+    const out = E + s; // the letter for source byte s is written at position E + s
+    const sp = document.createElement("span");
+    sp.textContent = run.chars[s];
+    const letter = out <= q ? run.chars[out] : null;
+    sp.className = letter ? `t-${C_CLASS[letter] || "punct"}` : "later";
+    if (s === q - E + 1) sp.classList.add("now");
+    sp.dataset.tip = `source byte ${s} ${JSON.stringify(run.chars[s])}` + (letter ? ` → state '${letter}' (${C_CLASS[letter]})` : " (not classified yet)") +
+      "\n(click to step to it)";
+    sp.addEventListener("click", () => goto(E + s - 1));
+    view.append(sp);
+  }
+  const st = run.steps[q];
+  $("code-caption").textContent = st.rule ? `· rule ${st.rule.slice(2)}` : "";
+  // keep the current byte in view by scrolling this box only (scrollIntoView would move the page)
+  const now = view.querySelector(".now");
+  if (now) {
+    const r = now.getBoundingClientRect(), rv = view.getBoundingClientRect();
+    if (r.top < rv.top || r.bottom > rv.bottom) view.scrollTop += r.top - rv.top - rv.height / 2;
+    if (r.left < rv.left || r.right > rv.right) view.scrollLeft += r.left - rv.left - rv.width / 2;
+  }
+}
+
 function renderStep() {
   const run = state.run;
   const s = run.steps[state.q];
@@ -615,6 +678,7 @@ function renderStep() {
   $("step-label").textContent = `step ${state.q - run.prompt_len + 2} / ${n} · query pos ${state.q} ${JSON.stringify(run.chars[state.q])} → writes ${JSON.stringify(run.chars[state.q + 1])}`;
   $("explain").textContent = s.explain;
   renderBoard();
+  renderCode();
   $("explain").style.borderLeftColor = getComputedStyle(document.documentElement)
     .getPropertyValue(`--${phaseClass(s)}`) || "var(--accent)";
   const m = $("marks");
@@ -1173,7 +1237,7 @@ function wire() {
   wireTips();
   $("expr-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    runExpression($("expr-input").value);
+    runExpression(getInput());
   });
   $("btn-first").addEventListener("click", () => state.run && goto(state.run.prompt_len - 1));
   $("btn-back").addEventListener("click", () => goto(state.q - 1));
@@ -1450,13 +1514,13 @@ async function main() {
   if (matchMedia("(max-width: 700px)").matches) $("map-howto").open = false; // long on a phone; one tap opens it
   try {
     const v = readHash();
-    if (["calc", "life"].includes(v.m)) state.model = v.m;
+    if (["calc", "life", "c"].includes(v.m)) state.model = v.m;
     await loadInfo();
     applyModelChrome();
-    if (!v.e) $("expr-input").value = state.info.default_input;
+    if (!v.e) setInput(state.info.default_input);
     setStatus(`${state.info.layers.length} layers · d_model ${state.info.d_model} · ${state.info.nonzero_params} hand-written params`);
     if (v.any) log("opening the view from the link", location.hash.length, "chars");
-    if (v.e) $("expr-input").value = v.e;
+    if (v.e) setInput(v.e);
     state.ko = v.ko;
     if (v.map && document.querySelector(`[data-map="${v.map}"]`)) {
       state.map = v.map;
@@ -1468,7 +1532,7 @@ async function main() {
     $("diff").checked = v.diff;
     if (v.pins.length) { [...pins].forEach(unpinOne); togglePin(null, { ids: v.pins, scroll: false }); }
     renderGraph();
-    await runExpression($("expr-input").value);
+    await runExpression(getInput());
     if (v.snap !== null && v.snap < state.run.snapshots.length) $("snapshot").value = v.snap;
     if (v.q !== null) await goto(v.q);
     else if (v.snap !== null && state.pos.has(state.q)) await renderMap(state.pos.get(state.q));

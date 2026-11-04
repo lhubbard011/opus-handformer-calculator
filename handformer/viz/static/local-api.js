@@ -114,16 +114,19 @@ export class LocalApi {
   }
 
   run(expression, knockout) {
-    expression = String(expression).replaceAll(" ", "");
-    if (expression.endsWith("=")) expression = expression.slice(0, -1);
+    expression = String(expression);
+    if (this.cfg.strip_spaces) {  // the calculator and Life ignore spaces and a trailing '='; C keeps its source
+      expression = expression.replaceAll(" ", "");
+      if (expression.endsWith("=")) expression = expression.slice(0, -1);
+    }
     // the same input checks as the server's model (handformer/viz/models.py): characters, then framing
     if (!expression) throw new Error(this.cfg.pattern_error);
-    if (expression.length > 400) throw new Error("expression longer than 400 characters");
+    if (expression.length > this.cfg.max_input) throw new Error(`input longer than ${this.cfg.max_input} characters`);
     const allowed = new Set(this.cfg.input_chars);
     const bad = [...new Set([...expression].filter((ch) => !allowed.has(ch)))].sort();
     if (bad.length) throw new Error(`unsupported characters: '${bad.join("")}' ${this.cfg.chars_hint}`);
     if (!new RegExp(this.cfg.input_pattern).test(expression)) throw new Error(this.cfg.pattern_error);
-    const prompt = [...`\n${expression}=`].map((c) => c.charCodeAt(0));
+    const prompt = [...`\n${expression}${this.cfg.prompt_end}`].map((c) => c.charCodeAt(0));
     const ko = normKnockout(knockout);
     let budget = this.cfg.max_tokens - prompt.length;
     if (!koEmpty(ko)) {

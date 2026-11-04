@@ -4,6 +4,7 @@ In any Markdown file, write a reference with an empty or any text:
 
     [](src:add.carry)        a named location from docs/links.toml
     [](src:dim:inB)          where a residual dim is written (from the model itself)
+    [](src:dim:c:r_str)      the same for another model's dim (calc, life, c: handformer/viz/models.py)
 
 and run
 
@@ -32,7 +33,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 MAP = ROOT / "docs" / "links.toml"
-DOCS = ("README.md", "DESIGN.md", "HELLO.md", "LIFE.md")
+DOCS = ("README.md", "DESIGN.md", "HELLO.md", "LIFE.md", "CSYNTAX.md")
 
 log = logging.getLogger("doclinks")
 
@@ -47,25 +48,27 @@ class Resolver:
         self.repo = table["repo"]["url"].rstrip("/")
         self.ref = table["repo"]["ref"]
         self.named = table.get("src", {})
-        self._dims: dict[str, list[str]] | None = None
+        self._dims: dict[str, dict[str, list[str]]] = {}
         self.used: set[str] = set()
 
-    def _dim_sites(self) -> dict[str, list[str]]:
-        if self._dims is None:
+    def _dim_sites(self, model: str = "calc") -> dict[str, list[str]]:
+        if model not in self._dims:
             sys.path.insert(0, str(ROOT))
-            from handformer import arith
+            from handformer.viz.models import MODELS
             from handformer.viz.sources import dim_sites
-            sites = dim_sites(arith.builder())
-            log.info("built the model for dim locations: %d dims", len(sites))
-            self._dims = sites
-        return self._dims
+            if model not in MODELS:
+                raise ValueError(f"unknown model {model!r} in a dim key (one of {', '.join(MODELS)})")
+            sites = dim_sites(MODELS[model].builder())
+            log.info("built the %s model for dim locations: %d dims", model, len(sites))
+            self._dims[model] = sites
+        return self._dims[model]
 
     def where(self, key: str) -> str:
         """``path:line`` for a key, or raise ValueError saying why not."""
         self.used.add(key)
         if key.startswith("dim:"):
-            name = key[4:]
-            sites = self._dim_sites().get(name)
+            model, _, name = key[4:].rpartition(":")  # dim:NAME (calculator) or dim:MODEL:NAME
+            sites = self._dim_sites(model or "calc").get(name)
             if not sites:
                 raise ValueError(f"no residual dim named {name!r}")
             return sites[0]

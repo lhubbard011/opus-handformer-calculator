@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from .. import arith, common as cm, expr, frame, life
+from .. import arith, common as cm, csyntax, expr, frame, life
 
 CALC_MARKS = ("Ls", "F", "p", "c", "o", "a_lo", "b_hi", "E", "S", "Rb", "P", "R")
 CALC_SUMMARY = (*CALC_MARKS, "phase1", "phase2", "phase4", "act_add", "act_sub", "act_mul", "act_div", "act_pow",
@@ -64,7 +64,26 @@ class ModelDef:
     chars_hint: str  # how the "unsupported characters" message ends
     input_pattern: str  # regex the input must match (input framing only)
     pattern_error: str
+    strip_spaces: bool = True  # the calculator and Life ignore spaces; C source keeps them
+    prompt_end: str = "="  # the byte that ends the prompt
+    max_input: int = 400
+    multiline: bool = False  # the page shows a code box instead of a one-line input
 
+
+C_SAMPLE = """#include <stdio.h>
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+/* Print the larger of two numbers. */
+int main(void) {
+    const char *msg = "max: %d\\n";  // a format string
+    unsigned long x = 0x1Fu;
+    double d = 2.5e-3;
+    char c = '\\'';
+    if (x > 3) printf(msg, MAX(1, 2));
+    return 0;
+}
+"""
+C_SUMMARY = ("E", *(f"r_{r.name}" for r in csyntax.RULES), "r_end", "kw", "norm")
 
 MODELS = {
     "calc": ModelDef("calc", "calculator", arith.builder, _calc_prompt, _calc_category, CALC_MARKS, CALC_SUMMARY,
@@ -76,4 +95,10 @@ MODELS = {
                      "N:grid: generations (one digit), ':', rows of . and # separated by /",
                      "".join(sorted(life.ALLOWED)), life.circuit.CHARS_HINT, life.circuit.PATTERN,
                      life.circuit.PATTERN_ERROR),
+    "c": ModelDef("c", "C syntax highlighter", csyntax.builder, csyntax.prompt, csyntax.circuit.category, ("E",),
+                  C_SUMMARY, csyntax.circuit.DOCS, csyntax.circuit.MAX_SOURCE * 2 + 8, C_SAMPLE,
+                  "C source: the model writes one lexer state per byte",
+                  "".join(sorted(csyntax.circuit.ALLOWED)), csyntax.circuit.CHARS_HINT, csyntax.circuit.PATTERN,
+                  csyntax.circuit.PATTERN_ERROR, strip_spaces=False, prompt_end="\x03",
+                  max_input=csyntax.circuit.MAX_SOURCE, multiline=True),
 }

@@ -49,11 +49,17 @@ def dim_sites(builder: ModelBuilder) -> dict[str, list[str]]:
             sites[d].append(where)
 
     embed, positional = _def_site(cm.embed), _def_site(Transformer.positional)
-    for n in cm.INPUT_DIMS:
-        note(n, positional if n in ("pos", "pos2") else embed)
-    for n, where in builder.embed_where.items():  # a model's own byte features (e.g. Life's 'alive')
-        if n not in cm.INPUT_DIMS:
+    for n in ("pos", "pos2"):
+        if n in sites:
+            note(n, positional)
+    for n in sites:  # byte features: the line that embeds them, else the shared common.embed
+        if n in ("pos", "pos2"):
+            continue
+        where = builder.embed_where.get(n, "")
+        if where:
             note(n, where)
+        elif n in cm.INPUT_DIMS:
+            note(n, embed)
     for spec in builder.layers:
         for h in spec.heads:
             for dst in h.value.values():
