@@ -78,6 +78,67 @@ summed over heads, a ReLU MLP, residual adds) and which two input columns carry
 position p and p². Dimension and circuit names exist only at build time and
 for labelling.
 
+## Read the circuits
+
+Every head and unit is written by hand, by name, in a few hundred lines of Python. These are the places to start:
+
+| what | where |
+|---|---|
+| **Engine** | |
+| weights from named linear forms | [model.py:155](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L155 "src:engine.builder") `ModelBuilder`: `{dim: coef}` forms become matrices |
+| a head = query, key, value forms | [model.py:88](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L88 "src:engine.head_spec") `HeadSpec` |
+| an MLP unit = ReLU(read) → write | [model.py:108](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L108 "src:engine.unit_spec") `UnitSpec` |
+| the forward pass | [model.py:287](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L287 "src:engine.forward") `Transformer.residual` |
+| cached greedy decoding | [model.py:351](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L351 "src:engine.decode_cache") `_DecodeCache` |
+| **Primitives** | |
+| exact lookup: score −β(k−t)² | [primitives.py:62](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L62 "src:prim.gather") `gather_head` |
+| latest match (tags grow with position) | [primitives.py:109](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L109 "src:prim.latest_feature") `latest_feature` |
+|  | [primitives.py:167](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L167 "src:prim.latest_head") `latest_head` |
+| first match after a point (forward search) | [primitives.py:140](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L140 "src:prim.next_match") `next_match_head` |
+| x·y from a table of squares | [primitives.py:95](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L95 "src:prim.product") `product_form` |
+| floor(x/s) by attention over a ruler | [primitives.py:76](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L76 "src:prim.floor_div") `floor_div_head` |
+| exact 0/1 steps that reject noise | [primitives.py:228](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L228 "src:prim.clamp01") `clamp01_units` |
+| gating with −BIG·(1−flag) | [primitives.py:256](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L256 "src:prim.gated") `gated` |
+| digit of x mod 10 by ReLU ramps | [common.py:102](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/common.py#L102 "src:prim.ramp_mod10") `ramp_mod10_units` |
+| byte embedding | [common.py:56](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/common.py#L56 "src:prim.embed") `embed` |
+| **Frame locator (layers 1–4)** | |
+| unary vs binary '-' | [frame.py:39](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L39 "src:frame.unary_minus") frame.py |
+| latest-marker heads F, Rb, E, S, P, … | [frame.py:104](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L104 "src:frame.latest_heads") layer 2 |
+| precision N read from the prompt | [frame.py:107](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L107 "src:frame.precision") layer 2 |
+| routing: which calculator runs (sign XOR) | [frame.py:146](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L146 "src:frame.routing") layer 4 `act_*` |
+| **Parser and rewriter (layers 4–22)** | |
+| find the innermost group | [expr.py:91](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L91 "src:parser.redex") layers 4–5 |
+| group end c = min(first ')', line end) | [expr.py:107](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L107 "src:parser.group_end") layer 5 |
+| precedence: choose the operator o | [expr.py:118](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L118 "src:parser.precedence") layer 7 |
+| operand bounds a_lo, b_hi | [expr.py:127](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L127 "src:parser.operands") layers 8–9 |
+| drop the parentheses | [expr.py:170](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L170 "src:parser.drop_parens") layer 11 |
+| cancel −(−v) | [expr.py:177](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L177 "src:parser.cancel") layer 11 |
+| decimal alignment and result places | [expr.py:193](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L193 "src:parser.decimals") layers 13–14 |
+| frame copy segments | [expr.py:212](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L212 "src:parser.frame_copy") layers 14–16, copied by the L17 head |
+| result formatting and the rewrite | [expr.py:247](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L247 "src:parser.rewrite") layers 17–21 |
+| output votes | [expr.py:298](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L298 "src:parser.outputs") layer 22 |
+| **Calculators** | |
+| addition: whole circuit (~60 lines) | [addition.py:32](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/addition.py#L32 "src:add.circuit") layers 3–5 |
+| addition: carry recovered, never stored | [addition.py:65](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/addition.py#L65 "src:add.carry") layer 4 |
+| subtraction: borrow and sign | [subtraction.py:78](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/subtraction.py#L78 "src:sub.sign") layer 4 |
+| subtraction: top digit and complement on copy | [subtraction.py:70](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/subtraction.py#L70 "src:sub.complement") layers 4–7 |
+| multiplication: squares table gathers | [multiplication.py:72](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/multiplication.py#L72 "src:mul.squares") layer 4 |
+| multiplication: line index j = floor(x/s) | [multiplication.py:91](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/multiplication.py#L91 "src:mul.line_index") layer 5 |
+| multiplication: carry | [multiplication.py:145](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/multiplication.py#L145 "src:mul.carry") layer 9 |
+| division: digit vs all nine multiples | [division.py:144](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/division.py#L144 "src:div.compare") layer 7 |
+| division: nine heads pick the quotient digit | [division.py:181](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/division.py#L181 "src:div.quotient") layer 9 |
+| power: the five rewrite cases | [power.py:44](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/power.py#L44 "src:pow.cases") `_segments` |
+| power: exponent parity | [power.py:89](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/power.py#L89 "src:pow.parity") layer 5 |
+| **Merging** | |
+| outputs gated by act_* (no dispatch) | [arith.py:64](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/arith.py#L64 "src:merge.gating") `_Namespace.unit` |
+| private dims may not shadow shared ones | [arith.py:83](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/arith.py#L83 "src:merge.no_shadow") `builder` |
+| **Example dims** | |
+| `inB`: this byte copies operand b into the frame | [expr.py:229](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L229 "src:dim:inB") |
+| `f_R`: landmark tag for the latest `\|` | [frame.py:99](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L99 "src:dim:f_R") |
+| `mul.carry`: the multiplication carry | [multiplication.py:146](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/multiplication.py#L146 "src:dim:mul.carry") |
+
+Each circuit is a short list of named heads and units, placed at fixed layers with `b.at(i)`. The links are generated: `docs/links.toml` names each location by a unique line of text, and `python tools/doclinks.py` rewrites every `[](src:KEY)` (or `[](src:dim:NAME)` for any residual dimension) to its current line. CI fails if a link goes stale. DESIGN.md explains each one.
+
 ## Visualizer
 
 `python -m handformer.viz` serves a step-through view on port 8768.
@@ -95,7 +156,15 @@ for labelling.
   - this step (dims × sublayers);
   - the full attention pattern of a head;
   - MLP activations (units × positions).
-- **"Focus active circuit"** hides circuits that aren't active at the current step.
+- **"Focus active circuit"** hides circuits that are switched off at the current step. They still run, but their outputs are gated to zero; untick it to see all 147 heads.
+- **Explanations:** hover (or tap) any dim, head, unit, byte or heatmap row name to see what it means.
+- **View source:** every head, unit and dim links to the line of Python that wrote it.
+- **Phones:** every feature works; tap replaces hover and the step controls sit in a bottom bar.
+
+Some things that look wrong are by design: layers with no heads, heads that
+read position 0 ("no match yet"), near one-hot attention, constants of 10⁶. See
+DESIGN.md §26 for the list, §9 for the full layer map, and §18 and §24 for the
+choices behind the visualizer and the in-browser engine.
 
 Each step's trace is the model's own forward pass, through an observe-only
 hook, so the visualizer shows exactly the computation the tests check.
@@ -283,6 +352,7 @@ tools/
   export_web.py      model.json (nonzero weights) + info.json (names, formulas) for the browser
   build_site.py      static site for GitHub Pages
   export_torch.py    standalone PyTorch package (optionally anonymised / hardened)
+  doclinks.py        keeps the docs' links to source lines current (map: docs/links.toml)
   arith.py           merges everything into one model; solve()
   viz/               step-through visualizer (FastAPI + vanilla JS)
 tests/
@@ -293,6 +363,7 @@ tests/
   test_division.py   small/long/signed/decimal quotients at several ~N; random trees with '/' (exact)
   test_power.py      small/large/decimal/negative exponents, precedence, right-associativity (exact)
   test_web.py        in-page JS model == Python model (bytes, traces, weights); needs node
+  test_doclinks.py   source links resolve, refresh and fail loudly; the docs are current
 DESIGN.md            full design: attention, residual stream, order of operations, every circuit
 ANSWER_FIRST.md      analysis: can the first emitted byte be the answer? (deferred)
 ```

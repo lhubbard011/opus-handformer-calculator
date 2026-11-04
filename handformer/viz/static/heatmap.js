@@ -8,7 +8,8 @@ const TOUCH_COL = 8, TOUCH_ROW = 5, TOUCH_MAX_W = 4000;
 export const isTouch = () => matchMedia("(pointer: coarse)").matches;
 
 // spec: { key, rows, cols, get(r,c) -> raw, norm(raw) -> [0,1], lut, rowLabels[], groups[{row,label}],
-//         colLabel(c), valueText(r,c), onClick(r,c), square }
+//         colLabel(c), valueText(r,c), rowTip(r) (hover on a row label), onClick(r,c), square,
+//         pointers[r] (column to trace per row: an attention head's argmax), colChars[c] (axis characters) }
 // view: { q } current query position (column, or row for attention)
 export function drawHeatmap(canvas, spec, view) {
   const wrap = canvas.parentElement;
@@ -19,7 +20,9 @@ export function drawHeatmap(canvas, spec, view) {
   const rowH = spec.square ? plotW / spec.cols
     : Math.max(touch ? TOUCH_ROW : 3, Math.min(12, 560 / Math.max(1, spec.rows)));
   const plotH = spec.square ? plotW : rowH * spec.rows;
-  const cssH = Math.max(40, plotH + 18);
+  const colW0 = plotW / Math.max(1, spec.cols);
+  const charAxis = spec.colChars && colW0 >= 9; // room for one character per column
+  const cssH = Math.max(40, plotH + (charAxis ? 32 : 18));
   const ctx = setupCanvas(canvas, cssW, cssH);
   ctx.fillStyle = "#0d0f12";
   ctx.fillRect(0, 0, cssW, cssH);
@@ -37,10 +40,23 @@ export function drawHeatmap(canvas, spec, view) {
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(canvas._bitmap, GUTTER, 0, plotW, plotH);
 
+  // pointer trace: where each row's attention peaks, drawn as a staircase so jumps stand out
+  if (spec.pointers) {
+    ctx.strokeStyle = "#5ec8e5";
+    ctx.lineWidth = Math.max(1, Math.min(2, colW / 4));
+    ctx.beginPath();
+    spec.pointers.forEach((k, r) => {
+      const x = GUTTER + (k + 0.5) * colW;
+      if (r === 0) ctx.moveTo(x, r * rowH); else ctx.lineTo(x, r * rowH);
+      ctx.lineTo(x, (r + 1) * rowH);
+    });
+    ctx.stroke();
+  }
+
   // causal view: everything after the current step has not been computed yet
   const q = view.q;
   if (q !== undefined) {
-    ctx.fillStyle = "rgba(13,15,18,0.72)";
+    ctx.fillStyle = spec.square ? "rgba(13,15,18,0.55)" : "rgba(13,15,18,0.72)";
     if (spec.square) {
       ctx.fillRect(GUTTER, (q + 1) * rowH, plotW, plotH - (q + 1) * rowH);
       ctx.strokeStyle = "#f2a541";
@@ -77,7 +93,16 @@ export function drawHeatmap(canvas, spec, view) {
   ctx.fillStyle = "#7d8696";
   ctx.textBaseline = "top";
   const step = Math.max(1, Math.ceil(30 / colW));
-  for (let c = 0; c < spec.cols; c += step) ctx.fillText(String(c), GUTTER + c * colW, plotH + 3);
+  if (charAxis) {
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#d8dde6";
+    ctx.font = "11px ui-monospace, Menlo, monospace";
+    spec.colChars.forEach((ch, c) => ctx.fillText(ch, GUTTER + (c + 0.5) * colW, plotH + 3));
+    ctx.textAlign = "start";
+    ctx.fillStyle = "#7d8696";
+    ctx.font = "10px ui-monospace, Menlo, monospace";
+  }
+  for (let c = 0; c < spec.cols; c += step) ctx.fillText(String(c), GUTTER + c * colW, plotH + (charAxis ? 17 : 3));
 
   canvas._geom = { spec, rowH, colW, plotW, plotH };
 }
@@ -89,9 +114,11 @@ export function attachHeatmapEvents(canvas, tooltip) {
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left - GUTTER;
     const y = e.clientY - rect.top;
-    if (x < 0 || y < 0 || x >= g.plotW || y >= g.plotH) return null;
+    if (y < 0 || y >= g.plotH || x >= g.plotW) return null;
+    if (x < 0) return g.spec.rowTip ? [Math.floor(y / g.rowH), -1] : null; // row label gutter
     return [Math.floor(y / g.rowH), Math.floor(x / g.colW)];
   };
+  const text = (spec, r, c) => (c < 0 ? spec.rowTip(r) : spec.valueText(r, c));
   // Touch: the first tap on a cell shows its readout, a second tap on the same cell
   // does what a mouse click does. Compatibility mouse events after a touch are ignored.
   let touchAt = 0, tapped = null;
@@ -104,7 +131,8 @@ export function attachHeatmapEvents(canvas, tooltip) {
     const { spec } = canvas._geom;
     const [r, c] = rc;
     tooltip.hidden = false;
-    tooltip.textContent = spec.valueText(r, c);
+    tooltip.textContent = text(spec, r, c);
+    canvas.style.cursor = c < 0 ? "help" : "crosshair";
     tooltip.style.left = `${e.clientX + 14}px`;
     tooltip.style.top = `${e.clientY + 10}px`;
   });
@@ -114,15 +142,16 @@ export function attachHeatmapEvents(canvas, tooltip) {
     if (touching()) {
       if (!rc) { tapped = null; hideSheet(tooltip); return; }
       const key = `${canvas._geom.spec.key}:${rc}`;
+      if (rc[1] < 0) { tapped = null; showSheet(tooltip, text(canvas._geom.spec, ...rc)); return; }
       if (tapped !== key) {
         tapped = key;
-        showSheet(tooltip, canvas._geom.spec.valueText(...rc) + (canvas._geom.spec.onClick ? "\n\n(tap the same cell again to jump there)" : ""));
+        showSheet(tooltip, text(canvas._geom.spec, ...rc) + (canvas._geom.spec.onClick ? "\n\n(tap the same cell again to jump there)" : ""));
         return;
       }
       tapped = null;
       hideSheet(tooltip);
     }
-    if (rc && canvas._geom.spec.onClick) canvas._geom.spec.onClick(...rc);
+    if (rc && rc[1] >= 0 && canvas._geom.spec.onClick) canvas._geom.spec.onClick(...rc);
   });
 }
 

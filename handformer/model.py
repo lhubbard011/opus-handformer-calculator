@@ -23,13 +23,35 @@ Design choices (deliberate, see README):
 from __future__ import annotations
 
 import logging
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
 log = logging.getLogger(__name__)
 
 VOCAB = 256
+
+_PKG = Path(__file__).resolve().parent
+# Modules that build specs on a circuit's behalf. The line worth pointing a reader
+# at is the circuit line that called them, so they are skipped.
+_HELPERS = frozenset({"model.py", "primitives.py", "common.py", "arith.py"})
+
+
+def authored_at() -> str:
+    """``path:line`` (repo-relative) of the circuit code that wrote the current spec.
+
+    Documentation only, like ``UnitSpec.label``: it never reaches the weights.
+    """
+    f = sys._getframe(1)
+    while f is not None:
+        p = Path(f.f_code.co_filename)
+        # private helpers inside a circuit file (``_lt``, ``_ruler``) are skipped too
+        if p.parent == _PKG and p.name not in _HELPERS and not f.f_code.co_name.startswith("_"):
+            return f"{p.relative_to(_PKG.parent).as_posix()}:{f.f_lineno}"
+        f = f.f_back
+    return ""
 
 
 class Layout:
@@ -75,19 +97,30 @@ class HeadSpec:
     query: list[Form]
     key: list[Form]
     value: dict[str, Form]
+    where: str = field(default="", compare=False)  # source line that wrote it (docs only)
+
+    def __post_init__(self) -> None:
+        if not self.where:
+            self.where = authored_at()
 
 
 @dataclass
 class UnitSpec:
     """One MLP hidden unit: ``out += ReLU(read(x)) * write``.
 
-    ``label`` says what the unit computes (set by the primitive that built it);
-    it is documentation only and never reaches the weights.
+    ``label`` says what the unit computes (set by the primitive that built it)
+    and ``where`` is the source line that wrote it; both are documentation only
+    and never reach the weights.
     """
 
     read: Form
     write: Form
     label: str = ""
+    where: str = field(default="", compare=False)
+
+    def __post_init__(self) -> None:
+        if not self.where:
+            self.where = authored_at()
 
 
 @dataclass

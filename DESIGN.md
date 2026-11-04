@@ -2,8 +2,9 @@
 
 A decoder-only transformer for arithmetic. Every weight is written by hand and
 nothing is trained. The tokenizer is raw bytes (vocab 256). One set of weights
-evaluates whole expressions (`+ - *`, parentheses, precedence) on non-negative
-integers of any length.
+evaluates whole expressions (`+ - * / ^`, unary minus, parentheses,
+precedence) on signed decimal numbers of any length, with division to a
+precision given in the prompt (`~N`).
 
 ```
 \n2+3*(4-1)=[4-1=3;3]2+3*3=[3*3=90|90;9]2+9=[2+9=11;11]11\n
@@ -36,11 +37,17 @@ Everything after the first `=` is written by the model.
 | 2026-11-03 | Byte tokenizer, hand-written weights, one task: arithmetic | |
 | 2026-11-03 | Arbitrary-length operands | Positional features are functions, not a table; the model writes its working |
 | 2026-11-03 | No host-side reversal or fix-ups ("no hacks like flipping at the end") | The answer comes out most-significant digit first, copied by attention |
-| 2026-11-03 | Precision goes in the prompt: `<expr>~N=` | Not built yet; the model will read N |
+| 2026-11-03 | Precision goes in the prompt: `<expr>~N=` | Built (§21): the model reads N (up to 4 digits) from the prompt |
 | 2026-11-03 | Full expressions with precedence and parentheses | Term rewriting in frames; operands addressed by bounding bytes |
-| 2026-11-03 | Powers: integer exponents; roots: digit-by-digit square root | Not built yet |
+| 2026-11-03 | Powers: integer exponents; roots: digit-by-digit square root | Integer powers built (§23); roots not yet |
 | 2026-11-03 | Operator selection must be in the weights, not separate models | One merged model; circuits are gated by flags computed in the weights |
 | 2026-11-03 | Use the residual stream for as much work as possible | Position arithmetic (products, division) is done with attention instead of extra tokens |
+| 2026-11-03 | Unary minus binds tighter than `^`: `-2^2` = 4 | Simpler parser; differs from the usual maths convention (§23) |
+| 2026-11-03 | Factored per-head value/output maps (W_V d×r, W_O r×d) | 40× faster runs than dense d×d; same nonzero weights (§7) |
+| 2026-11-03 | Every dim, head and unit carries a plain-language explanation | Generated from names and unit labels (§25); labels never change a weight |
+| 2026-11-03 | Step explanations are computed by the page from raw values | Display only: nothing the page computes is fed back to the model (§26) |
+| 2026-11-03 | Public demo is a static site; the model runs in the browser | No server to host; a parity test holds the JS engine to the Python model (§24) |
+| 2026-11-03 | Mobile: same features, touch-aware | Tap replaces hover; the heatmap scrolls inside its panel (§18) |
 
 ## 3. Why the model writes its working
 
@@ -126,17 +133,22 @@ the parser uses to find `)`, the next operator and the end of each operand.
 
 ### 5.1 Allocation
 
-All dimensions are named (249 before signed operands; 263 now). They are allocated by category:
+All 576 dimensions are named. They are allocated by category:
 
 | category | dims | contents |
 |---|---|---|
-| input | 33 | `one`, `pos`, `pos²`, digit value, digit one-hot, byte-class flags |
-| shared frame locator | 43 | marker positions, frame flags, phases, `act_*`, previous-match pointers |
-| parser / rewriter | 62 | p, c, o, operand bounds, region flags, source positions, copy one-hots |
-| addition (private) | 15 | digit targets, gathered digits, carry, answer pointer |
-| subtraction (private) | 24 | same, plus top/lowest-digit pointers and complement value |
-| multiplication (private) | 38 | squares, line index j, column m, b_j one-hot, products, carry |
-| output | 34 | one dimension per emitted byte class, read linearly by the unembedding |
+| input | 37 | `one`, `pos`, `pos²`, digit value, digit one-hot, byte-class flags |
+| shared frame locator | 74 | marker positions, frame flags, phases, `act_*`, previous-match pointers, signs, precision N |
+| parser / rewriter | 114 | p, c, o, operand bounds, decimal pads, region flags, source positions, copy one-hots |
+| addition (private) | 16 | digit targets, gathered digits, carry, answer pointer |
+| subtraction (private) | 25 | same, plus top/lowest-digit pointers and complement value |
+| multiplication (private) | 39 | squares, line index j, column m, b_j one-hot, products, carry |
+| division (private) | 132 | grid geometry, multiples 0–9 of the divisor, digit comparisons, quotient digit |
+| power (private) | 102 | exponent parity and halving, expansion segments, copied base |
+| output | 37 | one dimension per emitted byte class, read linearly by the unembedding |
+
+The operator circuits never run at the same position, so their private
+dimensions could share space (planned compaction, about 576 → 300).
 
 ### 5.2 Conventions
 
@@ -270,20 +282,49 @@ innermost-first means a depth counter is never needed.
 
 ## 9. Global layer map
 
-| layer | attention | MLP |
-|---|---|---|
-| 1 | — | latest-match key features for every marker class |
-| 2 | latest heads: `[` `]` `=` `;` `\|` op, `(`/`]`, `)`, `*`, `+-`, non-digit | frame flags: `open`, `seen_eq`, `seen_semi`, `seen_bar` |
-| 3 | line start `Ls`, innermost group `p`, previous-match pointers, op type at P, sign at S, (P−F)² | `act_add/sub/mul`, phases; operator targets and key features |
-| 4 | pm² ×4, latest-at-p ×3; operand-digit gathers; × squares and previous line | carry / borrow; × collect flags |
-| 5 | next `)` / `*` / `+-` after p; × floor-division head; answer gathers | select `c`; + digits and `]`; − digit and top; × collect source |
-| 6 | × (j+s)², j², b_j one-hot, collect digit; − answer digit | `use_mul`; × a-digit targets, separator flags |
-| 7 | × a_m, a_{m−1} | select `o`; × digit products; − complement |
-| 8 | `a_lo`, `b_hi`, operator-count gathers | paren-drop equalities, `cont`; × ⌊y/10⌋; − answer digits |
-| 9 | frame copy gather | `drop`, `cont`, end of frame copy; × carry |
-| 10 | — | rewrite region flags; × digit ramps |
-| 11 | — | rewrite source position |
-| 12 | rewrite copy gather | all rewriter outputs |
+Every position runs all 22 layers. Which circuits matter depends on the
+position's phase (§8): a byte being copied into a frame uses the parser's
+copy path (L17), a byte of working uses its operator's layers (3–12), and a
+byte of the rewritten line uses the rewrite path (L22). The circuits share
+layers because they never need to be active at the same position.
+
+| layer | heads | heads by circuit | MLP units | units by circuit |
+|---|---|---|---|---|
+| 1 | 2 | frame 2 | 40 | frame 40 |
+| 2 | 16 | frame 16 | 14 | frame 14 |
+| 3 | 14 | frame 14 | 36 | frame 5, add 12, sub 15, mul 4 |
+| 4 | 39 | frame 2, parser 7, add 5, sub 7, mul 7, div 8, pow 3 | 49 | frame 11, add 9, sub 12, mul 7, div 2, pow 8 |
+| 5 | 9 | parser 3, add 1, mul 2, div 2, pow 1 | 89 | parser 6, add 38, sub 27, mul 6, pow 12 |
+| 6 | 10 | parser 1, sub 1, mul 4, div 4 | 78 | parser 4, sub 9, mul 10, div 44, pow 11 |
+| 7 | 21 | mul 2, div 17, pow 2 | 170 | parser 3, sub 3, mul 22, div 48, pow 94 |
+| 8 | 9 | parser 7, div 2 | 97 | parser 6, sub 12, mul 18, div 32, pow 29 |
+| 9 | 17 | parser 5, div 12 | 57 | parser 12, mul 3, div 26, pow 16 |
+| 10 | 3 | parser 2, pow 1 | 257 | parser 4, mul 126, div 66, pow 61 |
+| 11 | 3 | parser 1, div 2 | 9 | parser 5, div 4 |
+| 12 | 2 | parser 1, div 1 | 17 | parser 5, div 12 |
+| 13 | 0 | — | 2 | parser: raw decimal pads |
+| 14 | 0 | — | 11 | parser: pads `pad_a`, `pad_b`, result places `f_res` |
+| 15 | 0 | — | 27 | parser: frame-copy segment flags (in a, pad, op, in b, pad), '.' skips |
+| 16 | 0 | — | 8 | parser: frame-copy source position `src2`, trailing zeros |
+| 17 | 1 | parser: frame copy | 4 | parser |
+| 18 | 0 | — | 7 | parser: end of the reduced line `Lend`, result width, '.' position |
+| 19 | 0 | — | 20 | parser: rewrite region flags (prefix, result, suffix) |
+| 20 | 0 | — | 2 | parser: left padding of the result |
+| 21 | 0 | — | 6 | parser: rewrite source position `src4` |
+| 22 | 1 | parser: rewrite copy | 44 | parser: output votes for every byte |
+
+Totals: 147 heads (frame 34, parser 29, add 6, sub 8, mul 15, div 48, pow 7)
+and 1,044 units (frame 70, parser 176, add 59, sub 78, mul 196, div 234, pow 231).
+
+**Why layers 13–16 and 18–21 have no heads.** Those layers do arithmetic on
+values the position already holds, so there is nothing to look up. The two
+copies at the end each need a source position that takes a chain of ReLU
+steps to compute, and an MLP of layer i is only visible to the heads of layer
+i+1 (§7). The frame copy chain is raw pads (L13) → pads (L14) → segment flags
+(L15) → source position (L16) → copy head (L17). The rewrite chain is line end
+(L18) → region flags (L19) → padding (L20) → source position (L21) → copy head
+(L22). Depth here is the length of a dependency chain, not a count of
+lookups.
 
 ### 9.1 Shared locator (`frame.py`, layers 1–3)
 
@@ -299,7 +340,7 @@ act_<op>  = open AND seen_eq AND (byte at P is <op>)
 neg       = byte at S is '<'
 ```
 
-### 9.2 Choosing and rewriting the sub-expression (`expr.py`, layers 4–14)
+### 9.2 Choosing and rewriting the sub-expression (`expr.py`, layers 4–22)
 
 The source line X_t lies strictly between `Ls` (the `]` that closed the
 previous frame, or BOS) and `Le = F − 1` (its `=`).
@@ -451,9 +492,9 @@ on the bounding byte, whose value is 0.
 | d_model | 576 |
 | nonzero parameters | 8,478 |
 
-The dense size is much larger, mostly zeros in the per-head `d×d` value/output
-matrices. A factored per-head value/output layout would shrink it without
-changing the nonzero count.
+Stored as dense matrices that is 2.08M cells, of which 0.41% are nonzero.
+Heads are factored (§7): query/key width 1–3, and each head moves at most
+18 values. A dense d×d value/output map per head would be 48.8M cells.
 
 ## 15. Verification
 
@@ -499,17 +540,59 @@ See `ANSWER_FIRST.md` for the analysis of emitting the answer with no working
 
 ## 18. Visualizer (`handformer/viz`)
 
-`python -m handformer.viz` (port 8768) serves a step-through view, modelled on `gpt1viz`.
-One run is the model's own cached greedy decode plus one traced forward pass
-(`Transformer.residual(..., trace=...)`, the same computation the tests check);
-step q is the computation at position q that wrote byte q+1.
+`python -m handformer.viz` (port 8768) serves a step-through view, and
+`tools/build_site.py` builds the same page as a static site (§24). One run is
+the model's own greedy decode plus a trace of every position. **Step q is the
+computation at position q that predicts byte q+1.**
 
-* sequence strip coloured by phase/operator, with the step's pointers (p, c, o, a_lo, b_hi, F, S, Rb) as tags
-* plain-language reading of the step, top logits, every head's read position and what it wrote,
-  its hand-written score/value formula, the named residual stream, active MLP units with formulas
-* heatmaps: residual stream (dims × positions, per-dim scaled, any snapshot), this step
-  (dims × sublayers), full attention pattern of the selected head, MLP activations (units × positions)
-* "focus active circuit" hides circuits that are inactive at the current step; future positions are dimmed
+- **Sequence strip:** bytes coloured by the phase or calculator that wrote
+  them, with the step's pointers (p, c, o, a_lo, b_hi, F, S, Rb, …) as tags.
+- **Step panel:** a plain-language reading of the step, the top logits, and
+  the pointer values.
+- **Attention heads:** every head's read position, what it added to the
+  stream, and (on click) its hand-written score and value formulas.
+- **Residual stream:** every named dimension, with the sublayer that wrote it
+  and its value after every layer.
+- **Active MLP units:** each unit that fired, with its formula.
+- **Heatmaps:**
+  - residual stream (dims × positions, after any sublayer);
+  - this step (dims × sublayers);
+  - attention of one head (rows read columns);
+  - MLP activations (units × positions);
+  - raw weights (every matrix, with named rows and columns).
+- **Explanations everywhere:** hovering (or tapping) any dim, head, unit,
+  byte, control or heatmap row name shows what it means (§25). Each heatmap
+  has a "how to use this map" box.
+
+Choices that are not obvious from the page:
+
+- **"Focus active circuit" hides, it does not remove.** Hidden heads and
+  units belong to calculators that are switched off at this step. They still
+  run, but nothing they write reaches the logits unless their `act_*` flag is
+  on. The heads panel says how many are hidden.
+- **Each heatmap row is scaled by its own maximum.** Positions, flags and
+  BIG-gated features differ by orders of magnitude, so a shared scale would
+  show only the largest rows. Compare along a row, not between rows. Rows
+  whose maximum is float noise (below 10⁻⁶) count as empty.
+- **Positions after the current step are dimmed.** They had not been
+  computed when this byte was written (causality).
+- **What a head "added"** is computed from its full attention row, not just
+  its top keys. The top keys are listed with ties in position order.
+- **The attention map is sparse on purpose.** Most heads are pointers (§4.1),
+  so each row has one bright cell. The blue line traces each row's peak:
+  a vertical run is a pointer that holds, and a sideways step is a jump to a
+  newer landmark. Row names read `33 4 → 9 [` ("character 33, a '4', reads
+  position 9, a '['"). Reading position 0 (the start byte) means "no match
+  yet". Gamma below 1 brightens weak attention.
+- **Transport precision:** server heatmaps are sent as float16 (display
+  only); weights as float32, because gating constants up to 10¹³ overflow
+  float16. The exact float64 values are in the export (§22) and in
+  `model.json` (§24).
+- **Touch screens:** tap replaces hover. On a heatmap the first tap reads a
+  cell and a second tap on the same cell does its click action. Cells are
+  drawn at least 8 px wide and the map scrolls sideways inside its panel. On
+  narrow screens the step controls are a fixed bottom bar. Canvases are capped
+  at 16M backing pixels, because iOS Safari shows larger ones blank.
 
 ## 19. Signed operands (unary minus)
 
@@ -639,11 +722,20 @@ against exact truncated rational arithmetic.
   sign·log(1+|w|).
 - **Export:** `python -m handformer.export weights.npz` writes every tensor plus
   a JSON index of dimension, head and unit names.
-- **Density:** 6,930 nonzero of 1.37M stored cells (0.5%). The median residual
+- **Density:** 8,478 nonzero of 2.08M stored cells (0.41%). The median residual
   dimension has one writer and one reader, and the median MLP unit reads 5
   dimensions. The sparsity is the price of one meaning per dimension. Planned
   compaction: time-share the private dimensions of the mutually exclusive
-  operator circuits (about 458 → 280), and merge repeated building blocks.
+  operator circuits (about 576 → 300), and merge repeated building blocks.
+- **Standalone runners:** `tools/run_weights.py` runs the `.npz` with numpy
+  alone and never imports `handformer`. `tools/export_torch.py` writes a
+  self-contained PyTorch package. With `--no-shuffle` it keeps the dimension
+  order; by default it shuffles dimensions and drops names. `--harden` also
+  rescales by powers of two and adds 64 inert decoy dimensions. Because the
+  program is sparse and exact, an outside reader could still recover its
+  circuits: they removed the decoys by dataflow and recovered the dimension
+  names from the byte embedding and the output map. The next step would be
+  decoys that are live but cancel exactly.
 
 ## 23. Integer powers
 
@@ -696,3 +788,171 @@ Tests (`tests/test_power.py`):
 - random mixed expressions.
 
 All answers are checked against exact arithmetic.
+
+## 24. Running in the browser (`viz/static/engine.js`, `local-api.js`)
+
+The public demo is a static site: the page runs the model itself, so it needs
+no server and costs nothing to host. GitHub Actions builds and deploys it
+(`.github/workflows/pages.yml`).
+
+- **`tools/export_web.py`** writes `model.json`, a list of every nonzero
+  weight as `[row, col, value]` (8,478 entries, 130 KB). Python's float repr
+  round-trips exactly through JSON into a JavaScript float64. It also writes
+  `info.json`, the same model description the server returns: names,
+  explanations, formulas and wiring.
+- **`engine.js`** is a ~270-line forward pass that knows nothing about
+  arithmetic. It applies the same rules as `model.py`:
+  - byte embedding plus the `pos` and `pos²` features;
+  - every head reads the same layer input, with unscaled q·k and a causal
+    softmax, and the heads' outputs are summed into the stream;
+  - then the ReLU MLP;
+  - float64 throughout; no LayerNorm and no biases.
+- **Values are cached per head** (v = x·W_V) as well as keys, so a new token
+  costs O(n · head width), not O(n · d). Mathematically (A·X)·W_V = A·(X·W_V);
+  the order of float sums differs, so values match within float rounding
+  (the parity test requires 10⁻⁶) and the argmax bytes are identical.
+- **One decode, no second pass.** While decoding, the engine records a compact
+  trace for every position: the residual entries each sublayer changed (their
+  exact new values), queries, keys and values, the top attention keys, and the
+  positive MLP pre-activations. That answers every visualizer request,
+  including the full attention row of any head at any step. The server
+  instead re-runs one traced forward pass.
+- **`local-api.js`** answers the same `/api/*` requests as the Python server,
+  so `app.js` is one page for both. `window.HANDFORMER_STATIC` (set by
+  `build_site.py`) picks the in-page model.
+- **Host-side code is framing only:** the input character check, the prompt
+  `\n<expr>=`, argmax, and stopping at `\n`. These match the server.
+- **Parity test (`tests/test_web.py`)** runs `local-api.js` under Node and the
+  Python runner on the same requests. The generated bytes must be identical,
+  and every traced number (step values, residuals, head writes, logits,
+  attention, MLP activations, weight views) must agree within 10⁻⁶. Exact ties
+  between attention keys, and rows that are pure float noise, are compared by
+  value rather than by index. CI runs it on every push, and the Pages deploy
+  runs it before building.
+- **Speed:** a 300-byte product decodes in about 0.3 s, and a 925-byte power
+  expression in about 1.2 s.
+
+## 25. Reading the names
+
+Every dimension's explanation comes from `viz/glossary.py`: a table for the
+shared dimensions, per-calculator tables, and these name patterns. Names
+built from a landmark also spell out what the landmark is.
+
+| name | meaning |
+|---|---|
+| `F`, `Rb`, `E`, `S`, `R`, `P` | position of the latest `[`, `]`, `=`, `;`/`<`, `\|`, operator |
+| `Lg`, `Lrp`, `Lmul`, `Lpow`, `Ladd`, `Lnd`, `Ldot`, `Lnz`, `Ptil` | latest `(`/`]`, `)`, `*`/`/`, `^`, `+`/binary `-`, non-number byte, `.`, nonzero digit, `~` |
+| `f_X` | landmark tag for X: nonzero only on X's bytes and growing with position, so the "latest X" head finds the newest |
+| `PM_X`, `PM2_X` | latest X strictly before this byte, and its square (forward search, §4.3) |
+| `Lt_X` | latest X at the group start (where a forward search begins) |
+| `ohD`, `is_*` | this byte is digit D / this byte class |
+| `D0`–`D9`, `O_*` | votes for the next byte, read by the unembedding |
+| `act_op`, `typ_op` | the op calculator is switched on / this frame's operator is op |
+| `Y2_*`, `Y4_*` | the byte being copied into the frame / into the new line |
+| `ns.name` | a private value of calculator `ns` (`mul.J`, `div.m3`, …) |
+
+**Source lines.** Every `HeadSpec` and `UnitSpec` records the line of circuit
+code that created it (`model.authored_at`, skipping the shared helpers and
+private `_helper` functions). A dimension's source is the line of each head or
+unit that writes it, so `inB` links to `expr.py`, where the frame-copy flags
+are built. The visualizer shows these as "view source" links, and the docs use
+the same data through `tools/doclinks.py` (§27). Like labels, they are
+documentation only.
+
+Unit explanations come from labels attached where each unit is built (for
+example "fallback for 'f_R': the start byte scores 1, so 'no match yet'
+reads position 0"). Labels are documentation only and never change a weight.
+Every dimension, head and unit has one (576/576, 147/147, 1,044/1,044).
+
+## 26. Things that look wrong but aren't
+
+A review list for anyone reading the model or the visualizer. §27 links each mechanism to its source lines.
+
+1. **Some layers have no attention heads** (13–16, 18–21): see §9.
+2. **Reading position 0 is often deliberate.** The start byte is the
+   "nothing found yet" answer of every latest-match head, so early in a line
+   many heads read it (about 11% of all head reads in a typical run).
+3. **Attention is nearly one-hot.** Scores are unscaled (no 1/√d) and use
+   β = 30–60, so softmax acts as an exact lookup. A fractional pointer means
+   two keys tied and were averaged, which the features are designed to
+   prevent (for example `2(pos+1)` rather than `pos+1`, §12).
+4. **Inactive circuits still compute.** Routing is gating (§5.2): every
+   circuit runs at every position, and `act_*` decides whether its outputs can
+   fire. That is why one merged model needs no dispatch.
+5. **Huge constants (10⁶, 10¹³) are gates, not values.** `−BIG·(1 − flag)`
+   switches a unit off. Flags are exactly 0 or 1 (robust steps), so BIG never
+   amplifies noise into an answer.
+6. **Working digits are least-significant first, the answer is
+   most-significant first.** The carry chain runs from the low digit, and the
+   answer is copied out in reading order by attention. Nothing is reversed by
+   the host.
+7. **Every frame rewrites the whole line,** so output grows roughly with
+   (number of operators) × (line length), plus each operation's working.
+8. **`~N` truncates, it does not round.** `2/3~3` → `0.666`.
+9. **`-2^2` is 4:** unary minus binds tighter than `^` (§23).
+10. **The page writes the explanations, not the model.** They are computed in
+    JavaScript from the model's raw values and only describe them; the model
+    never sees them.
+11. **The length limit is float64, not the weights:** exactness holds to about
+    10⁵–10⁶ positions (§12).
+12. **The browser and Python agree to 10⁻⁶, not bit for bit,** because the
+    float sums run in a different order. The bytes are identical (§24).
+
+## 27. Where each circuit is written
+
+Each circuit is a short list of named heads and units, placed at fixed layers with `b.at(i)`. The links are generated: `docs/links.toml` names each location by a unique line of text, and `python tools/doclinks.py` rewrites every `[](src:KEY)` (or `[](src:dim:NAME)` for any residual dimension) to its current line. CI fails if a link goes stale.
+
+| what | where |
+|---|---|
+| **Engine** | |
+| weights from named linear forms | [model.py:155](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L155 "src:engine.builder") `ModelBuilder`: `{dim: coef}` forms become matrices |
+| a head = query, key, value forms | [model.py:88](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L88 "src:engine.head_spec") `HeadSpec` |
+| an MLP unit = ReLU(read) → write | [model.py:108](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L108 "src:engine.unit_spec") `UnitSpec` |
+| the forward pass | [model.py:287](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L287 "src:engine.forward") `Transformer.residual` |
+| cached greedy decoding | [model.py:351](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L351 "src:engine.decode_cache") `_DecodeCache` |
+| **Primitives** | |
+| exact lookup: score −β(k−t)² | [primitives.py:62](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L62 "src:prim.gather") `gather_head` |
+| latest match (tags grow with position) | [primitives.py:109](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L109 "src:prim.latest_feature") `latest_feature` |
+|  | [primitives.py:167](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L167 "src:prim.latest_head") `latest_head` |
+| first match after a point (forward search) | [primitives.py:140](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L140 "src:prim.next_match") `next_match_head` |
+| x·y from a table of squares | [primitives.py:95](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L95 "src:prim.product") `product_form` |
+| floor(x/s) by attention over a ruler | [primitives.py:76](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L76 "src:prim.floor_div") `floor_div_head` |
+| exact 0/1 steps that reject noise | [primitives.py:228](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L228 "src:prim.clamp01") `clamp01_units` |
+| gating with −BIG·(1−flag) | [primitives.py:256](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L256 "src:prim.gated") `gated` |
+| digit of x mod 10 by ReLU ramps | [common.py:102](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/common.py#L102 "src:prim.ramp_mod10") `ramp_mod10_units` |
+| byte embedding | [common.py:56](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/common.py#L56 "src:prim.embed") `embed` |
+| **Frame locator (layers 1–4)** | |
+| unary vs binary '-' | [frame.py:39](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L39 "src:frame.unary_minus") frame.py |
+| latest-marker heads F, Rb, E, S, P, … | [frame.py:104](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L104 "src:frame.latest_heads") layer 2 |
+| precision N read from the prompt | [frame.py:107](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L107 "src:frame.precision") layer 2 |
+| routing: which calculator runs (sign XOR) | [frame.py:146](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L146 "src:frame.routing") layer 4 `act_*` |
+| **Parser and rewriter (layers 4–22)** | |
+| find the innermost group | [expr.py:91](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L91 "src:parser.redex") layers 4–5 |
+| group end c = min(first ')', line end) | [expr.py:107](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L107 "src:parser.group_end") layer 5 |
+| precedence: choose the operator o | [expr.py:118](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L118 "src:parser.precedence") layer 7 |
+| operand bounds a_lo, b_hi | [expr.py:127](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L127 "src:parser.operands") layers 8–9 |
+| drop the parentheses | [expr.py:170](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L170 "src:parser.drop_parens") layer 11 |
+| cancel −(−v) | [expr.py:177](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L177 "src:parser.cancel") layer 11 |
+| decimal alignment and result places | [expr.py:193](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L193 "src:parser.decimals") layers 13–14 |
+| frame copy segments | [expr.py:212](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L212 "src:parser.frame_copy") layers 14–16, copied by the L17 head |
+| result formatting and the rewrite | [expr.py:247](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L247 "src:parser.rewrite") layers 17–21 |
+| output votes | [expr.py:298](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L298 "src:parser.outputs") layer 22 |
+| **Calculators** | |
+| addition: whole circuit (~60 lines) | [addition.py:32](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/addition.py#L32 "src:add.circuit") layers 3–5 |
+| addition: carry recovered, never stored | [addition.py:65](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/addition.py#L65 "src:add.carry") layer 4 |
+| subtraction: borrow and sign | [subtraction.py:78](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/subtraction.py#L78 "src:sub.sign") layer 4 |
+| subtraction: top digit and complement on copy | [subtraction.py:70](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/subtraction.py#L70 "src:sub.complement") layers 4–7 |
+| multiplication: squares table gathers | [multiplication.py:72](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/multiplication.py#L72 "src:mul.squares") layer 4 |
+| multiplication: line index j = floor(x/s) | [multiplication.py:91](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/multiplication.py#L91 "src:mul.line_index") layer 5 |
+| multiplication: carry | [multiplication.py:145](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/multiplication.py#L145 "src:mul.carry") layer 9 |
+| division: digit vs all nine multiples | [division.py:144](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/division.py#L144 "src:div.compare") layer 7 |
+| division: nine heads pick the quotient digit | [division.py:181](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/division.py#L181 "src:div.quotient") layer 9 |
+| power: the five rewrite cases | [power.py:44](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/power.py#L44 "src:pow.cases") `_segments` |
+| power: exponent parity | [power.py:89](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/power.py#L89 "src:pow.parity") layer 5 |
+| **Merging** | |
+| outputs gated by act_* (no dispatch) | [arith.py:64](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/arith.py#L64 "src:merge.gating") `_Namespace.unit` |
+| private dims may not shadow shared ones | [arith.py:83](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/arith.py#L83 "src:merge.no_shadow") `builder` |
+| **Example dims** | |
+| `inB`: this byte copies operand b into the frame | [expr.py:229](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L229 "src:dim:inB") |
+| `f_R`: landmark tag for the latest `\|` | [frame.py:99](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L99 "src:dim:f_R") |
+| `mul.carry`: the multiplication carry | [multiplication.py:146](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/multiplication.py#L146 "src:dim:mul.carry") |

@@ -58,6 +58,7 @@ class _Namespace:
             query=[self.form(f) for f in h.query],
             key=[self.form(f) for f in h.key],
             value={self.dim(s): self.form(d) for s, d in h.value.items()},
+            where=h.where,
         )
 
     def unit(self, u: UnitSpec) -> UnitSpec:
@@ -66,7 +67,7 @@ class _Namespace:
         if any(d in OP_OUTPUTS or d in expr.OUT_DIMS for d in write):
             read = pr.gated(read, {f"act_{self.ns}": 1.0}, 1.0)
             label = (label + "; " if label else "") + f"silenced unless the {self.ns} calculator is switched on"
-        return UnitSpec(read=read, write=write, label=label)
+        return UnitSpec(read=read, write=write, label=label, where=u.where)
 
 
 def builder() -> ModelBuilder:

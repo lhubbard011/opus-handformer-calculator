@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [test_ops, test_expr, test_decimal, test_division, test_power, test_web]
+        suite: [test_ops, test_expr, test_decimal, test_division, test_power, test_web, test_doclinks]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -29,3 +29,5 @@ jobs:
       - run: pip install numpy==2.5.4
       - run: python -m handformer.export weights.npz
       - run: python tools/run_weights.py weights.npz "2+3*(4-1)" "-12.5*3-4" "355/113~6" "2^10"
+      - name: docs link to the current source lines
+        run: python tools/doclinks.py --check

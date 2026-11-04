@@ -113,6 +113,32 @@ function wireTips() {
     if (e.target.closest("[data-tip]") && !e.relatedTarget?.closest?.("[data-tip]")) tip.hidden = true;
   });
 }
+// "View source": the circuit line that wrote a head, unit or dim (from the model
+// description; the repository and branch come from docs/links.toml).
+function srcUrl(where) {
+  const r = state.info?.source;
+  if (!r || !where) return null;
+  const i = where.lastIndexOf(":");
+  return `${r.url}/blob/${r.ref}/${where.slice(0, i)}#L${where.slice(i + 1)}`;
+}
+function srcLinks(wheres) {
+  const frag = document.createDocumentFragment();
+  for (const w of [].concat(wheres || [])) {
+    const u = srcUrl(w);
+    if (!u) continue;
+    const a = document.createElement("a");
+    a.className = "src";
+    a.href = u;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.textContent = `${w.split("/").pop()} ↗`;
+    a.dataset.tip = `Open the Python line that wrote this: ${w}`;
+    a.addEventListener("click", (e) => e.stopPropagation()); // don't toggle the row
+    frag.append(a, " ");
+  }
+  return frag;
+}
+const srcText = (wheres) => ([].concat(wheres || []).length ? `\nsource: ${[].concat(wheres).join(", ")}` : "");
 const dimDoc = (name) => state.info?.dims.find((d) => d.name === name);
 
 function setStatus(msg, isError = false) {
@@ -163,6 +189,8 @@ async function loadInfo() {
   $("mlp-layer").replaceChildren(...state.info.layers
     .filter((l) => l.units.length).map((l) => new Option(`${l.index + 1}`, l.index)));
   $("w-layer").replaceChildren(...state.info.layers.map((l) => new Option(`${l.index + 1}`, l.index)));
+  $("a-layer").replaceChildren(...state.info.layers.filter((l) => l.heads.length)
+    .map((l) => new Option(`${l.index + 1}`, l.index)));
   $("w-layer").dispatchEvent(new Event("input"));
 }
 
@@ -329,12 +357,12 @@ function renderHeads(p) {
   const filter = $("head-filter").value.trim().toLowerCase();
   const el = $("heads");
   el.replaceChildren();
-  let lastLayer = -1;
+  let lastLayer = -1, hidden = 0;
   for (const h of p.heads) {
     const spec = headSpec(h.layer, h.head);
     if (!spec) { logErr("head", h.layer, h.head, "missing from the model description; reload the page"); continue; }
     if (filter && !spec.name.toLowerCase().includes(filter)) continue;
-    if (!focused(spec.circuit)) continue;
+    if (!focused(spec.circuit)) { hidden++; continue; }
     if (h.layer !== lastLayer) {
       const lh = document.createElement("div");
       lh.className = "layer-head";
@@ -348,7 +376,7 @@ function renderHeads(p) {
     if (state.head && state.head[0] === h.layer && state.head[1] === h.head) row.classList.add("sel");
     const wrote = Object.entries(h.wrote).map(([d, v]) => `${d}=${fmt(v)}`).join(" ");
     row.dataset.tip = `layer ${h.layer + 1} · ${spec.name}\n${spec.doc}\n\nAt this step it reads position ${k} ("${showChar(state.run.chars[k])}") with ${(w * 100).toFixed(1)}% of its attention.` +
-      (wrote ? `\nIt adds: ${wrote}` : "") + "\n(click for its formulas and its full attention pattern)";
+      (wrote ? `\nIt adds: ${wrote}` : "") + srcText(spec.src) + "\n(click for its formulas, source line and full attention pattern)";
     row.innerHTML = `<span>${spec.name}</span><span class="num">← ${k} ${showChar(state.run.chars[k])} ${w < 0.999 ? (w * 100).toFixed(0) + "%" : ""}</span><span class="wrote">${wrote}</span>`;
     row.addEventListener("click", () => {
       state.head = [h.layer, h.head];
@@ -358,6 +386,13 @@ function renderHeads(p) {
       if (state.map === "attention") renderMap(p);
     });
     el.appendChild(row);
+  }
+  if (hidden) {
+    const note = document.createElement("div");
+    note.className = "muted small hidden-note";
+    note.textContent = `${hidden} more heads belong to calculators that are switched off at this step: they still run, ` +
+      "but their output is gated to zero. Untick “focus active circuit” to list them.";
+    el.appendChild(note);
   }
 }
 
@@ -376,7 +411,8 @@ function renderHeadDetail(p) {
   const value = Object.entries(spec.value).map(([src, dst]) => `${src} → ${dst}`).join("\n       ");
   const top = h.top.map(([k, w]) => `${k} ${JSON.stringify(state.run.chars[k])} ${(w * 100).toFixed(2)}%`).join(", ");
   const wrote = Object.entries(h.wrote).map(([d, v]) => `${d} += ${fmt(v)}`).join("\n       ") || "(nothing)";
-  el.textContent = `L${layer + 1} ${spec.name}\nscore = ${score}\nvalue: ${value}\nreads: ${top}\nwrote: ${wrote}`;
+  el.textContent = `L${layer + 1} ${spec.name}\nscore = ${score}\nvalue: ${value}\nreads: ${top}\nwrote: ${wrote}\nsource: `;
+  el.append(srcLinks(spec.src));
 }
 
 function renderDims(p) {
@@ -403,7 +439,7 @@ function renderDims(p) {
     for (let s = 1; s < vals.length; s++) if (Math.abs(vals[s] - vals[s - 1]) > 1e-9) { written = s; break; }
     const row = document.createElement("div");
     row.className = "row dim-row" + (state.openDim === d.name ? " sel" : "");
-    row.dataset.tip = `${d.name} = ${fmt(final)}\n${d.doc}\n\nwritten by: ${d.written_by}\nread by: ${d.read_by}\n(click to see how it changes layer by layer)`;
+    row.dataset.tip = `${d.name} = ${fmt(final)}\n${d.doc}\n\nwritten by: ${d.written_by}\nread by: ${d.read_by}${srcText(d.src)}\n(click to see how it changes layer by layer)`;
     row.innerHTML = `<span>${d.name}</span><span class="num">${fmt(final)}</span><span class="muted small">${written ? labels[written] : "embed"}</span>`;
     row.addEventListener("click", () => {
       state.openDim = state.openDim === d.name ? null : d.name;
@@ -414,7 +450,8 @@ function renderDims(p) {
       const t = document.createElement("div");
       t.className = "traj";
       t.textContent = labels.map((l, s) => `${l.padEnd(9)} ${fmt(vals[s])}`)
-        .filter((_, s) => s === 0 || Math.abs(vals[s] - vals[s - 1]) > 1e-9).join("\n");
+        .filter((_, s) => s === 0 || Math.abs(vals[s] - vals[s - 1]) > 1e-9).join("\n") + "\nwritten at: ";
+      t.append(srcLinks(d.src));
       row.appendChild(t);
     }
   });
@@ -440,8 +477,9 @@ function renderUnits(p) {
     }
     const row = document.createElement("div");
     row.className = "row unit-row";
-    row.dataset.tip = `layer ${u.layer + 1} · unit #${u.unit}\n${spec.doc}\n\nReLU(${spec.read})\n= ${fmt(u.pre)} at this step → adds to ${spec.write}`;
-    row.innerHTML = `<span class="muted">#${u.unit}</span><span class="num">${fmt(u.pre)}</span><span class="f">ReLU(<b>${spec.read}</b>) → ${spec.write}</span>`;
+    row.dataset.tip = `layer ${u.layer + 1} · unit #${u.unit}\n${spec.doc}\n\nReLU(${spec.read})\n= ${fmt(u.pre)} at this step → adds to ${spec.write}${srcText(spec.src)}`;
+    row.innerHTML = `<span class="muted">#${u.unit}</span><span class="num">${fmt(u.pre)}</span><span class="f">ReLU(<b>${spec.read}</b>) → ${spec.write} </span>`;
+    row.querySelector(".f").append(srcLinks(spec.src));
     el.appendChild(row);
   }
   if (!el.children.length) el.textContent = "no active units match";
@@ -460,6 +498,14 @@ function groupsOf(cats) {
   cats.forEach((c, r) => { if (r === 0 || c !== cats[r - 1]) groups.push({ row: r, label: c }); });
   return groups;
 }
+
+/** Explain every residual dim named in a linear form such as "2·f_R - P + 1". */
+function formDims(form) {
+  const names = [...new Set(form.match(/[A-Za-z_][\w.]*/g) || [])];
+  return names.map(dimDoc).filter(Boolean).map((d) => `${d.name}: ${d.doc}`).join("\n");
+}
+const dimTip = (name) => { const d = dimDoc(name); return d ? `${d.name}\n${d.doc}${srcText(d.src)}` : name; };
+const unitTip = (u, i) => `unit #${i} · ${u.circuit}\n${u.doc}\n\nReLU(${u.read}) → ${u.write}\n\n${formDims(u.write)}${srcText(u.src)}`;
 
 const charAt = (c) => JSON.stringify(state.run.chars[c] ?? "");
 
@@ -489,14 +535,15 @@ const HOWTO = {
           "Hover a cell for the note's meaning and exact value."],
   },
   attention: {
-    see: ["For the head selected in the Attention heads panel: how much each character (<b>row</b>) looks at each earlier character (<b>column</b>).",
+    see: ["For one head: how much each character (<b>row</b>) looks at each earlier character (<b>column</b>). The characters are written along both edges when there is room.",
           "Only the lower-left half can light up: a character can't look ahead."],
     read: ["Each row is almost <b>one bright dot</b>: the head reads exactly one position.",
            "A <b>diagonal line</b> means 'read the byte at a fixed offset' (for example the previous byte).",
            "A <b>vertical stripe</b> means many characters read the same landmark.",
            "A <b>staircase</b> means a pointer jumping to newer landmarks as they appear."],
-    try: ["Pick a head first, for example <b>latest F</b>, <b>first ) after p</b> or an <b>answer digit</b> head.",
-          "Raise <b>gamma</b> to brighten weak attention, lower it to see only the strongest.",
+    try: ["Pick a head with the <b>layer / head</b> menus (or click one in the Attention heads panel), for example <b>latest F</b> or <b>first ) after p</b>.",
+          "Follow the <b>blue line</b>: hover a row name to read 'this character reads that one'.",
+          "Lower <b>gamma</b> to brighten weak attention, raise it to see only the strongest.",
           "Click a row to jump to that character."],
   },
   mlp: {
@@ -507,7 +554,7 @@ const HOWTO = {
            "<b>Digit-ramp</b> units light up where a calculator is writing digits."],
     try: ["Choose a layer where a calculator writes its answer (L5 for add, L10 for mul or div) and step through a step [ … ].",
           "Leave <b>focus active circuit</b> on so only the working calculator's units are listed.",
-          "Hover a cell to read the unit's hand-written formula and value."],
+          "Hover a cell to read the unit's hand-written formula and value.", "Hover a <b>row name</b> (left edge) for what each abbreviation in it means, e.g. f_R or f_Lg."],
   },
   weights: {
     see: ["The <b>hand-written numbers themselves</b> for one matrix, not values during a run.",
@@ -530,6 +577,23 @@ function renderHowto() {
       <div><h4>What you see</h4>${list(h.see)}</div>
       <div><h4>How to read it</h4>${list(h.read)}</div>
       <div><h4>Try this</h4>${list(isTouch() ? [...h.try, TOUCH_HINT] : h.try)}</div></div>` : "";
+}
+
+/** A head worth showing at this step: the first one in a focused circuit that wrote something. */
+function defaultHead(p) {
+  const h = p.heads.find((x) => Object.keys(x.wrote).length && focused(headSpec(x.layer, x.head).circuit))
+    || p.heads.find((x) => Object.keys(x.wrote).length);
+  return h ? [h.layer, h.head] : null;
+}
+
+function syncHeadPicker() {
+  if (!state.head) return;
+  const [layer, head] = state.head;
+  if ($("a-layer").value !== String(layer) || $("a-head").options.length !== state.info.layers[layer].heads.length) {
+    $("a-layer").value = layer;
+    $("a-head").replaceChildren(...state.info.layers[layer].heads.map((h, i) => new Option(`${i}: ${h.name}`, i)));
+  }
+  $("a-head").value = head;
 }
 
 async function renderMap(p) {
@@ -555,6 +619,7 @@ async function renderMap(p) {
       get: (r, c) => data[rows[r].i * n + c], norm: (v) => (v + 1) / 2, lut: DIV,
       rowLabels: rows.map((r) => r.name), groups: groupsOf(rows.map((r) => r.cat)),
       valueText: (r, c) => `${rows[r].name} at position ${c} ${charAt(c)}\n= ${fmt(data[rows[r].i * n + c] * meta.scale[rows[r].i])}\n${rows[r].doc}`,
+      rowTip: (r) => dimTip(rows[r].name),
       onClick: (r, c) => { state.openDim = rows[r].name; goto(c); },
     }, { q });
   } else if (state.map === "step") {
@@ -570,22 +635,40 @@ async function renderMap(p) {
       get: (r, c) => rows[r].vals[c] / scale[r], norm: (v) => (v + 1) / 2, lut: DIV,
       rowLabels: rows.map((r) => r.name), groups: groupsOf(rows.map((r) => r.cat)),
       valueText: (r, c) => `${rows[r].name} after ${labels[c]}\n= ${fmt(rows[r].vals[c])}\n${rows[r].doc}`,
+      rowTip: (r) => dimTip(rows[r].name),
       onClick: (r) => { state.openDim = rows[r].name; renderDims(p); },
     }, {});
   } else if (state.map === "attention") {
+    if (!state.head) state.head = defaultHead(p);
     if (!state.head) {
-      cap.textContent = "select a head in the Attention heads panel";
+      cap.textContent = "pick a head with the layer / head menus above, or click one in the Attention heads panel";
       drawHeatmap(canvas, { rows: 0, cols: 0 }, {});
       return;
     }
     const [layer, head] = state.head;
+    syncHeadPicker();
     const { key, meta, data } = await mapData("/api/attention", { run_id: run.run_id, layer, head });
     const g = Number($("gamma").value);
-    cap.textContent = `L${layer + 1} ${meta.name}: query positions (rows) × key positions (columns); ` +
-      "the outlined row is the current step; each row is a near one-hot pointer";
+    const spec = headSpec(layer, head);
+    const pointers = Array.from({ length: n }, (_, r) => {
+      let best = 0;
+      for (let c = 1; c <= r; c++) if (data[r * n + c] > data[r * n + best]) best = c;
+      return best;
+    });
+    const at = p.heads.find((h) => h.layer === layer && h.head === head);
+    const [k, w] = at.top[0];
+    const wrote = Object.entries(at.wrote).map(([d, v]) => `${d}=${fmt(v)}`).join(", ") || "nothing (its value is zero here)";
+    cap.textContent = `L${layer + 1} '${meta.name}' — ${spec.doc}\n` +
+      `At this step (row ${q} ${charAt(q)}) it reads position ${k} ${charAt(k)}${w < 0.999 ? ` (${(w * 100).toFixed(0)}%)` : ""} and writes ${wrote}.\n` +
+      "Rows = the character doing the reading, columns = the character read. The blue line traces where each row reads, " +
+      "so a vertical run is a pointer that holds and a sideways step is a jump to a newer landmark.";
     drawHeatmap(canvas, {
-      key, rows: n, cols: n, square: true,
+      key: `${key}:g${g}`, rows: n, cols: n, square: true, // gamma changes the colours: part of the cache key
       get: (r, c) => data[r * n + c], norm: (v) => Math.pow(v, g), lut: SEQ,
+      pointers, colChars: run.chars.map(showChar),
+      rowLabels: run.chars.map((ch, r) => `${r} ${showChar(ch)} → ${pointers[r]} ${showChar(run.chars[pointers[r]])}`),
+      rowTip: (r) => `row ${r} ${charAt(r)} reads position ${pointers[r]} ${charAt(pointers[r])} ` +
+        `(${(data[r * n + pointers[r]] * 100).toFixed(1)}%)\n${spec.doc}`,
       valueText: (r, c) => `query ${r} ${charAt(r)} → key ${c} ${charAt(c)}\nweight ${(data[r * n + c] * 100).toFixed(3)}%`,
       onClick: (r) => goto(r),
     }, { q });
@@ -605,6 +688,10 @@ async function renderMap(p) {
       get: (r, c) => data[r * cols + c],
       norm: (v) => 0.5 + 0.5 * Math.sign(v) * Math.log10(1 + Math.abs(v)) / (lmax || 1), lut: DIV,
       rowLabels: meta.rows,
+      rowTip: (r) => {
+        const m = /^#(\d+) -> /.exec(meta.rows[r]);
+        return m ? unitTip(state.info.layers[body.layer].units[Number(m[1])], Number(m[1])) : dimTip(meta.rows[r]);
+      },
       valueText: (r, c) => `row ${meta.rows[r]}\ncol ${meta.cols[c]}\nw = ${data[r * cols + c]}`,
     }, {});
   } else {
@@ -614,13 +701,14 @@ async function renderMap(p) {
     const specs = state.info.layers[layer].units;
     const rows = specs.map((u, i) => ({ ...u, i })).filter((u) => focused(u.circuit) && meta.scale[u.i] > 1e-9);
     cap.textContent = `layer ${layer + 1} MLP: post-ReLU activation of each unit (rows) at every position (columns), ` +
-      "each unit scaled by its max; hover for the unit's hand-written formula";
+      "each unit scaled by its max; hover a cell for the unit's formula, a row name for what its abbreviations mean";
     drawHeatmap(canvas, {
       key: key + rows.map((r) => r.i).join(","),
       rows: rows.length, cols: n,
       get: (r, c) => data[rows[r].i * n + c], norm: (v) => v, lut: SEQ,
       rowLabels: rows.map((r) => `#${r.i} ${r.write}`), groups: groupsOf(rows.map((r) => r.circuit)),
       valueText: (r, c) => `unit #${rows[r].i} at position ${c} ${charAt(c)}\n${rows[r].doc}\nReLU(${rows[r].read})\n= ${fmt(data[rows[r].i * n + c] * meta.scale[rows[r].i])} → ${rows[r].write}`,
+      rowTip: (r) => unitTip(rows[r], rows[r].i),
       onClick: (_r, c) => goto(c),
     }, { q });
   }
@@ -668,6 +756,16 @@ function wire() {
     $("w-head").replaceChildren(...layer.heads.map((h, i) => new Option(`${i}: ${h.name}`, i)));
   };
   $("w-layer").addEventListener("input", fillHeads);
+  const pickHead = (layer, head) => {
+    state.head = [layer, head];
+    if (!state.pos.has(state.q)) return;
+    const p = state.pos.get(state.q);
+    renderHeads(p);
+    renderHeadDetail(p);
+    renderMap(p);
+  };
+  $("a-layer").addEventListener("input", () => pickHead(Number($("a-layer").value), 0));
+  $("a-head").addEventListener("input", () => pickHead(Number($("a-layer").value), Number($("a-head").value)));
   for (const id of ["snapshot", "mlp-layer", "gamma", "w-kind", "w-layer", "w-head", "w-trim"]) {
     $(id).addEventListener("input", () => state.pos.has(state.q) && renderMap(state.pos.get(state.q)));
   }

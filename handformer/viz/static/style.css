@@ -180,3 +180,7 @@ input[type=text], select {
 @media (max-width: 380px) {
   .marks { grid-template-columns: repeat(2, 1fr); }
 }
+.hidden-note { padding: 8px 4px 2px; font-family: var(--sans); }
+#map-caption { white-space: pre-line; }
+a.src { color: var(--accent-2); text-decoration: none; font-family: var(--mono); font-size: 11px; white-space: nowrap; }
+a.src:hover { text-decoration: underline; }

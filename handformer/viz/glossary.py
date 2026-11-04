@@ -119,7 +119,8 @@ PATTERNS = [
     (r"^D(\d)$", "Vote for writing the digit {0} next (an operator circuit's output)."),
     (r"^O_oh(\d)$", "Vote for writing the digit {0} next (copied or padding)."),
     (r"^O_(is_\w+)$", "Vote for writing '{0}' next (copied)."),
-    (r"^f_(\w+)$", "Landmark tag: lets a 'latest' head find the most recent byte for {0}."),
+    (r"^f_(\w+)$", "Landmark tag for {0}: nonzero only on bytes that count as a {0} landmark "
+                  "(it grows with position), so the 'latest {0}' head can pick out the most recent one."),
     (r"^PM_(\w+)$", "The most recent {0} landmark strictly before this byte (used to search forward)."),
     (r"^PM2_(\w+)$", "Square of PM_{0} (for the forward-search score)."),
     (r"^Lt_(\w+)$", "Most recent {0} landmark at the group start (start point of a forward search)."),
@@ -174,7 +175,12 @@ CHAR = {"is_plus": "+", "is_minus": "-", "is_star": "*", "is_slash": "/", "is_ca
 
 
 def _fmt(text: str, groups: tuple) -> str:
-    return text.format(*(CHAR.get(g, g) for g in groups))
+    out = text.format(*(CHAR.get(g, g) for g in groups))
+    # A name built from a landmark (f_R, PM_Lg, Lt_Lmul, ...): say what that landmark is.
+    for g in groups:
+        if g in SHARED and not g.isdigit():
+            out += f" ({g} = {SHARED[g][0].lower()}{SHARED[g][1:].rstrip('.')}.)"
+    return out
 
 
 def describe_dim(name: str) -> str:

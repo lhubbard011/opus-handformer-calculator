@@ -21,6 +21,7 @@ import numpy as np
 
 from .. import arith, common as cm, expr, frame
 from ..model import Form, Tracer
+from . import sources
 from .glossary import describe_dim, describe_head
 
 log = logging.getLogger(__name__)
@@ -171,6 +172,7 @@ class Runner:
 
     def info(self) -> dict:
         wires = self._wiring()
+        sites = sources.dim_sites(self.builder)
         layers = []
         for li, spec in enumerate(self.builder.layers):
             heads = [{
@@ -181,19 +183,22 @@ class Runner:
                 "query": [form_str(f) for f in h.query],
                 "key": [form_str(f) for f in h.key],
                 "value": {src: form_str(dst) for src, dst in h.value.items()},
+                "src": h.where,
             } for h in spec.heads]
             units = [{"read": form_str(u.read), "write": form_str(u.write), "label": u.label,
                       "doc": u.label or ("Writes " + "; ".join(f"{d}: {describe_dim(d) or 'working value'}"
                                                               for d in u.write)),
-                      "circuit": _circuit(list(u.write), list(u.read))} for u in spec.units]
+                      "circuit": _circuit(list(u.write), list(u.read)), "src": u.where} for u in spec.units]
             layers.append({"index": li, "name": spec.name, "heads": heads, "units": units})
         return {
             "name": "handformer",
             "model_id": self.model_id,
             "d_model": len(self.layout),
             "nonzero_params": self.model.nonzero_params(),
+            "source": sources.repo(),  # GitHub repo + branch for "view source" links
             "dims": [{"name": n, "cat": _category(n), "doc": describe_dim(n),
-                      "written_by": self._summ(wires[n]["writers"]), "read_by": self._summ(wires[n]["readers"])}
+                      "written_by": self._summ(wires[n]["writers"]), "read_by": self._summ(wires[n]["readers"]),
+                      "src": sites[n]}
                      for n in self.names],
             "layers": layers,
         }

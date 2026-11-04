@@ -1,0 +1,181 @@
+# Named source locations for the docs. Reference one in Markdown as [](src:KEY);
+# `python tools/doclinks.py` turns it into a link to the current line, and keeps it current.
+# `match` is text that must occur on exactly one line of `file`; no line numbers are stored.
+
+[repo]
+url = "https://github.com/lhubbard011/opus-handformer-calculator"
+ref = "main"
+
+# --- Engine
+[src."engine.builder"]
+file = "handformer/model.py"
+match = 'class ModelBuilder'
+
+[src."engine.head_spec"]
+file = "handformer/model.py"
+match = 'class HeadSpec'
+
+[src."engine.unit_spec"]
+file = "handformer/model.py"
+match = 'class UnitSpec'
+
+[src."engine.forward"]
+file = "handformer/model.py"
+match = '    def residual(self, tokens'
+
+[src."engine.decode_cache"]
+file = "handformer/model.py"
+match = 'class _DecodeCache'
+
+# --- Primitives
+[src."prim.gather"]
+file = "handformer/primitives.py"
+match = 'def gather_head'
+
+[src."prim.latest_feature"]
+file = "handformer/primitives.py"
+match = 'def latest_feature'
+
+[src."prim.latest_head"]
+file = "handformer/primitives.py"
+match = 'def latest_head'
+
+[src."prim.next_match"]
+file = "handformer/primitives.py"
+match = 'def next_match_head'
+
+[src."prim.product"]
+file = "handformer/primitives.py"
+match = 'def product_form'
+
+[src."prim.floor_div"]
+file = "handformer/primitives.py"
+match = 'def floor_div_head'
+
+[src."prim.clamp01"]
+file = "handformer/primitives.py"
+match = 'def clamp01_units'
+
+[src."prim.gated"]
+file = "handformer/primitives.py"
+match = 'def gated'
+
+[src."prim.ramp_mod10"]
+file = "handformer/common.py"
+match = 'def ramp_mod10_units'
+
+[src."prim.embed"]
+file = "handformer/common.py"
+match = 'def embed('
+
+# --- Frame locator (layers 1–4)
+[src."frame.unary_minus"]
+file = "handformer/frame.py"
+match = "# A '-' is unary"
+
+[src."frame.latest_heads"]
+file = "handformer/frame.py"
+match = '    l2 = b.at(2)'
+
+[src."frame.precision"]
+file = "handformer/frame.py"
+match = '    # Precision N:'
+
+[src."frame.routing"]
+file = "handformer/frame.py"
+match = '    # Routing.'
+
+# --- Parser and rewriter (layers 4–22)
+[src."parser.redex"]
+file = "handformer/expr.py"
+match = 'redex search'
+
+[src."parser.group_end"]
+file = "handformer/expr.py"
+match = '    # c = min('
+
+[src."parser.precedence"]
+file = "handformer/expr.py"
+match = "    # o: latest '^'"
+
+[src."parser.operands"]
+file = "handformer/expr.py"
+match = 'operands'
+
+[src."parser.drop_parens"]
+file = "handformer/expr.py"
+match = "    # The group's parentheses go"
+
+[src."parser.cancel"]
+file = "handformer/expr.py"
+match = '    # Double negation'
+
+[src."parser.decimals"]
+file = "handformer/expr.py"
+match = 'decimal geometry'
+
+[src."parser.frame_copy"]
+file = "handformer/expr.py"
+match = '    # frame copy segments'
+
+[src."parser.rewrite"]
+file = "handformer/expr.py"
+match = 'result formatting'
+
+[src."parser.outputs"]
+file = "handformer/expr.py"
+match = 'outputs'
+
+# --- Calculators
+[src."add.circuit"]
+file = "handformer/addition.py"
+match = 'def builder'
+
+[src."add.carry"]
+file = "handformer/addition.py"
+match = '{"carry": 1.0})  # [y >= 10]'
+
+[src."sub.sign"]
+file = "handformer/subtraction.py"
+match = '    # Final sign = sa XOR borrow'
+
+[src."sub.complement"]
+file = "handformer/subtraction.py"
+match = 'pr.latest_head("top nonzero"'
+
+[src."mul.squares"]
+file = "handformer/multiplication.py"
+match = 'pr.gather_head("(s+x)^2"'
+
+[src."mul.line_index"]
+file = "handformer/multiplication.py"
+match = 'pr.floor_div_head("j = floor(x/s)"'
+
+[src."mul.carry"]
+file = "handformer/multiplication.py"
+match = 'first column of a line: no carry in'
+
+[src."div.compare"]
+file = "handformer/division.py"
+match = '    # This remainder digit vs multiple k'
+
+[src."div.quotient"]
+file = "handformer/division.py"
+match = '    l9 = b.at(9)'
+
+[src."pow.cases"]
+file = "handformer/power.py"
+match = 'def _segments'
+
+[src."pow.parity"]
+file = "handformer/power.py"
+match = '    odd = {'
+
+# --- Merging
+[src."merge.gating"]
+file = "handformer/arith.py"
+match = '    def unit(self, u: UnitSpec)'
+
+[src."merge.no_shadow"]
+file = "handformer/arith.py"
+match = 'shadow shared dims'
