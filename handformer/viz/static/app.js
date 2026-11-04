@@ -210,6 +210,33 @@ function answerOf(run) {
 const koCount = () => state.ko.heads.length + state.ko.units.length + state.ko.dims.length;
 const koHas = (kind, item) => state.ko[kind].some((x) => JSON.stringify(x) === JSON.stringify(item));
 
+/**
+ * Run ``fn`` (a re-run) without moving what you are looking at: the element nearest the middle
+ * of the screen keeps its on-screen position, and the panels' own scroll positions are restored.
+ * Without this, the knockout bar appearing and the lists re-rendering shift the page.
+ */
+function holdView() {
+  const panels = [...document.querySelectorAll(".panel")];
+  const mid = innerHeight / 2;
+  const anchor = panels.map((p) => [p, p.getBoundingClientRect()]).filter(([, r]) => r.bottom > 0 && r.top < innerHeight)
+    .sort((a, b) => Math.abs((a[1].top + a[1].bottom) / 2 - mid) - Math.abs((b[1].top + b[1].bottom) / 2 - mid))[0]?.[0];
+  const top0 = anchor?.getBoundingClientRect().top;
+  const inner = [...document.querySelectorAll(".scroll, .graph-wrap, .map-wrap")].map((e) => [e.id || e.className, e.scrollTop, e.scrollLeft]);
+  return () => {
+    if (anchor) window.scrollBy(0, anchor.getBoundingClientRect().top - top0);
+    for (const [key, t, l] of inner) {
+      if (key === "tokens") continue; // the strip follows the current byte itself
+      const e = document.getElementById(key) || document.getElementsByClassName(key.split(" ")[0])[0];
+      if (e) { e.scrollTop = t; e.scrollLeft = l; }
+    }
+  };
+}
+
+async function keepView(fn) {
+  const restore = holdView();
+  try { await fn(restore); } finally { restore(); }
+}
+
 /** Switch a head / unit / dim off or back on, then re-run the expression at the same step. */
 async function toggleKnockout(kind, item) {
   state.ko[kind] = koHas(kind, item) ? state.ko[kind].filter((x) => JSON.stringify(x) !== JSON.stringify(item))
@@ -217,9 +244,12 @@ async function toggleKnockout(kind, item) {
   log("knockout", kind, JSON.stringify(item), "now", koCount(), "parts off");
   const keep = state.q;
   if (!state.run) return;
-  state.running = true;
-  renderKnockouts(); // show the new set at once; the answer follows when the re-run returns
-  await runExpression(state.run.expression, keep);
+  await keepView(async (restore) => {
+    state.running = true;
+    renderKnockouts(); // show the new set at once; the answer follows when the re-run returns
+    restore();         // the bar may have grown: hold the view still right away
+    await runExpression(state.run.expression, keep);
+  });
 }
 
 function renderKnockouts() {
@@ -253,7 +283,7 @@ function renderKnockouts() {
   clear.addEventListener("click", async () => {
     state.ko = { heads: [], units: [], dims: [] };
     log("knockout: restore all");
-    await runExpression(state.run.expression, state.q);
+    await keepView(() => runExpression(state.run.expression, state.q));
   });
   bar.append(res, clear);
 }
@@ -345,6 +375,7 @@ async function goto(q) {
   q = clamp(q, run.prompt_len - 1, run.chars.length - 2);
   state.q = q;
   const gen = ++state.gen;
+  const restoreView = holdView(); // stepping must not shift the panel you are watching
   $("scrubber").value = q;
   renderStrip();
   renderStep();
@@ -357,6 +388,7 @@ async function goto(q) {
     renderUnits(p);
     renderHeadDetail(p);
     await renderMap(p);
+    if (gen === state.gen) restoreView();
   } catch (e) {
     setStatus(e.message, true);
   }
@@ -416,7 +448,15 @@ function renderStrip() {
     el.addEventListener("click", () => goto(i));
     strip.appendChild(el);
   });
-  strip.querySelector(".chip.output")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  // Keep the next byte visible inside the strip only: scrollIntoView would also scroll the
+  // window, yanking the page up to the strip while you look at a heatmap further down.
+  const out = strip.querySelector(".chip.output");
+  if (out) {
+    const r = out.getBoundingClientRect(), rs = strip.getBoundingClientRect();
+    const top = r.top - rs.top + strip.scrollTop, bottom = top + r.height;
+    if (top < strip.scrollTop) strip.scrollTop = top - 18;
+    else if (bottom > strip.scrollTop + strip.clientHeight) strip.scrollTop = bottom - strip.clientHeight + 18;
+  }
 }
 
 function renderStep() {
