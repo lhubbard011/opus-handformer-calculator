@@ -28,6 +28,12 @@ log = logging.getLogger(__name__)
 
 MAX_TOKENS = 3000
 MAX_RUNS = 4
+MAX_RUN_BYTES = 1 << 30  # stored traces of all kept runs together; oldest runs go first
+# A knocked-out model may never write its final '\n'. It gets this many bytes, so a broken
+# run costs about what a normal one does (same rule in viz/static/local-api.js).
+def knockout_budget(normal_new: int, budget: int) -> int:
+    return min(budget, 2 * normal_new + 32)
+
 MAX_KNOCKOUT_MODELS = 4
 TOP_KEYS = 3
 TOP_LOGITS = 5
@@ -90,15 +96,66 @@ def _circuit(write_dims: list[str], read_dims: list[str]) -> str:
 
 @dataclass
 class _Recorder(Tracer):
-    """Keeps residual snapshots, top attention keys per head, MLP pre-activations."""
+    """Keeps residual snapshots, top attention keys per head, MLP pre-activations.
 
-    snapshots: list[tuple[str, np.ndarray]] = field(default_factory=list)
+    A sublayer writes only a few dims, so each snapshot after the first is stored as
+    the columns that changed (exact float64): about 20x less memory than a full copy
+    per sublayer, which matters for long runs.
+    """
+
+    labels: list[str] = field(default_factory=list)
+    base: np.ndarray | None = None  # the embedding snapshot (n, d)
+    deltas: list[tuple[np.ndarray, np.ndarray]] = field(default_factory=list)  # (cols, values (n, k))
     top_idx: dict[tuple[int, int], np.ndarray] = field(default_factory=dict)
     top_w: dict[tuple[int, int], np.ndarray] = field(default_factory=dict)
     pre: dict[int, np.ndarray] = field(default_factory=dict)
+    _prev: np.ndarray | None = None
+    _cache: dict[int, np.ndarray] = field(default_factory=dict)
 
     def residual(self, label: str, x: np.ndarray) -> None:
-        self.snapshots.append((label, x.copy()))
+        self.labels.append(label)
+        if self.base is None:
+            self.base = x.copy()
+        else:
+            cols = np.flatnonzero((x != self._prev).any(axis=0))
+            self.deltas.append((cols, x[:, cols].copy()))
+        self._prev = x.copy()
+
+    def snapshot(self, s: int) -> np.ndarray:
+        """Residual (n, d) after snapshot s (0 = embedding), rebuilt exactly from the stored columns."""
+        if s not in self._cache:
+            x = self.base.copy()
+            for cols, vals in self.deltas[:s]:
+                x[:, cols] = vals
+            if len(self._cache) >= 4:  # a few recent snapshots, for paging through heatmaps
+                self._cache.pop(next(iter(self._cache)))
+            self._cache[s] = x
+        return self._cache[s]
+
+    def row_history(self, q: int) -> np.ndarray:
+        """Position q's residual after every snapshot, (d, n_snapshots), without rebuilding whole snapshots."""
+        x = self.base[q].copy()
+        out = [x.copy()]
+        for cols, vals in self.deltas:
+            x[cols] = vals[q]
+            out.append(x.copy())
+        return np.stack(out, axis=1)
+
+    def sweep(self):
+        """Yield (s, residual after snapshot s) in order, reusing one working copy (do not keep it)."""
+        x = self.base.copy()
+        yield 0, x
+        for s, (cols, vals) in enumerate(self.deltas, start=1):
+            x[:, cols] = vals
+            yield s, x
+
+    def finish(self) -> None:
+        self._prev = None
+
+    def nbytes(self) -> int:
+        arrays = [self.base, *(v for _, v in self.deltas), *self.top_idx.values(), *self.top_w.values(),
+                  *self.pre.values(), *self._cache.values()]
+        return int(sum(a.nbytes for a in arrays if a is not None))
 
     def attention(self, layer: int, head: int, attn: np.ndarray) -> None:
         k = min(TOP_KEYS, attn.shape[1])
@@ -131,6 +188,7 @@ class Runner:
         self.names = self.layout.names
         self.runs: OrderedDict[str, Run] = OrderedDict()
         self.ko_models: OrderedDict[str, object] = OrderedDict()  # knockout key -> model
+        self.normal_len: dict[str, int] = {}  # expression -> bytes the intact model writes
         # Identifies this exact model, so a page loaded against an older server can tell.
         self.model_id = (f"d{len(self.layout)}-L{len(self.model.layers)}-h{sum(len(l.heads) for l in self.model.layers)}"
                          f"-u{sum(l.w_in.shape[1] for l in self.model.layers)}-nz{self.model.nonzero_params()}")
@@ -235,16 +293,21 @@ class Runner:
         model = self._model_for(ko)
         t0 = time.perf_counter()
         budget = MAX_TOKENS - len(prompt)  # the model stops itself at '\n'
+        if ko:
+            normal = self._normal_len(expression, prompt, budget)
+            budget = knockout_budget(normal, budget)
+            log.info("knockout run capped at %d new bytes (normal answer: %d)", budget, normal)
         tokens = model.generate(prompt, stop=cm.EOS, max_new=budget)
         t1 = time.perf_counter()
         rec = _Recorder()
         logits = model.residual(tokens, trace=rec) @ model.unembed
+        rec.finish()
         t2 = time.perf_counter()
         run = Run(uuid.uuid4().hex[:12], expression, tokens, len(prompt), rec, logits, model, ko.as_request())
         self.runs[run.run_id] = run
-        while len(self.runs) > MAX_RUNS:
+        while len(self.runs) > MAX_RUNS or (len(self.runs) > 1 and self._stored_bytes() > MAX_RUN_BYTES):
             evicted, _ = self.runs.popitem(last=False)
-            log.info("evicted run %s", evicted)
+            log.info("evicted run %s (kept runs now %d, %.0f MB)", evicted, len(self.runs), self._stored_bytes() / 1e6)
         finished = tokens[-1] == cm.EOS
         log.info("run %s %r: %d bytes generated in %.2fs, traced in %.2fs, finished=%s, knockout=%s",
                  run.run_id, expression, len(tokens) - len(prompt), t1 - t0, t2 - t1, finished, ko.key() if ko else "-")
@@ -257,8 +320,20 @@ class Runner:
             "finished": finished,
             "knockout": run.knockout,
             "steps": [self._step(run, q) for q in range(len(tokens))],
-            "snapshots": [label for label, _ in rec.snapshots],
+            "snapshots": list(rec.labels),
         }
+
+    def _stored_bytes(self) -> int:
+        return sum(r.rec.nbytes() + r.logits.nbytes for r in self.runs.values())
+
+    def _normal_len(self, expression: str, prompt: list[int], budget: int) -> int:
+        """Bytes the intact model writes for this expression (cached; generation only, no trace)."""
+        if expression not in self.normal_len:
+            out = self.model.generate(prompt, stop=cm.EOS, max_new=budget)
+            self.normal_len[expression] = len(out) - len(prompt)
+            while len(self.normal_len) > 256:
+                self.normal_len.pop(next(iter(self.normal_len)))
+        return self.normal_len[expression]
 
     def _get(self, run_id: str) -> Run:
         run = self.runs.get(run_id)
@@ -267,11 +342,11 @@ class Runner:
         return run
 
     def _val(self, run: Run, q: int, dim: str) -> float:
-        return float(run.rec.snapshots[-1][1][q, self.layout[dim]])
+        return float(run.rec.snapshot(len(run.rec.labels) - 1)[q, self.layout[dim]])
 
     def _step(self, run: Run, q: int) -> dict:
         """Raw per-step values; the page turns them into phase, explanation and pointer tags."""
-        x = run.rec.snapshots[-1][1][q]
+        x = run.rec.snapshot(len(run.rec.labels) - 1)[q]
         return {"pred": chr(int(np.argmax(run.logits[q]))),
                 "v": {d: round(float(x[self.layout[d]]), 6) for d in SUMMARY_DIMS}}
 
@@ -280,11 +355,12 @@ class Runner:
         if not 0 <= q < len(run.tokens):
             raise ValueError(f"position {q} out of range 0..{len(run.tokens) - 1}")
         rec = run.rec
-        values = np.stack([x[q] for _, x in rec.snapshots], axis=1)  # (d, n_snapshots)
+        values = rec.row_history(q)  # (d, n_snapshots)
 
         heads = []
+        inputs = {s: x[: q + 1].copy() for s, x in rec.sweep() if s % 2 == 0}  # layer inputs, keys 0..q
         for li, layer in enumerate(run.model.layers):
-            x_in = rec.snapshots[2 * li][1][: q + 1]  # residual entering layer li, keys 0..q
+            x_in = inputs[2 * li]  # residual entering layer li
             for hi, h in enumerate(layer.heads):
                 idx = rec.top_idx[(li, hi)][q]
                 w = rec.top_w[(li, hi)][q]
@@ -323,7 +399,7 @@ class Runner:
         run = self._get(run_id)
         if not 0 <= layer < len(self.model.layers) or not 0 <= head < len(self.model.layers[layer].heads):
             raise ValueError(f"no head {head} in layer {layer}")
-        x_in = run.rec.snapshots[2 * layer][1]
+        x_in = run.rec.snapshot(2 * layer)
         n = len(x_in)
         causal = np.triu(np.ones((n, n), dtype=bool), k=1)
         attn = run.model.head_attention(x_in, run.model.layers[layer].heads[head], causal)
@@ -336,9 +412,9 @@ class Runner:
         shared colour scale would hide everything but the largest dims.
         """
         run = self._get(run_id)
-        if not 0 <= snapshot < len(run.rec.snapshots):
+        if not 0 <= snapshot < len(run.rec.labels):
             raise ValueError(f"snapshot {snapshot} out of range")
-        label, x = run.rec.snapshots[snapshot]
+        label, x = run.rec.labels[snapshot], run.rec.snapshot(snapshot)
         mat = x.T
         scale = np.abs(mat).max(axis=1)
         safe = np.where(scale > 1e-9, scale, 1.0)

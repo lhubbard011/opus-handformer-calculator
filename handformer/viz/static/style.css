@@ -215,3 +215,4 @@ svg.graph { display: block; font: 10px var(--mono); }
 .g-box-sub { fill: var(--muted); font: 10px var(--sans); }
 .g-h { fill: var(--accent-2); } .g-u { fill: #ff8a65; }
 .g-text { fill: none; stroke: var(--ph-rewrite); stroke-width: 1.5; stroke-dasharray: 5 4; opacity: .8; } .g-text:hover { stroke-width: 3; }
+.status, .ko-bar, .ko-result { overflow-wrap: anywhere; min-width: 0; }

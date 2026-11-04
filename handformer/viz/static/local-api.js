@@ -10,6 +10,9 @@ const log = (...a) => console.info("[local-api]", ...a);
 const MAX_RUNS = 4;
 const MAX_KNOCKOUT_MODELS = 4;
 const POSITIONAL = ["pos", "pos2"];
+// A knocked-out model may never write its final '\n': cap it near the intact answer's length
+// (same rule as handformer/viz/runner.py knockout_budget).
+const knockoutBudget = (normalNew, budget) => Math.min(budget, 2 * normalNew + 32);
 
 /** Normalised knockout request: sorted lists, like handformer/ablate.py Knockout.as_request. */
 function normKnockout(ko) {
@@ -57,6 +60,7 @@ export class LocalApi {
     this.info = info;
     this.runs = new Map();
     this.koModels = new Map(); // knockout key -> Model
+    this.normalLen = new Map(); // expression -> bytes the intact model writes
     this.labels = this.model.snapshotLabels();
     this.layerStart = []; // global head index of each layer's first head
     let g = 0;
@@ -119,7 +123,15 @@ export class LocalApi {
     if (bad.length) throw new Error(`unsupported characters: '${bad.join("")}' (use digits . + - * / ( ) and ~N)`);
     const prompt = [...`\n${expression}=`].map((c) => c.charCodeAt(0));
     const ko = normKnockout(knockout);
-    const tr = this._modelFor(ko).generate(prompt, this.cfg.max_tokens - prompt.length, this.cfg.top_keys);
+    let budget = this.cfg.max_tokens - prompt.length;
+    if (!koEmpty(ko)) {
+      if (!this.normalLen.has(expression)) {
+        this.normalLen.set(expression, this.model.generate(prompt, budget, this.cfg.top_keys).tokens.length - prompt.length);
+      }
+      budget = knockoutBudget(this.normalLen.get(expression), budget);
+      log(`knockout run capped at ${budget} new bytes (normal answer: ${this.normalLen.get(expression)})`);
+    }
+    const tr = this._modelFor(ko).generate(prompt, budget, this.cfg.top_keys);
     const runId = Math.random().toString(16).slice(2, 14).padEnd(12, "0");
     this.runs.set(runId, { expression, tr, promptLen: prompt.length });
     while (this.runs.size > MAX_RUNS) {

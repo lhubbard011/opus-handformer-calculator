@@ -27,6 +27,8 @@ const state = {
   map: "residual",
   maps: new Map(), // cache key -> { meta, data } for binary heatmap payloads
   ko: { heads: [], units: [], dims: [] }, // knocked-out parts (see handformer/ablate.py)
+  runSeq: 0, // latest run request; an older response that arrives late is dropped
+  running: false,
   baseline: new Map(), // expression -> answer with nothing knocked out
 };
 
@@ -198,7 +200,13 @@ async function loadInfo() {
   renderGraph();
 }
 
-const answerOf = (run) => run.chars.join("").split("]").pop().trim();
+/** The final line, made safe to show: unprintable bytes as '·', capped, and flagged if the model never stopped. */
+function answerOf(run) {
+  const raw = run.chars.join("").split("]").pop().trim();
+  let a = [...raw].map((c) => (c >= " " && c <= "~" ? c : "·")).join("");
+  if (a.length > 40) a = `${a.slice(0, 40)}… (${raw.length} bytes)`;
+  return run.finished ? a : `${a || "—"} (did not finish)`;
+}
 const koCount = () => state.ko.heads.length + state.ko.units.length + state.ko.dims.length;
 const koHas = (kind, item) => state.ko[kind].some((x) => JSON.stringify(x) === JSON.stringify(item));
 
@@ -208,12 +216,15 @@ async function toggleKnockout(kind, item) {
     : [...state.ko[kind], item];
   log("knockout", kind, JSON.stringify(item), "now", koCount(), "parts off");
   const keep = state.q;
-  if (state.run) await runExpression(state.run.expression, keep);
+  if (!state.run) return;
+  state.running = true;
+  renderKnockouts(); // show the new set at once; the answer follows when the re-run returns
+  await runExpression(state.run.expression, keep);
 }
 
 function renderKnockouts() {
   const bar = $("ko-bar");
-  if (!koCount() || !state.run) { bar.hidden = true; return; }
+  if (!koCount() || !state.run) { bar.hidden = true; bar.replaceChildren(); return; }
   bar.hidden = false;
   bar.replaceChildren();
   const add = (text, kind, item, tip) => {
@@ -233,12 +244,16 @@ function renderKnockouts() {
   for (const d of state.ko.dims) add(d, "dims", d, `Nothing writes ${d}: it stays 0 everywhere.`);
   const got = answerOf(state.run), want = state.baseline.get(state.run.expression);
   const res = document.createElement("span");
-  res.className = "ko-result" + (want !== undefined && got !== want ? " changed" : "");
-  res.textContent = want === undefined ? `answer now ${got}` : got === want
+  res.className = "ko-result" + (!state.running && want !== undefined && got !== want ? " changed" : "");
+  res.textContent = state.running ? "re-running…" : want === undefined ? `answer now ${got}` : got === want
     ? `answer unchanged: ${got} (this part isn't needed here)` : `answer now ${got} · normally ${want}`;
   const clear = document.createElement("button");
   clear.textContent = "restore all";
-  clear.addEventListener("click", async () => { state.ko = { heads: [], units: [], dims: [] }; await runExpression(state.run.expression, state.q); });
+  clear.addEventListener("click", async () => {
+    state.ko = { heads: [], units: [], dims: [] };
+    log("knockout: restore all");
+    await runExpression(state.run.expression, state.q);
+  });
   bar.append(res, clear);
 }
 
@@ -257,12 +272,17 @@ function koButton(kind, item) {
 async function runExpression(expression, keepStep = null) {
   stopPlay();
   setStatus("running…");
+  const seq = ++state.runSeq;
+  state.running = true;
   try {
-    const body = koCount() ? { expression, knockout: state.ko } : { expression };
+    const ko = koCount() ? JSON.parse(JSON.stringify(state.ko)) : null; // the set this request was made with
+    const body = ko ? { expression, knockout: ko } : { expression };
     const run = await api("/api/run", body);
-    if (koCount() && !state.baseline.has(run.expression)) {
+    if (ko && !state.baseline.has(run.expression)) {
       state.baseline.set(run.expression, answerOf(await api("/api/run", { expression })));
-    } else if (!koCount()) state.baseline.set(run.expression, answerOf(run));
+    } else if (!ko) state.baseline.set(run.expression, answerOf(run));
+    if (seq !== state.runSeq) { log("dropping a stale run response", run.run_id); return; }
+    state.running = false;
     run.steps = run.steps.map((raw, q) => summarize(run, q, raw));
     if (run.model_id !== state.info?.model_id) {
       log("server model changed", state.info?.model_id, "->", run.model_id, "; reloading model description");
@@ -280,13 +300,17 @@ async function runExpression(expression, keepStep = null) {
     $("scrubber").max = run.chars.length - 2;
     const answer = answerOf(run);
     setStatus(`${run.chars.length - run.prompt_len} bytes written by the model · answer ${answer}` +
-      (run.finished ? "" : " · (stopped before EOS)") + (koCount() ? ` · ${koCount()} part(s) knocked out` : ""));
+      (koCount() ? ` · ${koCount()} part(s) knocked out` : ""));
     log("run", run.run_id, run.expression, run.chars.length, "bytes");
     renderKnockouts();
     const last = run.chars.length - 2;
     await goto(keepStep === null ? run.prompt_len - 1 : Math.max(run.prompt_len - 1, Math.min(keepStep, last)));
   } catch (e) {
-    setStatus(e.message, true);
+    if (seq !== state.runSeq) return; // a newer request owns the page
+    state.running = false;
+    renderKnockouts();
+    setStatus(window.HANDFORMER_STATIC === undefined ? `${e.message} (is the server running?)` : e.message, true);
+    logErr("run failed:", e.message);
   }
 }
 

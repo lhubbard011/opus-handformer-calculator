@@ -126,6 +126,16 @@ class TestWebParity(unittest.TestCase):
         """Knocked-out heads, units and dims: same bytes and traces in both engines."""
         r = self.runner
         ko = {"heads": [[4, 0]], "units": [[3, 11], [3, 12]], "dims": ["add.carry"]}
+        # A knockout that breaks the model: it never writes '\n', so both engines cap the run at the
+        # same length. Its bytes come from near-tied logits (float summation order decides), so
+        # byte-exact parity is not meaningful there; length and "did not finish" are.
+        broken = {"units": [[0, 6]]}
+        py = r.run("47+38", broken)
+        js = self.node([["/api/run", {"expression": "47+38", "knockout": broken}]])
+        self.assertFalse(py["finished"])
+        self.assertFalse(js[0]["finished"])
+        self.assertEqual(len(js[0]["chars"]), len(py["chars"]))
+        self.assertLess(len(py["chars"]), 200, "a broken run must be capped near the normal answer length")
         for expression in ("47+38", "12*34-5"):
             with self.subTest(expression=expression):
                 py = r.run(expression, ko)
