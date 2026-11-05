@@ -279,6 +279,27 @@ class TestWebParity(unittest.TestCase):
                 close_dict(key(je), key(pe), f"q={q} {pe['byte']!r} contributions")
                 close_dict({x[0]: x[3] for x in je["by_dim"]}, {x[0]: x[3] for x in pe["by_dim"]}, f"q={q} dims")
 
+    def test_unembed_block(self):
+        """The W_U block in the model description (what the Token pass draws) is the whole unembedding:
+        every non-zero weight of the model is in it, and x_final · block gives the logits the run produced."""
+        r = self.runner
+        info = r.info()
+        ue, rows = info["unembed"], info["readout"]
+        U = r.model.unembed
+        self.assertEqual(len(ue["w"]), int(np.count_nonzero(U)), "every non-zero weight is in the block")
+        ix = {d["name"]: i for i, d in enumerate(info["dims"])}
+        for ri, k, w in ue["w"]:
+            self.assertEqual(w, U[ix[rows[ri]], ord(ue["bytes"][k])])
+        py = r.run("2+3*(4-1)")
+        for q in (10, 15, len(py["chars"]) - 2):
+            p = r.position(py["run_id"], q)
+            x = [p["values"][ix[n]][-1] for n in rows]
+            sums = {}
+            for ri, k, w in ue["w"]:
+                sums[ue["bytes"][k]] = sums.get(ue["bytes"][k], 0.0) + x[ri] * w
+            for b, v in p["logits"]:
+                close([sums.get(b, 0.0)], [v], f"q={q} column sum of {b!r}")
+
     def test_errors_match(self):
         """The calculator takes any input as its bytes, unknown ones included (spaces, letters, '=',
         UTF-8), and both engines run it the same way, list the unknown bytes and cut a run that

@@ -14,12 +14,51 @@ const BAND = 15; // px: a group's title band above its rows, when the rows are n
 let rowNames = true;
 export function setRowNames(on) { rowNames = !!on; }
 
+// Marked rows: right-click a row (or tap its name twice on a touch screen) to highlight it, to
+// watch whether it fills in as you step, knock things out or change the input. Marks are keyed
+// by the row's name (spec.markKey), so they follow a dim across steps, filters and maps, and
+// are remembered per model in this browser.
+const MARK = "#f2a541";
+let marks = new Set(), markScope = null;
+const markStore = () => `handviz.marks.${markScope}`;
+export function setMarkScope(model) {
+  markScope = model;
+  try { marks = new Set(JSON.parse(localStorage.getItem(markStore()) || "[]")); } catch { marks = new Set(); }
+}
+export const isMarked = (name) => marks.has(name);
+export const markCount = () => marks.size;
+function saveMarks() {
+  try { marks.size ? localStorage.setItem(markStore(), JSON.stringify([...marks])) : localStorage.removeItem(markStore()); } catch { /* private mode */ }
+}
+export function toggleMark(name) {
+  if (marks.has(name)) marks.delete(name); else marks.add(name);
+  saveMarks();
+  console.log("[heatmap]", marks.has(name) ? "marked" : "unmarked", name, `(${marks.size} marked)`);
+}
+export function clearMarks() { marks.clear(); saveMarks(); console.log("[heatmap] cleared the row marks"); }
+
+// Rows pinned to the top (mouse only): double-click a row to lift it into a
+// "pinned to top" group above the others, in the order pinned; click a pinned row's name to put
+// it back. Kept in memory only: a page refresh puts every row back. The page does the ordering
+// (it builds the rows); this module only holds the list and the gestures.
+const pinned = [];
+export const isPinned = (name) => pinned.includes(name);
+export const pinnedRows = () => [...pinned];
+export function togglePinned(name) {
+  const i = pinned.indexOf(name);
+  if (i >= 0) pinned.splice(i, 1); else pinned.push(name);
+  console.log("[heatmap]", i >= 0 ? "put back" : "pinned to top", name, `(${pinned.length} pinned)`);
+}
+export const PINNED_GROUP = "pinned to top";
+const CLICK_WAIT = 250; // ms: a click waits this long to see if it is half of a double-click
+
 // spec: { key, rows, cols, get(r,c) -> raw, norm(raw) -> [0,1], lut, rowLabels[], groups[{row,label}],
 //         colLabel(c), valueText(r,c), rowTip(r) (hover on a row label), onClick(r,c), square,
 //         pointers[r] (column to trace per row: an attention head's argmax), colChars[c] (axis characters),
-//         markCol (a dashed vertical line at that column) }
+//         markCol (a dashed vertical line at that column), markKey(r) (the row's name for marking) }
 // view: { q } current query position (column, or row for attention)
 export function drawHeatmap(canvas, spec, view) {
+  canvas._last = { spec, view }; // a mark toggled on this map redraws it as is
   const wrap = canvas.parentElement;
   const touch = isTouch();
   let cssW = Math.max(240, wrap.clientWidth - 2);
@@ -139,6 +178,24 @@ export function drawHeatmap(canvas, spec, view) {
       ctx.fillText(g.label, 4, g.row * rowH + 7);
     });
   }
+  // marked rows: the name on an orange tab, and an outline across the whole row
+  if (spec.markKey && !spec.square && marks.size) {
+    for (let r = 0; r < spec.rows; r++) {
+      if (!marks.has(spec.markKey(r))) continue;
+      const y = yOf(r), h = Math.max(rowH, 1);
+      const tabH = Math.max(h, 11), ty = y + h / 2 - tabH / 2; // a readable tab even on 3px rows
+      ctx.fillStyle = MARK;
+      ctx.fillRect(0, ty, GUTTER - 4, tabH);
+      ctx.fillStyle = "#0d0f12";
+      ctx.font = "bold 10px ui-monospace, Menlo, monospace";
+      ctx.textBaseline = "middle";
+      ctx.fillText((spec.rowLabels?.[r] ?? spec.markKey(r)).slice(0, 19), 4, y + h / 2);
+      ctx.strokeStyle = MARK;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(GUTTER + 0.5, y + 0.5, plotW - 1, Math.max(h - 1, 1));
+    }
+    ctx.font = "10px ui-monospace, Menlo, monospace";
+  }
   // column ticks
   ctx.fillStyle = "#7d8696";
   ctx.textBaseline = "top";
@@ -178,7 +235,7 @@ export function attachHeatmapEvents(canvas, tooltip) {
   const text = (spec, r, c) => (c < 0 ? spec.rowTip(r) : spec.valueText(r, c));
   // Touch: the first tap on a cell shows its readout, a second tap on the same cell
   // does what a mouse click does. Compatibility mouse events after a touch are ignored.
-  let touchAt = 0, tapped = null;
+  let touchAt = 0, tapped = null, pending = null;
   canvas.addEventListener("pointerdown", (e) => { if (e.pointerType !== "mouse") touchAt = Date.now(); });
   const touching = () => Date.now() - touchAt < 1000;
   canvas.addEventListener("mousemove", (e) => {
@@ -188,18 +245,53 @@ export function attachHeatmapEvents(canvas, tooltip) {
     const { spec } = canvas._geom;
     const [r, c] = rc;
     tooltip.hidden = false;
-    tooltip.textContent = text(spec, r, c);
+    tooltip.textContent = text(spec, r, c) + (spec.markKey && !spec.square
+      ? `\n\n(right-click to ${isMarked(spec.markKey(r)) ? "unmark" : "mark"} this row; ` +
+        (isPinned(spec.markKey(r)) ? "click its name to put it back)" : "double-click to pin it to the top)") : "");
     canvas.style.cursor = c < 0 ? "help" : "crosshair";
     tooltip.style.left = `${e.clientX + 14}px`;
     tooltip.style.top = `${e.clientY + 10}px`;
   });
   canvas.addEventListener("mouseleave", () => { if (!touching()) tooltip.hidden = true; });
+  // right-click a row: mark it (again: unmark). The page re-renders the map ("rowmark"), since
+  // a marked row is kept even where filters would drop it.
+  const mark = (r) => {
+    const { spec } = canvas._geom;
+    toggleMark(spec.markKey(r));
+    drawHeatmap(canvas, canvas._last.spec, canvas._last.view);
+    canvas.dispatchEvent(new CustomEvent("rowmark", { detail: { name: spec.markKey(r), on: isMarked(spec.markKey(r)) } }));
+  };
+  const pin = (r) => {
+    const name = canvas._geom.spec.markKey(r);
+    togglePinned(name);
+    canvas.dispatchEvent(new CustomEvent("rowpin", { detail: { name, on: isPinned(name) } }));
+  };
+  const canPin = () => !!canvas._geom?.spec.markKey && !canvas._geom.spec.square;
+  canvas.addEventListener("dblclick", (e) => {
+    if (touching() || !canPin()) return;
+    clearTimeout(pending);
+    const rc = cell(e);
+    if (rc) { e.preventDefault(); pin(rc[0]); }
+  });
+  canvas.addEventListener("contextmenu", (e) => {
+    const rc = cell(e);
+    if (!rc || !canvas._geom.spec.markKey || canvas._geom.spec.square) return; // the browser's own menu
+    e.preventDefault();
+    tooltip.hidden = true;
+    mark(rc[0]);
+  });
   canvas.addEventListener("click", (e) => {
     const rc = cell(e);
     if (touching()) {
       if (!rc) { tapped = null; hideSheet(tooltip); return; }
       const key = `${canvas._geom.spec.key}:${rc}`;
-      if (rc[1] < 0) { tapped = null; showSheet(tooltip, text(canvas._geom.spec, ...rc)); return; }
+      if (rc[1] < 0) { // a row name: show its note; a second tap on it marks the row
+        const sp = canvas._geom.spec, canMark = sp.markKey && !sp.square;
+        if (canMark && tapped === key) { tapped = null; hideSheet(tooltip); mark(rc[0]); return; }
+        tapped = key;
+        showSheet(tooltip, text(sp, ...rc) + (canMark ? `\n\n(tap the name again to ${isMarked(sp.markKey(rc[0])) ? "unmark" : "mark"} this row)` : ""));
+        return;
+      }
       if (tapped !== key) {
         tapped = key;
         showSheet(tooltip, text(canvas._geom.spec, ...rc) + (canvas._geom.spec.onClick ? "\n\n(tap the same cell again to jump there)" : ""));
@@ -208,7 +300,17 @@ export function attachHeatmapEvents(canvas, tooltip) {
       tapped = null;
       hideSheet(tooltip);
     }
-    if (rc && rc[1] >= 0 && canvas._geom.spec.onClick) canvas._geom.spec.onClick(...rc);
+    if (!rc) return;
+    const sp = canvas._geom.spec;
+    // mouse: on maps whose rows can be pinned, a click waits to see if it is half of a
+    // double-click (which pins) before it acts: a pinned row's name puts it back, a cell jumps
+    const act = () => {
+      if (rc[1] < 0) { if (canPin() && isPinned(sp.markKey(rc[0]))) pin(rc[0]); return; }
+      if (sp.onClick) sp.onClick(...rc);
+    };
+    if (touching() || !canPin()) { act(); return; }
+    clearTimeout(pending);
+    if (e.detail <= 1) pending = setTimeout(act, CLICK_WAIT);
   });
 }
 

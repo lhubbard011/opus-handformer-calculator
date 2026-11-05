@@ -3,7 +3,8 @@
 // is the computation at position q that produced byte q+1.
 
 import { decodeF16, SEQ, DIV } from "./render.js";
-import { drawHeatmap, attachHeatmapEvents, isTouch, showSheet, hideSheet, setTip, setRowNames } from "./heatmap.js";
+import { drawHeatmap, attachHeatmapEvents, isTouch, showSheet, hideSheet, setTip, setRowNames, setMarkScope, isMarked,
+  markCount, clearMarks, isPinned, pinnedRows, PINNED_GROUP } from "./heatmap.js";
 import { LocalApi } from "./local-api.js";
 import { drawGraph, drawOverview } from "./graph.js";
 import { renderModelGraph, refreshKnockouts } from "./model-graph.js";
@@ -438,6 +439,8 @@ async function loadModels() {
 
 async function loadInfo() {
   state.info = await api("/api/info");
+  setMarkScope(state.info.model); // marked heatmap rows are remembered per model
+  syncUnmark();
   log("model", state.info.model_id, state.info.d_model, "dims,", state.info.layers.length, "layers");
   $("mlp-layer").replaceChildren(...state.info.layers
     .filter((l) => l.units.length).map((l) => new Option(`${l.index + 1}`, l.index)));
@@ -618,7 +621,7 @@ async function runExpression(expression, keepStep = null, { maxNew = null } = {}
     const snap = $("snapshot");
     snap.replaceChildren(...run.snapshots.map((l, i) => new Option(l, i)));
     snap.value = run.snapshots.length - 1;
-    $("scrubber").min = run.prompt_len - 1;
+    $("scrubber").min = firstStep(run);
     $("scrubber").max = run.chars.length - 2;
     const answer = answerOf(run);
     const written = run.chars.length - run.prompt_len;
@@ -641,7 +644,7 @@ async function runExpression(expression, keepStep = null, { maxNew = null } = {}
     log("run", run.run_id, run.expression, run.chars.length, "bytes");
     renderKnockouts();
     const last = run.chars.length - 2;
-    await goto(keepStep === null ? run.prompt_len - 1 : Math.max(run.prompt_len - 1, Math.min(keepStep, last)));
+    await goto(keepStep === null ? firstStep(run) : Math.max(firstStep(run), Math.min(keepStep, last)));
   } catch (e) {
     if (seq !== state.runSeq) return; // a newer request owns the page
     state.running = false;
@@ -669,10 +672,22 @@ async function position(q) {
   return state.pos.get(q);
 }
 
+// The first step you can stand on: the prompt's last byte (where the model starts writing), or
+// with "from first byte" on, position 0, to watch the prompt's own bytes fill the stream. The
+// model computes every position the same way; the prompt's are read, not predicted.
+const fromStart = () => $("from-start").checked;
+const firstStep = (run) => (fromStart() ? 0 : run.prompt_len - 1);
+function setFromStart(on) {
+  $("from-start").checked = on;
+  try { localStorage.setItem("handviz.fromstart", on ? "1" : "0"); } catch { /* private mode */ }
+  if (state.run) $("scrubber").min = firstStep(state.run);
+  log("from first byte", on ? "on" : "off");
+}
+
 async function goto(q) {
   if (!state.run) return;
   const run = state.run;
-  q = clamp(q, run.prompt_len - 1, run.chars.length - 2);
+  q = clamp(q, firstStep(run), run.chars.length - 2);
   state.q = q;
   const gen = ++state.gen;
   const restoreView = holdView(); // stepping must not shift the panel you are watching
@@ -751,7 +766,10 @@ function renderStrip() {
     idx.className = "idx";
     idx.textContent = i % 5 === 0 ? i : "";
     el.appendChild(idx);
-    el.addEventListener("click", () => goto(i));
+    el.addEventListener("click", () => {
+      if (i < run.prompt_len - 1 && !fromStart()) setFromStart(true); // a prompt byte: show the prompt
+      goto(i);
+    });
     strip.appendChild(el);
   });
   // Keep the next byte visible inside the strip only: scrollIntoView would also scroll the
@@ -937,7 +955,10 @@ function renderStep() {
   const run = state.run;
   const s = run.steps[state.q];
   const n = run.chars.length - 1 - (run.prompt_len - 1);
-  $("step-label").textContent = `step ${state.q - run.prompt_len + 2} / ${n} · query pos ${state.q} ${JSON.stringify(run.chars[state.q])} → writes ${JSON.stringify(run.chars[state.q + 1])}`;
+  const at = `query pos ${state.q} ${JSON.stringify(run.chars[state.q])}`;
+  $("step-label").textContent = state.q < run.prompt_len - 1
+    ? `reading the prompt: byte ${state.q + 1} / ${run.prompt_len} · ${at} (next is given: ${JSON.stringify(run.chars[state.q + 1])})`
+    : `step ${state.q - run.prompt_len + 2} / ${n} · ${at} → writes ${JSON.stringify(run.chars[state.q + 1])}`;
   $("explain").textContent = s.explain;
   renderBoard();
   renderCode();
@@ -1140,8 +1161,22 @@ async function mapData(path, body) {
 
 // Which rows a heatmap shows: "every circuit" ignores the focus filter (not just the active
 // circuit); "hide unused" drops rows that are zero at every position (a compact map).
-function mapRow(circuit, used) {
+function mapRow(circuit, used, name) {
+  if (name !== undefined && (isMarked(name) || isPinned(name))) return true; // marked or pinned: always shown, you are watching it
   return ($("map-circuits").checked || focused(circuit)) && (used || !$("map-hide-unused").checked);
+}
+/** Rows pinned to the top (double-click) first, in the order pinned, flagged `pinned` (their
+ *  group is PINNED_GROUP); every other row keeps its place. Display only. */
+function pinFirst(rows, nameOf) {
+  const top = pinnedRows().map((n) => rows.find((r) => nameOf(r) === n)).filter(Boolean);
+  const lifted = new Set(top);
+  return [...top.map((r) => ({ ...r, pinned: true })), ...rows.filter((r) => !lifted.has(r))];
+}
+/** The "unmark" button: shown while any heatmap row is marked. */
+function syncUnmark() {
+  const b = $("map-unmark"), n = markCount();
+  b.hidden = !n;
+  b.textContent = `unmark ${n} row${n === 1 ? "" : "s"}`;
 }
 const rowCount = (shown, total, what) => (shown === total ? `all ${total} ${what}` : `${shown} of ${total} ${what}`);
 
@@ -1292,9 +1327,9 @@ async function renderDiffMap(p) {
     const [K, B] = await Promise.all([mapData(path, { ...body, run_id: run.run_id }), baseMap(path, body)]);
     return { K, B };
   };
-  const drawRows = (title, names, valK, valB, nRows, docs, clickRow, cat = null) => {
+  const drawRows = (title, names, valK, valB, nRows, docs, clickRow, cat = null, markable = false) => {
     // valK(r, c) / valB(r, c): raw values; keep rows with any real change, scale each by its biggest change
-    const rows = [];
+    let rows = [];
     for (let r = 0; r < nRows; r++) {
       let mx = 0, ref = 0;
       for (let c = 0; c < nc; c++) {
@@ -1302,18 +1337,22 @@ async function renderDiffMap(p) {
         ref = Math.max(ref, Math.abs(valB(r, c)), Math.abs(valK(r, c)));
       }
       if (mx > title.tol * Math.max(1, ref)) rows.push({ r, mx });
+      else if (markable && (isMarked(names(r)) || isPinned(names(r)))) rows.push({ r, mx: mx || 1, still: true }); // watched: shown even unchanged
     }
+    if (markable) rows = pinFirst(rows, (x) => names(x.r));
     cap.textContent = `${title.text}: knocked-out run minus normal run (orange = higher, blue = lower), each row ` +
-      `scaled by its biggest change. ${rows.length} of ${nRows} rows change. ${where} ` +
+      `scaled by its biggest change. ${rows.filter((x) => !x.still).length} of ${nRows} rows change` +
+      (rows.some((x) => x.still) ? ` (marked rows that do not change are shown flat)` : "") + `. ${where} ` +
       "Private values of switched-off calculators (e.g. div.*) can move too: they compute at every byte, " +
       "but their outputs are gated to zero, so they cannot change the answer." +
       (rows.length ? "" : " Nothing changes in this view: try a later layer or step, or the residual stream map.");
     drawHeatmap(canvas, {
-      key: `diff:${title.key}:${run.run_id}:${base.run_id}`,
+      key: `diff:${title.key}:${run.run_id}:${base.run_id}:${rows.map((x) => x.r).join(",")}`,
       rows: rows.length, cols: nc,
       get: (i, c) => (valK(rows[i].r, c) - valB(rows[i].r, c)) / rows[i].mx, norm: (v) => (v + 1) / 2, lut: DIV,
       rowLabels: rows.map((x) => names(x.r)), markCol: split < nc ? split : undefined,
-      groups: cat ? groupsOf(rows.map((x) => cat(x.r))) : undefined,
+      markKey: markable ? (i) => names(rows[i].r) : undefined,
+      groups: cat ? groupsOf(rows.map((x) => (x.pinned ? PINNED_GROUP : cat(x.r)))) : undefined,
       valueText: (i, c) => { const r = rows[i].r;
         return `${names(r)} at position ${c} ${charAt(c)}
 normal ${fmt(valB(r, c))} → knocked out ${fmt(valK(r, c))}` +
@@ -1329,7 +1368,7 @@ ${docs(r)}`; },
     const dims = state.info.dims;
     drawRows({ text: `residual stream after ${K.meta.label}`, key: `res${snap}`, tol: tolOf(K.meta) },
       (r) => dims[r].name, (r, c) => K.data[r * nK + c] * K.meta.scale[r], (r, c) => B.data[r * nB + c] * B.meta.scale[r],
-      dims.length, (r) => dimTip(dims[r].name), (r, c) => { state.openDim = dims[r].name; goto(c); }, (r) => dims[r].cat);
+      dims.length, (r) => dimTip(dims[r].name), (r, c) => { state.openDim = dims[r].name; goto(c); }, (r) => dims[r].cat, true);
   } else if (state.map === "mlp") {
     const layer = Number($("mlp-layer").value);
     const { K, B } = await pairs("/api/mlp", { layer });
@@ -1343,15 +1382,19 @@ ${docs(r)}`; },
     const labels = run.snapshots, dims = state.info.dims;
     cap.textContent = "";
     const S = labels.length;
-    const changed = dims.map((d, i) => i).filter((i) => p.values[i].some((v, s) => Math.abs(v - pb.values[i][s]) > 1e-6 * Math.max(1, Math.abs(v))));
+    const moved = (i) => p.values[i].some((v, s) => Math.abs(v - pb.values[i][s]) > 1e-6 * Math.max(1, Math.abs(v)));
+    const order = pinFirst(dims.map((d, i) => ({ i })).filter(({ i }) => moved(i) || isMarked(dims[i].name) || isPinned(dims[i].name)),
+      (x) => dims[x.i].name); // marked and pinned rows: shown flat when unchanged; pinned ones first
+    const changed = order.map((x) => x.i), lifted = new Set(order.filter((x) => x.pinned).map((x) => x.i));
     cap.textContent = `position ${q} ${charAt(q)}: each dim (rows) after each sublayer (columns), knocked-out minus normal, ` +
-      `each row scaled by its biggest change. ${changed.length} of ${dims.length} dims change here. ${where}` +
-      (changed.length ? "" : " Nothing changes in this view: try a later layer or step, or the residual stream map.");
-    const mx = changed.map((i) => Math.max(...p.values[i].map((v, s) => Math.abs(v - pb.values[i][s]))));
+      `each row scaled by its biggest change. ${changed.filter(moved).length} of ${dims.length} dims change here. ${where}` +
+      (changed.some(moved) ? "" : " Nothing changes in this view: try a later layer or step, or the residual stream map.");
+    const mx = changed.map((i) => Math.max(...p.values[i].map((v, s) => Math.abs(v - pb.values[i][s]))) || 1);
     drawHeatmap(canvas, {
-      key: `diffstep:${run.run_id}:${base.run_id}:${q}`, rows: changed.length, cols: S,
+      key: `diffstep:${run.run_id}:${base.run_id}:${q}:${changed.join(",")}`, rows: changed.length, cols: S,
       get: (r, s) => (p.values[changed[r]][s] - pb.values[changed[r]][s]) / mx[r], norm: (v) => (v + 1) / 2, lut: DIV,
-      rowLabels: changed.map((i) => dims[i].name), groups: groupsOf(changed.map((i) => dims[i].cat)),
+      rowLabels: changed.map((i) => dims[i].name), groups: groupsOf(changed.map((i) => (lifted.has(i) ? PINNED_GROUP : dims[i].cat))),
+      markKey: (r) => dims[changed[r]].name,
       valueText: (r, s) => { const i = changed[r];
         return `${dims[i].name} after ${labels[s]}
 normal ${fmt(pb.values[i][s])} → knocked out ${fmt(p.values[i][s])}
@@ -1403,23 +1446,24 @@ async function renderMap(p) {
   if (state.map === "residual") {
     const snap = Number($("snapshot").value);
     const { key, meta, data } = await mapData("/api/residual", { run_id: run.run_id, snapshot: snap });
-    const rows = state.info.dims.map((d, i) => ({ ...d, i }))
-      .filter((d) => mapRow(d.cat, meta.scale[d.i] > 1e-9));
+    const rows = pinFirst(state.info.dims.map((d, i) => ({ ...d, i }))
+      .filter((d) => mapRow(d.cat, meta.scale[d.i] > 1e-9, d.name)), (d) => d.name);
     cap.textContent = `${rowCount(rows.length, state.info.dims.length, "residual dims")} (rows) at every position (columns) after ${meta.label}; ` +
-      "each row scaled by its own max |value| (blue negative, orange positive); positions after the current step are dimmed; click a cell to jump there";
+      "each row scaled by its own max |value| (blue negative, orange positive); positions after the current step are dimmed; click a cell to jump there; " +
+      "right-click a row to mark it, double-click to pin it to the top (click its name to put it back)";
     drawHeatmap(canvas, {
       key: key + rows.map((r) => r.i).join(","),
       rows: rows.length, cols: n,
       get: (r, c) => data[rows[r].i * n + c], norm: (v) => (v + 1) / 2, lut: DIV,
-      rowLabels: rows.map((r) => r.name), groups: groupsOf(rows.map((r) => r.cat)),
+      rowLabels: rows.map((r) => r.name), groups: groupsOf(rows.map((r) => (r.pinned ? PINNED_GROUP : r.cat))), markKey: (r) => rows[r].name,
       valueText: (r, c) => `${rows[r].name} at position ${c} ${charAt(c)}\n= ${fmt(data[rows[r].i * n + c] * meta.scale[rows[r].i])}\n${rows[r].doc}`,
       rowTip: (r) => dimTip(rows[r].name),
       onClick: (r, c) => { state.openDim = rows[r].name; goto(c); },
     }, { q });
   } else if (state.map === "step") {
     const labels = run.snapshots;
-    const rows = state.info.dims.map((d, i) => ({ ...d, i, vals: p.values[i] }))
-      .filter((d) => mapRow(d.cat, d.vals.some((v) => Math.abs(v) > 1e-9)));
+    const rows = pinFirst(state.info.dims.map((d, i) => ({ ...d, i, vals: p.values[i] }))
+      .filter((d) => mapRow(d.cat, d.vals.some((v) => Math.abs(v) > 1e-9), d.name)), (d) => d.name);
     const scale = rows.map((r) => Math.max(...r.vals.map(Math.abs)) || 1); // an all-zero row (hide unused off) stays 0
     cap.textContent = `position ${q} ${charAt(q)}: ${rowCount(rows.length, state.info.dims.length, "dims")} (rows) after each sublayer (columns: embed, L1 attn, L1 mlp, …); ` +
       "a colour change marks the sublayer that wrote the dim";
@@ -1427,7 +1471,7 @@ async function renderMap(p) {
       key: `step${run.run_id}:${q}:${rows.map((r) => r.i).join(",")}`,
       rows: rows.length, cols: labels.length,
       get: (r, c) => rows[r].vals[c] / scale[r], norm: (v) => (v + 1) / 2, lut: DIV,
-      rowLabels: rows.map((r) => r.name), groups: groupsOf(rows.map((r) => r.cat)),
+      rowLabels: rows.map((r) => r.name), groups: groupsOf(rows.map((r) => (r.pinned ? PINNED_GROUP : r.cat))), markKey: (r) => rows[r].name,
       valueText: (r, c) => `${rows[r].name} after ${labels[c]}\n= ${fmt(rows[r].vals[c])}\n${rows[r].doc}`,
       rowTip: (r) => dimTip(rows[r].name),
       onClick: (r) => { state.openDim = rows[r].name; renderDims(p); },
@@ -1532,7 +1576,13 @@ function wire() {
     e.preventDefault();
     runExpression(getInput());
   });
-  $("btn-first").addEventListener("click", () => state.run && goto(state.run.prompt_len - 1));
+  $("btn-first").addEventListener("click", () => state.run && goto(firstStep(state.run)));
+  // "from first byte": remembered in this browser, like the heatmap options
+  try { $("from-start").checked = localStorage.getItem("handviz.fromstart") === "1"; } catch { /* private mode */ }
+  $("from-start").addEventListener("change", () => {
+    setFromStart(fromStart());
+    if (state.run) goto(fromStart() ? 0 : state.q); // on: start the replay at byte 0; off: clamps back to the prompt's end
+  });
   $("btn-back").addEventListener("click", () => goto(state.q - 1));
   $("btn-step").addEventListener("click", () => goto(state.q + 1));
   $("btn-play").addEventListener("click", play);
@@ -1606,6 +1656,21 @@ function wire() {
     }, 150);
   });
   attachHeatmapEvents($("map"), $("tooltip"));
+  // a row was marked or unmarked: render again, since a marked row is kept where filters would drop it
+  $("map").addEventListener("rowmark", (e) => {
+    log("heatmap row", e.detail.name, e.detail.on ? "marked" : "unmarked");
+    syncUnmark();
+    if (state.pos.has(state.q)) renderMap(state.pos.get(state.q));
+  });
+  $("map").addEventListener("rowpin", (e) => {
+    log("heatmap row", e.detail.name, e.detail.on ? "pinned to the top" : "put back");
+    if (state.pos.has(state.q)) renderMap(state.pos.get(state.q));
+  });
+  $("map-unmark").addEventListener("click", () => {
+    clearMarks();
+    syncUnmark();
+    if (state.pos.has(state.q)) renderMap(state.pos.get(state.q));
+  });
   $("show-zero").addEventListener("change", () => state.pos.has(state.q) && renderDims(state.pos.get(state.q)));
   // Step keys (arrows, Home, End). None while typing in a field (the text box, the code box, a
   // number, a menu) or on a resize grip: there the keys keep their own meaning. The space bar is
@@ -1615,7 +1680,7 @@ function wire() {
     if (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || t.closest?.("[role=separator]")) return;
     if (e.key === "ArrowRight") { e.preventDefault(); goto(state.q + 1); }
     else if (e.key === "ArrowLeft") { e.preventDefault(); goto(state.q - 1); }
-    else if (e.key === "Home" && state.run) { e.preventDefault(); goto(state.run.prompt_len - 1); }
+    else if (e.key === "Home" && state.run) { e.preventDefault(); goto(firstStep(state.run)); }
     else if (e.key === "End" && state.run) { e.preventDefault(); goto(state.run.chars.length - 2); }
   });
 }
@@ -2161,6 +2226,10 @@ async function main() {
     renderGraph();
     await runExpression(getInput());
     if (v.snap !== null && v.snap < state.run.snapshots.length) $("snapshot").value = v.snap;
+    if (v.q !== null && v.q < state.run.prompt_len - 1 && !fromStart()) { // the link was copied inside the prompt
+      log("link step", v.q, "is inside the prompt: showing from the first byte");
+      setFromStart(true);
+    }
     if (v.q !== null) await goto(v.q);
     else if (v.snap !== null && state.pos.has(state.q)) await renderMap(state.pos.get(state.q));
   } catch (e) {

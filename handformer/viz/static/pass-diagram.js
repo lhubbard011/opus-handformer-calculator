@@ -5,6 +5,8 @@
 // computation being played glows and the spine fills up to it. Built from the model description
 // (/api/info) and the position data (/api/position), like the rest of the page.
 
+import { unembedTip } from "./unembed.js";
+
 const NS = "http://www.w3.org/2000/svg";
 const log = (...a) => console.log("[pass-diagram]", ...a);
 const PALETTE = ["#f2a541", "#5ec8e5", "#7bd88f", "#c792ea", "#ff8a65", "#e6db74", "#82aaff", "#f07178", "#89ddff", "#c3e88d"];
@@ -62,12 +64,16 @@ export class PassDiagram {
       const mid = top + 14;
       svg("line", { x1: SPINE_X, y1: mid, x2: BOX_X, y2: mid, class: "pd-branch" }, g);
       svg("circle", { cx: SPINE_X, cy: mid, r: 6, class: "pd-add" }, g);
-      svg("text", { x: SPINE_X, y: mid + 3.5, class: "pd-plus", "text-anchor": "middle" }, g).textContent = kind === "embed" ? "●" : kind === "logits" ? "▼" : "+";
+      svg("text", { x: SPINE_X, y: mid + 3.5, class: "pd-plus", "text-anchor": "middle" }, g).textContent =
+        kind === "embed" ? "●" : kind === "logits" ? "▼" : kind === "unembed" ? "×" : "+";
       svg("text", { x: SPINE_X - 12, y: mid + 4, class: "pd-layer", "text-anchor": "end" }, g).textContent =
-        kind === "embed" ? "embed" : kind === "logits" ? "logits" : kind === "attn" ? `L${layer + 1}` : "";
+        kind === "embed" ? "embed" : kind === "logits" ? "logits" : kind === "unembed" ? "W_U" : kind === "attn" ? `L${layer + 1}` : "";
       g.dataset.tip = kind === "embed" ? "The embedding: the byte's input features enter the residual stream." :
-        kind === "logits" ? "The unembedding reads the residual stream into a score per byte." :
-          `${label}: click to play this computation`;
+        kind === "logits" ? "The scores per byte; the host writes the highest." :
+          kind === "unembed" ? `${unembedTip(info)}
+
+(click to play it: the matrix product)` :
+            `${label}: click to play this computation`;
       g.addEventListener("click", (e) => { if (!e.target.closest(".pd-item")) this.hooks.onStage?.(stage); });
       this.rows[stage] = { g, y: top, h: height, mid, kind, layer, items };
       y = top + height + ROW_GAP;
@@ -94,7 +100,18 @@ export class PassDiagram {
       row(1 + 2 * li, `attention · ${L.heads.length} head${L.heads.length === 1 ? "" : "s"}`, "attn", li, (p) => grid(p, L.heads, "heads", li));
       row(2 + 2 * li, `MLP · ${L.units.length} unit${L.units.length === 1 ? "" : "s"}`, "mlp", li, (p) => grid(p, L.units, "units", li));
     });
-    const endStage = 1 + 2 * info.layers.length;
+    // the unembedding: a small picture of W_U's non-zero block (rows: readout dims, columns:
+    // bytes), each weight a cell; setActive lights the cells whose dim is set for this byte
+    const ueStage = 1 + 2 * info.layers.length, ue = info.unembed;
+    row(ueStage, ue ? `unembed · W_U · ${info.readout.length} dims → ${ue.bytes.length} bytes` : "unembed · W_U", "unembed", null, (p) => {
+      if (!ue) return { h: 0, items: [] };
+      const nr = info.readout.length, nc = ue.bytes.length;
+      const c = Math.max(1.5, Math.min(4, 64 / Math.max(1, nr), inner / Math.max(1, nc)));
+      svg("rect", { x: -1, y: -1, width: nc * c + 2, height: nr * c + 2, class: "pd-ue-frame" }, p);
+      this.ueCells = ue.w.map(([r, k]) => ({ r, e: svg("rect", { x: k * c, y: r * c, width: Math.max(1, c - 0.5), height: Math.max(1, c - 0.5), class: "pd-ue" }, p) }));
+      return { h: nr * c + 4, items: [] };
+    });
+    const endStage = 2 + 2 * info.layers.length;
     row(endStage, "logits: the next byte", "logits", null, (p) => {
       this.logitG = svg("g", {}, p);
       return { h: 40, items: [] };
@@ -131,7 +148,8 @@ export class PassDiagram {
       this.rows[1 + 2 * li].items.forEach((e, h) => e.classList.toggle("on", active.heads.has(`${li}.${h}`)));
       this.rows[2 + 2 * li].items.forEach((e, u) => e.classList.toggle("on", active.units.has(`${li}.${u}`)));
     });
-    this.rows.forEach((r, s) => r.g.classList.toggle("quiet", s > 0 && s < this.rows.length - 1 && !active.changed[s]));
+    this.rows.forEach((r, s) => r.g.classList.toggle("quiet", s > 0 && s < this.rows.length - 2 && !active.changed[s]));
+    for (const { r, e } of this.ueCells || []) e.classList.toggle("on", Math.abs(active.readoutX?.[r] || 0) > 1e-9);
     // the logits row: the top bytes as bars
     this.logitG.replaceChildren();
     const top = active.logits || [], mx = Math.max(...top.map(([, v]) => Math.abs(v)), 1e-9);

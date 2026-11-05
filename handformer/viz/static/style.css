@@ -443,6 +443,33 @@ svg.pd.dla .pd-item { opacity: 0.08; }
 svg.pd.dla .pd-item.dla-pos { fill: #7bd88f; opacity: 1; transform: scale(1.6); }
 svg.pd.dla .pd-item.dla-neg { fill: #f07178; opacity: 1; transform: scale(1.6); }
 svg.pd .pd-row.dla-pos .pd-box { stroke: #7bd88f; }
+/* the unembedding stage (unembed.js; the W_U glyph in pass-diagram.js) */
+.pd-ue-frame { fill: none; stroke: #333a46; stroke-width: 1; }
+.pd-ue { fill: #4a5363; opacity: 0.5; transition: opacity 0.2s; }
+.pd-ue.on { fill: var(--accent); opacity: 1; }
+.ue-lead { margin: 2px 0 6px; }
+.ue-wrap { max-width: 100%; max-height: 460px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+.ue-grid { border-collapse: separate; border-spacing: 0; font: 11px var(--mono); }
+.ue-grid th, .ue-grid td { padding: 1px 4px; text-align: center; white-space: nowrap; }
+.ue-grid thead th { position: sticky; top: 0; z-index: 2; background: var(--panel-2); border-bottom: 1px solid var(--border); }
+.ue-grid tfoot td, .ue-grid tfoot th { position: sticky; bottom: 0; z-index: 2; background: var(--panel-2); border-top: 1px solid var(--border); }
+.ue-grid th.ue-dim, .ue-grid th.ue-corner { position: sticky; left: 0; z-index: 3; background: var(--panel-2); text-align: left; }
+.ue-grid thead th.ue-corner, .ue-grid tfoot th.ue-dim { z-index: 4; }
+.ue-dim { cursor: pointer; font-weight: 400; } .ue-dim:hover .ue-name { color: var(--text); }
+.ue-dimrow { display: flex; justify-content: space-between; gap: 10px; }
+.ue-name { color: var(--muted); } .ue-x { min-width: 3ch; text-align: right; color: var(--muted); }
+tr.set .ue-name { color: var(--text); } tr.set .ue-x { color: var(--accent); font-weight: 600; }
+.ue-byte { cursor: pointer; color: #aab2c0; font-weight: 400; } .ue-byte.top { color: var(--text); text-decoration: underline dotted; }
+.ue-byte.win { color: var(--accent); font-weight: 600; }
+.ue-cell { min-width: 18px; color: #333a46; } .ue-cell.win { background: rgba(242, 165, 65, 0.06); }
+.ue-cell.w { color: #4a5363; }
+.ue-cell.lit { font-weight: 600; border-radius: 3px; animation: ue-in 0.35s 0.2s both; }
+.ue-cell.lit.pos { color: #0d0f12; background: #7bd88f; } .ue-cell.lit.neg { color: #0d0f12; background: #f07178; }
+tr.set th.ue-dim { animation: ue-in 0.3s both; }
+.ue-sum { color: #4a5363; animation: ue-in 0.35s 0.45s both; } .ue-sum.nz { color: var(--text); } .ue-sum.win { color: var(--accent); font-weight: 600; }
+.ue-bad { color: #f07178; }
+@keyframes ue-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .ue-cell.lit, tr.set th.ue-dim, .ue-sum { animation: none; } }
 .tr-dla-row.tr-dla-dim { grid-template-columns: minmax(0, 1fr) auto; }
 /* the selected head's formulas (app.js renderHeadDetail): collapsible, long ones start closed */
 .head-formulas { margin-top: 6px; }

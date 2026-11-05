@@ -8,8 +8,11 @@
 // scrub; "skip quiet" passes over stages that change nothing. The stage is kept when the main
 // step slider moves, so the same computation can be compared across bytes. The diagram
 // (pass-diagram.js) shows the same pass as a picture of the model, beside the lists or alone.
+// After the last sublayer come two more stages: the unembedding (the matrix product x · W_U,
+// unembed.js) and the logits it produces, with their direct attribution.
 
 import { PassDiagram } from "./pass-diagram.js";
+import { readoutValues, renderUnembed } from "./unembed.js";
 
 const log = (...a) => console.log("[trace]", ...a);
 const SPEEDS = { slow: 1200, normal: 500, fast: 150 };
@@ -115,7 +118,8 @@ export class TracePlayer {
     this.body.dataset.view = v;
   }
 
-  last() { return this.data ? this.data.labels.length : 0; } // the logits stage, after the last sublayer
+  last() { return this.data ? this.data.labels.length + 1 : 0; } // the logits stage, after the unembedding
+  ueStage() { return this.data.labels.length; } // the unembedding: right after the last sublayer
 
   /** New position data (the main step slider moved, or a new run). The stage is kept. */
   load(p, run, info) {
@@ -129,7 +133,7 @@ export class TracePlayer {
     this.diagram.setActive({
       heads: new Set(p.heads.filter((h) => Object.keys(h.wrote).length).map((h) => `${h.layer}.${h.head}`)),
       units: new Set(p.units.map((u) => `${u.layer}.${u.unit}`)),
-      changed, logits: p.logits,
+      changed, logits: p.logits, readoutX: info.unembed ? readoutValues(info, p, labels.length) : null,
     });
     this.range.max = String(this.last());
     // rows built once per position; each stage only updates them
@@ -161,7 +165,7 @@ export class TracePlayer {
 
   /** Did stage s change anything (s >= 1)? */
   changed(s) {
-    if (s === 0 || s >= this.last()) return true;
+    if (s === 0 || s >= this.ueStage()) return true;
     return this.data.used.some((d) => Math.abs(d.vals[s] - d.vals[s - 1]) > TOL);
   }
 
@@ -201,20 +205,20 @@ export class TracePlayer {
   render() {
     const D = this.data;
     if (!D) return;
-    const s = this.stage, endStage = this.last();
-    const snap = Math.min(s, endStage - 1); // the logits stage shows the final residual
+    const s = this.stage, endStage = this.last(), ue = this.ueStage();
+    const snap = Math.min(s, ue - 1); // the unembed and logits stages show the final residual
     this.range.value = String(s);
     this.diagram.setStage(s);
     const dla = D.p.dla?.[this.dlaPick || 0];
     this.diagram.setAttribution(s === this.last() && dla ? dla.by_part : null);
-    const label = s === endStage ? "logits" : D.labels[s];
+    const label = s === endStage ? "logits" : s === ue ? "unembed (× W_U)" : D.labels[s];
     const ch = D.run.chars;
     this.caption.textContent = `position ${D.q} ${JSON.stringify(showChar(ch[D.q]))} → writes ${JSON.stringify(showChar(ch[D.q + 1]))} · ` +
       `${label} (${s + 1} / ${endStage + 1})`;
     // the residual column
     for (const { row, val, fill, k } of this.rows) {
-      const d = D.used[k], v = d.vals[snap], before = s > 0 && s < endStage ? d.vals[s - 1] : v;
-      const changed = s > 0 && s < endStage && Math.abs(v - before) > TOL;
+      const d = D.used[k], v = d.vals[snap], before = s > 0 && s < ue ? d.vals[s - 1] : v;
+      const changed = s > 0 && s < ue && Math.abs(v - before) > TOL;
       row.classList.toggle("changed", changed);
       row.hidden = this.changedOnly.checked && !changed;
       val.textContent = changed ? `${fmt(before)} → ${fmt(v)}` : fmt(v);
@@ -233,6 +237,20 @@ export class TracePlayer {
       box.append(el("div", "tr-title", "Embedding"),
         el("div", "muted", `The byte ${JSON.stringify(showChar(D.run.chars[D.q]))} enters as its embedding row, plus its position (pos ${D.q}, pos2 ${D.q * D.q}):`),
         el("div", "tr-list", set.map((d) => `${d.name}=${fmt(d.vals[0])}`).join(" · ")));
+      return;
+    }
+    if (s === this.ueStage()) {
+      const tops = (D.p.dla || []).map((e) => e.byte);
+      renderUnembed(box, D.info, D.p, D.labels.length, tops, {
+        onDim: H.onDim,
+        onByte: (b) => { // a top byte's column: its attribution at the logits step
+          const i = tops.indexOf(b);
+          if (i < 0) return;
+          this.pause();
+          this.dlaPick = i;
+          this.go(endStage);
+        },
+      });
       return;
     }
     if (s === endStage) {

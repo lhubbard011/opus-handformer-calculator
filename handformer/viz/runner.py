@@ -264,7 +264,8 @@ class Runner:
             "model_id": self.model_id,
             "d_model": len(self.layout),
             # the dims the unembedding reads: the only ones a logit depends on directly
-            "readout": [self.names[j] for j in np.flatnonzero(np.abs(self.model.unembed).sum(axis=1))],
+            "readout": [self.names[j] for j in self._readout_rows()],
+            "unembed": self._unembed_block(),
             "nonzero_params": self.model.nonzero_params(),
             "source": sources.repo(),  # GitHub repo + branch for "view source" links
             "dims": [{"name": n, "cat": self.spec.category(n), "doc": self._doc(n),
@@ -273,6 +274,22 @@ class Runner:
                      for n in self.names],
             "layers": layers,
         }
+
+    def _readout_rows(self) -> np.ndarray:
+        return np.flatnonzero(np.abs(self.model.unembed).sum(axis=1))
+
+    def _unembed_block(self) -> dict:
+        """W_U cut to its non-zero rows (the readout dims, in the order of "readout") and columns
+        (the bytes that can score at all), as [row, col, weight] triples: the whole matrix the
+        logits come from, minus rows and columns that are entirely zero. Knock-outs never change
+        it (ablate leaves the unembedding as is), so it belongs to the model, not a run."""
+        U = self.model.unembed
+        rows, cols = self._readout_rows(), np.flatnonzero(np.abs(U).sum(axis=0))
+        block = U[np.ix_(rows, cols)]
+        w = [[int(i), int(k), float(block[i, k])] for i, k in zip(*np.nonzero(block))]
+        log.info("unembedding block: %d of %d dims x %d of %d bytes, %d weights",
+                 len(rows), U.shape[0], len(cols), U.shape[1], len(w))
+        return {"bytes": [chr(int(c)) for c in cols], "w": w, "d_model": int(U.shape[0]), "vocab": int(U.shape[1])}
 
     # ------------------------------------------------------------- runs
 

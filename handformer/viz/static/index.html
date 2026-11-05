@@ -24,11 +24,12 @@
       </span>
     </form>
     <div class="controls">
-      <button id="btn-first" data-tip="Go to the first step: the '=' at the end of your prompt.">⏮</button>
+      <button id="btn-first" data-tip="Go to the first step: the last byte of your prompt (or its first byte, with 'from first byte' on).">⏮</button>
       <button id="btn-back" data-tip="One character back (← key).">◀</button>
       <button id="btn-step" data-tip="One character forward (→ key).">Step ▶</button>
       <button id="btn-play" data-tip="Step through automatically (click again to pause).">Play</button>
       <button id="btn-link" data-tip="Copy a link to exactly this view: the expression, step, heatmap, head, pinned panels and knockouts. Paste it in a review or an issue.">🔗 link</button>
+      <label data-tip="Start at the first byte fed in, not where the model starts writing: step through the prompt to see the residual stream (and every table in it) being filled in, byte by byte. The model computes these positions exactly like the rest; their next byte is given, not predicted."><input id="from-start" type="checkbox"> from first byte</label>
       <label data-tip="Hide the parts of the model that are switched off at this step, so only the relevant notes and units are listed."><input id="focus" type="checkbox" checked> focus active circuit</label>
       <label>speed
         <select id="speed">
@@ -238,6 +239,7 @@
         <label class="small" data-tip="Rows from every circuit, not only the active one that 'focus active circuit' keeps; each row named, under its circuit's title. The map scrolls inside its box: drag the grip under it to resize."><input id="map-circuits" type="checkbox"> every circuit</label>
         <label class="small" data-tip="Leave out the rows that are zero at every position, for a more compact map. Off: unused rows are shown too, as empty rows."><input id="map-hide-unused" type="checkbox" checked> hide unused</label>
         <label class="small" data-tip="Give every row room for its name (the map then scrolls inside its box). Off: the whole map fits on screen and only the circuit groups are named."><input id="row-names" type="checkbox" checked> row names</label>
+        <button id="map-unmark" class="small" hidden data-tip="Right-click a row of the residual stream or step map (on a touch screen: tap its name twice) to mark it: its name gets an orange tab and the row an outline, and it stays shown, even when it is all zero, while you step, change the input or knock parts out. This clears every mark.">unmark</button>
       </span>
       <label id="diff-ctl" class="diff-ctl" hidden data-tip="With parts knocked out, show how each value changed compared with the normal run (knocked-out minus normal), instead of the raw values. Every lit cell is part of the knockout's footprint."><input id="diff" type="checkbox" checked> show change vs normal</label>
       <span id="map-controls" class="map-controls">
