@@ -21,6 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from handformer import common as cm  # noqa: E402
 from handformer.viz import runner as rn  # noqa: E402
 from handformer.viz.runner import Runner  # noqa: E402
+from handformer.rewrite import viz as loopviz  # noqa: E402
+from handformer.rewrite.engine import BLANK  # noqa: E402
+from handformer.loop import viz as depthviz  # noqa: E402
 
 log = logging.getLogger("export_web")
 
@@ -39,7 +42,7 @@ def export(out: Path, model: str = "calc") -> None:
     layers = []
     for layer in m.layers:
         heads = [{"dk": h.w_q.shape[1], "dv": h.w_v.shape[1], "q": sparse(h.w_q), "k": sparse(h.w_k),
-                  "v": sparse(h.w_v), "o": sparse(h.w_o)} for h in layer.heads]
+                  "v": sparse(h.w_v), "o": sparse(h.w_o), **({"full": True} if h.full else {})} for h in layer.heads]
         layers.append({"name": layer.name, "heads": heads, "units": int(layer.w_in.shape[1]),
                        "win": sparse(layer.w_in), "wout": sparse(layer.w_out)})
     model = {
@@ -65,6 +68,24 @@ def export(out: Path, model: str = "calc") -> None:
         "unembed": sparse(m.unembed),
         "layers": layers,
     }
+    if runner.looped:  # the looped calculator: what the page's loop needs (handformer/rewrite/engine.py)
+        lay = m.layout
+        model["loop"] = {
+            "n_block": m.n_block, "adapter": sparse(m.loop.adapter), "router": m.loop.router, "grow": m.loop.grow,
+            "blank": BLANK, "holds": [[lay[dim], byte] for dim, byte in runner.builder.holds.items()],
+            "carried": [lay[d] for d in loopviz.circuit.CARRIED], "actions": [[a, lay[a]] for a in loopviz.ACTIONS],
+            "hold_unembed": sparse(m.hold_unembed), "max_passes": loopviz.MAX_PASSES, "max_input": loopviz.MAX_INPUT,
+        }
+    if runner.depth:  # the recurrent-depth calculator: what the page's decoding loop needs (handformer/loop/engine.py)
+        lay, dm = m.layout, m.depth
+        feat = [int(j) for j in np.flatnonzero(np.abs(dm.embed).sum(axis=0)) if j != lay["one"]]
+        model["depth"] = {
+            "adapter": sparse(dm.adapter), "thought": sparse(dm.thought), "router": dm.router, "think": dm.think,
+            "max_tokens": depthviz.MAX_TOKENS, "max_iters": depthviz.MAX_ITERS, "max_input": depthviz.MAX_INPUT,
+            # for naming what each position is (display only, handformer/loop/viz.py describe)
+            "feat": feat, "roles": {r: lay[r] for r in ("k_s", "k_w", "k_q", "k_r")},
+            "shown": {r: lay[r] for r in ("dA", "qd", "rd")},
+        }
     out.mkdir(parents=True, exist_ok=True)
     (out / "model.json").write_text(json.dumps(model, separators=(",", ":")))
     (out / "info.json").write_text(json.dumps(runner.info(), separators=(",", ":")))
@@ -77,7 +98,7 @@ def export(out: Path, model: str = "calc") -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("out", type=Path)
-    ap.add_argument("--model", default="calc", help="calc or life")
+    ap.add_argument("--model", default="calc", help="a key of handformer/viz/models.py MODELS (calc, rewrite, life, ...)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     export(args.out, args.model)

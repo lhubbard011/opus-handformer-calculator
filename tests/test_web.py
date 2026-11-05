@@ -192,6 +192,106 @@ class TestWebParity(unittest.TestCase):
         bad = self.node([["/api/run", {"expression": "int\x01x;"}]], c_dir)
         self.assertIn("unsupported characters", bad[0]["error"])
 
+    def test_rewrite_matches(self):
+        """The looped calculator: the same passes, tapes and answer, and the same pass and answer
+        views (steps, residuals, heads, attention) in both engines; a knockout too."""
+        loop_dir = self.tmp / "rewrite"
+        export_web.export(loop_dir, "rewrite")
+        r = Runner("rewrite")
+        for e, ko, view in (("2*(3+4)-1", None, 1), ("355/113~3", None, 20), ("2^5-1", None, 4),
+                            ("12*34-5", {"dims": ["cy"]}, None), ("1.5+2.25", {"heads": [[22, 0]]}, 0)):
+            with self.subTest(e=e, ko=ko, view=view):
+                body = {"expression": e, **({"knockout": ko} if ko else {}), **({"pass": view} if view is not None else {})}
+                py = r.run(e, ko, loop_pass=view)
+                n = len(py["chars"])
+                qs = sorted({0, n // 2, n - 1})
+                reqs = [["/api/run", body], *(["/api/position", {"run_id": "$run", "q": q}] for q in qs),
+                        ["/api/residual", {"run_id": "$run", "snapshot": 2 * 23}]]
+                if view is not None:
+                    reqs.append(["/api/attention", {"run_id": "$run", "layer": 22, "head": 0}])  # a bidirectional head
+                js = self.node(reqs, loop_dir)
+                run = js[0]
+                self.assertNotIn("error", run, run)
+                for key in ("model_id", "chars", "prompt_len", "finished", "snapshots", "loop", "knockout"):
+                    self.assertEqual(run[key], py[key], key)
+                for q, (a, b) in enumerate(zip(run["steps"], py["steps"])):
+                    self.assertEqual(a["pred"], b["pred"], f"pred at {q}")
+                    close_dict(a["v"], b["v"], f"step {q}")
+                for q, jp in zip(qs, js[1:]):
+                    pp = r.position(py["run_id"], q)
+                    close(jp["values"], pp["values"], f"loop values q={q}")
+                    self.assertEqual(len(jp["heads"]), len(pp["heads"]))
+                    for hj, hp in zip(jp["heads"], pp["heads"]):
+                        close_dict(hj["wrote"], hp["wrote"], f"loop head L{hp['layer']}h{hp['head']} wrote q={q}")
+                    self.assertEqual({(u["layer"], u["unit"]) for u in jp["units"]},
+                                     {(u["layer"], u["unit"]) for u in pp["units"]}, f"loop units q={q}")
+                k = 1 + len(qs)
+                mat, meta = r.residual_map(py["run_id"], 2 * 23)
+                scale = np.array(meta["scale"])[:, None]
+                close(np.array(js[k]["data"]).reshape(mat.shape) * scale, mat.astype(np.float32) * scale, "loop residual")
+                if view is not None:
+                    att, _ = r.attention_map(py["run_id"], 22, 0)
+                    close(np.array(js[k + 1]["data"]).reshape(att.shape), att.astype(np.float32), "loop attention")
+        skipped = self.node([["/api/run", {"expression": "1+1"}], ["/api/attention", {"run_id": "$run", "layer": 5, "head": 0}]],
+                            loop_dir)
+        self.assertIn("does not run in this view", skipped[1]["error"])
+        bad = self.node([["/api/run", {"expression": "1+x"}]], loop_dir)
+        with self.assertRaisesRegex(ValueError, "unsupported characters"):
+            r.run("1+x")
+        self.assertIn("unsupported characters: 'x'", bad[0]["error"])
+
+    def test_loop_matches(self):
+        """The recurrent-depth calculator: the same positions, depths and answer, and the same views
+        (every position at its last iteration, or one at an earlier iteration: steps, residuals,
+        heads, attention) in both engines; knockouts too."""
+        loop_dir = self.tmp / "loop"
+        export_web.export(loop_dir, "loop")
+        r = Runner("loop")
+        for e, ko, it in (("2*(3+4)-1", None, None), ("12*34-5", None, "first"), ("355/113~3", None, "first"),
+                          ("2^5-1", None, None), ("12*34-5", {"dims": ["cm"]}, None), ("1.5+2.25", {"heads": [[16, 0]]}, None)):
+            with self.subTest(e=e, ko=ko, it=it):
+                if it == "first":  # the first position that iterated, at its first iteration
+                    full = r.run(e, ko)
+                    q0 = next(q for q, n in enumerate(full["depth"]["iters"]) if n > 1)
+                    it = [q0, 0]
+                body = {"expression": e, **({"knockout": ko} if ko else {}), **({"iter": it} if it else {})}
+                py = r.run(e, ko, iteration=it)
+                n = len(py["chars"])
+                qs = sorted({0, n // 2, n - 1})
+                reqs = [["/api/run", body], *(["/api/position", {"run_id": "$run", "q": q}] for q in qs),
+                        ["/api/residual", {"run_id": "$run", "snapshot": 2 * 10}],
+                        ["/api/attention", {"run_id": "$run", "layer": 4, "head": 0}]]
+                js = self.node(reqs, loop_dir)
+                run = js[0]
+                self.assertNotIn("error", run, run)
+                for key in ("model_id", "chars", "prompt_len", "finished", "snapshots", "depth", "knockout"):
+                    self.assertEqual(run[key], py[key], key)
+                for q, (a, b) in enumerate(zip(run["steps"], py["steps"])):
+                    self.assertEqual(a["pred"], b["pred"], f"pred at {q}")
+                    close_dict(a["v"], b["v"], f"step {q}")
+                for q, jp in zip(qs, js[1:]):
+                    pp = r.position(py["run_id"], q)
+                    close(jp["values"], pp["values"], f"depth values q={q}")
+                    self.assertEqual(len(jp["heads"]), len(pp["heads"]))
+                    for hj, hp in zip(jp["heads"], pp["heads"]):
+                        close_dict(hj["wrote"], hp["wrote"], f"depth head L{hp['layer']}h{hp['head']} wrote q={q}")
+                    self.assertEqual({(u["layer"], u["unit"]) for u in jp["units"]},
+                                     {(u["layer"], u["unit"]) for u in pp["units"]}, f"depth units q={q}")
+                k = 1 + len(qs)
+                mat, meta = r.residual_map(py["run_id"], 2 * 10)
+                scale = np.array(meta["scale"])[:, None]
+                close(np.array(js[k]["data"]).reshape(mat.shape) * scale, mat.astype(np.float32) * scale, "depth residual")
+                att, _ = r.attention_map(py["run_id"], 4, 0)
+                close(np.array(js[k + 1]["data"]).reshape(att.shape), att.astype(np.float32), "depth attention")
+        bad = self.node([["/api/run", {"expression": "1+x"}], ["/api/run", {"expression": "1+1", "iter": [3, 1]}]],
+                        loop_dir)
+        with self.assertRaisesRegex(ValueError, "unsupported characters"):
+            r.run("1+x")
+        self.assertIn("unsupported characters: 'x'", bad[0]["error"])
+        with self.assertRaisesRegex(ValueError, "iterated 1 times"):
+            r.run("1+1", iteration=[3, 1])
+        self.assertIn("iterated 1 times", bad[1]["error"])
+
     def test_random_draws_match(self):
         """mulberry32 gives the same numbers in Python (handformer/sampling.py) and JS (engine.js)."""
         from handformer.sampling import Mulberry32

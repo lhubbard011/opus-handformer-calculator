@@ -24,6 +24,8 @@ from ..model import Form, Tracer
 from . import sources
 from ..sampling import Sampling
 from .models import MODELS, ModelDef
+from ..rewrite import viz as loopviz
+from ..loop import viz as depthviz
 from .glossary import describe_dim, describe_head
 
 log = logging.getLogger(__name__)
@@ -160,6 +162,17 @@ class _Recorder(Tracer):
 
 
 @dataclass
+class _LoopRecord:
+    """A looped run, kept so the page can switch between its passes without running it again."""
+
+    res: object  # loop.engine.LoopResult
+    tapes: list[list[int]]  # the bytes going into each pass
+    held: list[np.ndarray]  # the carried dims going into each pass (n, len(CARRIED))
+    acts: list[dict]  # the root's decision dims in each pass
+    cap: int  # the pass budget it ran with
+
+
+@dataclass
 class Run:
     run_id: str
     expression: str
@@ -177,7 +190,8 @@ class Runner:
         if model not in MODELS:
             raise ValueError(f"unknown model {model!r} (one of {', '.join(MODELS)})")
         self.spec: ModelDef = MODELS[model]
-        self._main = "parser" if model == "calc" else model  # circuit of units that only write outputs
+        # circuit of units that only write outputs
+        self._main = "parser" if model == "calc" else "block" if model == "rewrite" else model
         self.builder = self.spec.builder()
         self.model = self.builder.build()
         self.layout = self.model.layout
@@ -185,6 +199,10 @@ class Runner:
         self.runs: OrderedDict[str, Run] = OrderedDict()
         self.ko_models: OrderedDict[str, object] = OrderedDict()  # knockout key -> model
         self.normal_len: dict[str, int] = {}  # expression -> bytes the intact model writes
+        self.looped = hasattr(self.model, "loop")  # the looped rewriter (handformer/rewrite/viz.py)
+        self.loops: OrderedDict[tuple[str, str], _LoopRecord] = OrderedDict()  # (expression, knockout) -> run
+        self.depth = hasattr(self.model, "depth")  # the recurrent-depth calculator (handformer/loop/viz.py)
+        self.depth_runs: OrderedDict[tuple[str, str], depthviz.Record] = OrderedDict()
         # Identifies this exact model, so a page loaded against an older server can tell.
         self.model_id = (f"{self.spec.key}-d{len(self.layout)}-L{len(self.model.layers)}-h{sum(len(l.heads) for l in self.model.layers)}"
                          f"-u{sum(l.w_in.shape[1] for l in self.model.layers)}-nz{self.model.nonzero_params()}")
@@ -298,18 +316,29 @@ class Runner:
             return self.model
         key = ko.key()
         if key not in self.ko_models:
-            self.ko_models[key] = ablate.apply(self.model, ko)
+            self.ko_models[key] = (loopviz.knock_out(self.model, ko) if self.looped else
+                                   depthviz.knock_out(self.model, ko) if self.depth else ablate.apply(self.model, ko))
             while len(self.ko_models) > MAX_KNOCKOUT_MODELS:
                 self.ko_models.popitem(last=False)
         self.ko_models.move_to_end(key)
         return self.ko_models[key]
 
     def run(self, expression: str, knockout: dict | None = None, max_new: int | None = None,
-            sample: dict | None = None) -> dict:
+            sample: dict | None = None, loop_pass: int | None = None, iteration: list[int] | None = None) -> dict:
         """``max_new``: how many bytes the model may write ("run longer"), up to the model's limit;
         by default a knocked-out run or one with unknown bytes is cut off sooner (see the budgets).
         ``sample`` ({"temperature", "seed"}, language models only): seeded sampling instead of the
-        argmax (handformer/sampling.py)."""
+        argmax (handformer/sampling.py). ``loop_pass`` (the looped calculator only): which pass to
+        show; None shows the answer (the coda's decode). ``iteration`` (the recurrent-depth
+        calculator only): [position, iteration] to show that position at that iteration."""
+        if self.looped:
+            return self._run_loop(expression, knockout, max_new, loop_pass)
+        if self.depth:
+            return self._run_depth(expression, knockout, max_new, iteration)
+        if loop_pass is not None:
+            raise ValueError(f"the {self.spec.title} has no passes: it is not a looped model")
+        if iteration is not None:
+            raise ValueError(f"the {self.spec.title} has no iterations: its depth is fixed")
         sampling = None
         if sample is not None:
             if not self.spec.sampling:
@@ -365,6 +394,148 @@ class Runner:
             "snapshots": list(rec.labels),
         }
 
+    def _loop_record(self, expression: str, prompt: list[int], ko, stack, max_new: int | None) -> "_LoopRecord":
+        """The looped run itself (cached): every pass's tape, carried dims and root decisions."""
+        key = (expression, ko.key() if ko else "")
+        if key in self.loops and (max_new is None or self.loops[key].cap >= max_new):
+            self.loops.move_to_end(key)
+            return self.loops[key]
+        cap = int(max_new) if max_new else loopviz.MAX_PASSES
+        lay = stack.layout
+        carried = [lay[d] for d in loopviz.circuit.CARRIED]
+        tapes, held, acts = [], [], []
+
+        def on_pass(r, state, x):
+            tapes.append(stack.loop.tape_of(state))
+            held.append(state[:, carried].copy())
+            acts.append({k: round(float(x[-1, lay[k]]), 6) for k in loopviz.ACTIONS})
+
+        t0 = time.perf_counter()
+        res = stack.loop.run(prompt, stop=cm.EOS, max_passes=cap, on_pass=on_pass)
+        rec = _LoopRecord(res, tapes, held, acts, cap)
+        self.loops[key] = rec
+        while len(self.loops) > MAX_RUNS * 2:
+            self.loops.popitem(last=False)
+        log.info("looped %r: %d passes in %.2fs, halted=%s, answer %r", expression, len(res.passes),
+                 time.perf_counter() - t0, res.halted, bytes(res.answer).decode(errors="replace"))
+        return rec
+
+    def _run_loop(self, expression: str, knockout: dict | None, max_new: int | None, loop_pass: int | None) -> dict:
+        """One view of a looped run, as an ordinary run: a pass (the tape through the block's
+        layers; each position's next byte is the byte it holds next) or the answer (the final
+        tape and the answer through the coda's layers). The page steps through either the same
+        way; ``loop`` lists every pass so it can switch views."""
+        prompt = self.spec.prompt(expression)
+        expression = bytes(prompt[1:-1]).decode("utf-8")
+        ko = ablate.Knockout.from_request(knockout)
+        stack = self._model_for(ko)
+        lr = self._loop_record(expression, prompt, ko, stack, max_new)
+        res, n_pass = lr.res, len(lr.res.passes)
+        kind = "pass" if loop_pass is not None and loop_pass < n_pass else "answer"
+        lay = stack.layout
+        if kind == "pass":
+            tokens = lr.tapes[loop_pass]
+            x0 = stack.embed[np.asarray(tokens, dtype=np.int64)].copy()
+            x0[:, [lay[d] for d in loopviz.circuit.CARRIED]] = lr.held[loop_pass]
+            prompt_len = len(tokens)
+        else:
+            tokens = [*res.final_tape, *res.answer]
+            x0 = stack.embed[np.asarray(tokens, dtype=np.int64)]
+            prompt_len = len(res.final_tape)
+        view = stack.view("pass" if kind == "pass" else "answer")
+        t0 = time.perf_counter()
+        rec = _Recorder()
+        logits = view.residual_from(x0, trace=rec) @ view.unembed
+        rec.finish()
+        run = Run(uuid.uuid4().hex[:12], expression, tokens, prompt_len, rec, logits, view, ko.as_request())
+        self.runs[run.run_id] = run
+        while len(self.runs) > MAX_RUNS or (len(self.runs) > 1 and self._stored_bytes() > MAX_RUN_BYTES):
+            self.runs.popitem(last=False)
+        answer = bytes(res.answer).decode(errors="replace")
+        log.info("loop view %s %r: %s %s, %d positions traced in %.2fs", run.run_id, expression, kind,
+                 loop_pass if kind == "pass" else "", len(tokens), time.perf_counter() - t0)
+        return {
+            "model_id": self.model_id, "run_id": run.run_id, "expression": expression,
+            "chars": [chr(t) for t in tokens], "prompt_len": prompt_len,
+            "finished": res.halted and answer.endswith("\n"), "unknown_chars": "",
+            "budget": lr.cap, "max_budget": max(lr.cap, 10 * loopviz.MAX_PASSES),
+            "sample": None, "knockout": run.knockout,
+            "steps": [self._step(run, q) for q in range(len(tokens))],
+            "snapshots": list(rec.labels),
+            "loop": {"kind": kind, "pass": loop_pass if kind == "pass" else None, "halted": res.halted,
+                     "answer": answer.rstrip("\n"),
+                     "passes": [{"tape": bytes(t[1:-1]).decode(errors="replace"), "routed": p.routed, "grew": p.grew,
+                                 "action": loopviz.action(a)} for t, p, a in zip(lr.tapes, res.passes, lr.acts)]},
+        }
+
+    def _depth_record(self, expression: str, prompt: list[int], ko, stack, max_new: int | None) -> depthviz.Record:
+        """The recurrent-depth run itself (cached): every iteration's input, every position's kind."""
+        key = (expression, ko.key() if ko else "")
+        if key in self.depth_runs and (max_new is None or self.depth_runs[key].cap >= max_new):
+            self.depth_runs.move_to_end(key)
+            return self.depth_runs[key]
+        cap = int(max_new) if max_new else depthviz.MAX_TOKENS
+        t0 = time.perf_counter()
+        rec = depthviz.record(stack, prompt, cap)
+        self.depth_runs[key] = rec
+        while len(self.depth_runs) > MAX_RUNS * 2:
+            self.depth_runs.popitem(last=False)
+        res = rec.res
+        log.info("recurrent-depth %r: %d positions, %d iterations in %.2fs, finished=%s, answer %r", expression,
+                 len(res.tokens), sum(t.iterations for t in res.tokens), time.perf_counter() - t0, res.finished,
+                 bytes(res.answer).decode(errors="replace"))
+        return rec
+
+    def _run_depth(self, expression: str, knockout: dict | None, max_new: int | None,
+                   iteration: list[int] | None) -> dict:
+        """A recurrent-depth run as an ordinary run: every position at its last iteration through
+        the block (exactly the cached computation), or the positions up to q with q at iteration
+        k. ``depth`` lists every position's kind and depth so the page can switch views."""
+        prompt = self.spec.prompt(expression)
+        expression = bytes(prompt[1:-1]).decode("utf-8")
+        ko = ablate.Knockout.from_request(knockout)
+        stack = self._model_for(ko)
+        dr = self._depth_record(expression, prompt, ko, stack, max_new)
+        res, n = dr.res, len(dr.res.tokens)
+        iters = [t.iterations for t in res.tokens]
+        if iteration is not None:
+            q, k = int(iteration[0]), int(iteration[1])
+            if not 0 <= q < n:
+                raise ValueError(f"position {q} out of range 0..{n - 1}")
+            if not 0 <= k < iters[q]:
+                raise ValueError(f"position {q} iterated {iters[q]} times: no iteration {k + 1}")
+            rows = dr.last_in[: q + 1].copy()
+            if k < iters[q] - 1:
+                rows[q] = dr.earlier[(q, k)]
+        else:
+            rows = dr.last_in
+        t0 = time.perf_counter()
+        rec = _Recorder()
+        logits = stack.residual_from(rows, trace=rec) @ stack.unembed
+        rec.finish()
+        chars = dr.chars[: len(rows)]
+        run = Run(uuid.uuid4().hex[:12], expression, [ord(c) for c in chars], len(prompt), rec, logits, stack,
+                  ko.as_request())
+        self.runs[run.run_id] = run
+        while len(self.runs) > MAX_RUNS or (len(self.runs) > 1 and self._stored_bytes() > MAX_RUN_BYTES):
+            self.runs.popitem(last=False)
+        answer = bytes(res.answer).decode(errors="replace")
+        log.info("depth view %s %r: %s, %d positions traced in %.2fs", run.run_id, expression,
+                 f"position {iteration[0]} iteration {iteration[1]}" if iteration else "last iterations",
+                 len(rows), time.perf_counter() - t0)
+        return {
+            "model_id": self.model_id, "run_id": run.run_id, "expression": expression,
+            "chars": chars, "prompt_len": len(prompt),
+            "finished": res.finished and answer.endswith("\n"), "unknown_chars": "",
+            "budget": dr.cap, "max_budget": max(dr.cap, 10 * depthviz.MAX_TOKENS),
+            "sample": None, "knockout": run.knockout,
+            "steps": [self._step(run, q) for q in range(len(rows))],
+            "snapshots": list(rec.labels),
+            "depth": {"kinds": dr.kinds, "iters": iters, "chars": dr.chars, "answer": answer.rstrip("\n"),
+                      "finished": res.finished,
+                      "view": [int(iteration[0]), int(iteration[1])] if iteration else None},
+        }
+
     def _stored_bytes(self) -> int:
         return sum(r.rec.nbytes() + r.logits.nbytes for r in self.runs.values())
 
@@ -400,17 +571,20 @@ class Runner:
         values = rec.row_history(q)  # (d, n_snapshots)
 
         heads, head_out = [], {}
-        inputs = {s: x[: q + 1].copy() for s, x in rec.sweep() if s % 2 == 0}  # layer inputs, keys 0..q
+        # layer inputs: keys 0..q, or every key when a bidirectional head reads them (looped model)
+        bidir = any(h.full for layer in run.model.layers for h in layer.heads)
+        inputs = {s: x.copy() if bidir else x[: q + 1].copy() for s, x in rec.sweep() if s % 2 == 0}
         for li, layer in enumerate(run.model.layers):
             x_in = inputs[2 * li]  # residual entering layer li
             for hi, h in enumerate(layer.heads):
                 idx = rec.top_idx[(li, hi)][q]
                 w = rec.top_w[(li, hi)][q]
                 # Exactly what this head added at q: its full attention row, not just the top keys.
-                scores = (x_in @ h.w_k) @ (x_in[q] @ h.w_q)
+                keys = x_in if h.full else x_in[: q + 1]
+                scores = (keys @ h.w_k) @ (x_in[q] @ h.w_q)
                 attn = np.exp(scores - scores.max())
                 attn /= attn.sum()
-                wrote = ((attn @ x_in) @ h.w_v) @ h.w_o
+                wrote = ((attn @ keys) @ h.w_v) @ h.w_o
                 nz = np.flatnonzero(np.abs(wrote) > 1e-9)
                 head_out[(li, hi)] = wrote
                 heads.append({
@@ -467,6 +641,9 @@ class Runner:
         run = self._get(run_id)
         if not 0 <= layer < len(self.model.layers) or not 0 <= head < len(self.model.layers[layer].heads):
             raise ValueError(f"no head {head} in layer {layer}")
+        if layer in getattr(run.model, "skip", ()):
+            raise ValueError(f"layer {layer + 1} does not run in this view of the looped model "
+                             "(the coda runs once, for the answer; answer bytes skip the block)")
         x_in = run.rec.snapshot(2 * layer)
         n = len(x_in)
         causal = np.triu(np.ones((n, n), dtype=bool), k=1)

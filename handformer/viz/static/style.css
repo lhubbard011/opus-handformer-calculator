@@ -482,3 +482,29 @@ tr.set th.ue-dim { animation: ue-in 0.3s both; }
 .decode-ctl input[type="number"] { width: 5.5em; }
 .decode-ctl[hidden] { display: none; }
 
+
+/* looped calculator: what each cell does in a pass, and the bar of passes */
+:root { --ph-fixed: #f2a541; --ph-keep: #3a404b; --ph-result: #7bd88f; --ph-shift: #5ec8e5; --ph-blank: #262b34;
+        --ph-tape: #3a404b; --ph-answer: #4fd1c5; }
+.ph-fixed { border-bottom-color: var(--ph-fixed); } .lg.ph-fixed { background: var(--ph-fixed); }
+.ph-keep { border-bottom-color: var(--ph-keep); } .lg.ph-keep { background: var(--ph-keep); color: var(--text); }
+.ph-result { border-bottom-color: var(--ph-result); } .lg.ph-result { background: var(--ph-result); }
+.ph-shift { border-bottom-color: var(--ph-shift); } .lg.ph-shift { background: var(--ph-shift); }
+.ph-blank { border-bottom-color: var(--ph-blank); } .lg.ph-blank { background: var(--ph-blank); color: var(--text); }
+.lg.ph-halt { background: var(--ph-halt); }
+.ph-tape { border-bottom-color: var(--ph-tape); } .lg.ph-tape { background: var(--ph-tape); color: var(--text); }
+.ph-answer { border-bottom-color: var(--ph-answer); } .lg.ph-answer { background: var(--ph-answer); }
+.loop-bar { display: flex; gap: 4px; align-items: center; overflow-x: auto; padding: 4px 0 6px; white-space: nowrap; }
+.loop-bar[hidden] { display: none; }
+.loop-bar .label { margin-right: 4px; }
+.loop-bar .pass { padding: 2px 7px; font: 12px var(--mono); flex: none; }
+.loop-bar .pass.on { border-color: var(--accent); color: var(--accent); }
+
+/* recurrent-depth calculator: what each position is; a position the router sent round again */
+:root { --ph-start: #f2a541; --ph-column: #c792ea; --ph-quotient: #ff9e64; --ph-remainder: #e0af68; --ph-root: #ff6b9d; }
+.ph-start { border-bottom-color: var(--ph-start); } .lg.ph-start { background: var(--ph-start); }
+.ph-column { border-bottom-color: var(--ph-column); } .lg.ph-column { background: var(--ph-column); }
+.ph-quotient { border-bottom-color: var(--ph-quotient); } .lg.ph-quotient { background: var(--ph-quotient); }
+.ph-remainder { border-bottom-color: var(--ph-remainder); } .lg.ph-remainder { background: var(--ph-remainder); }
+.ph-root { border-bottom-color: var(--ph-root); } .lg.ph-root { background: var(--ph-root); }
+.chip.deep { box-shadow: inset 0 -6px 0 -3px var(--accent); }

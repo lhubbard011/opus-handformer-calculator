@@ -119,7 +119,7 @@ def exhausted_units(lo: Form, hi: Form, i: Form, dst: str) -> list[UnitSpec]:
 
 
 def ramp_mod10_units(x: Form, lo: int, hi: int, gate: Form | None, on_when: float,
-                     prefix: str = "D") -> list[UnitSpec]:
+                     prefix: str = "D", skip_zero: bool = False) -> list[UnitSpec]:
     """``D[(x mod 10)] += 1`` for integer x in [lo, hi], from shared ReLU ramps.
 
     hat_k(x) = R(k-1) - 2R(k) + R(k+1) with R(c) = ReLU(x - c); summing hats
@@ -136,6 +136,7 @@ def ramp_mod10_units(x: Form, lo: int, hi: int, gate: Form | None, on_when: floa
     ``gate`` / ``on_when`` silence every ramp unless the gate holds
     (``pr.gated``); the D dims are output dims, so this is how a circuit
     keeps its digits off at positions where it should not write.
+    ``skip_zero``: no ``D0`` dim (for a reader that only sums ``d * D<d>``).
     """
     coefs: dict[int, dict[str, float]] = {}
     for k in range(lo, hi + 1):
@@ -148,7 +149,7 @@ def ramp_mod10_units(x: Form, lo: int, hi: int, gate: Form | None, on_when: floa
         read = pr.add(x, pr.const(-float(c)))
         if gate is not None:
             read = pr.gated(read, gate, on_when)
-        write = {d: w for d, w in coefs[c].items() if w != 0.0}
+        write = {d: w for d, w in coefs[c].items() if w != 0.0 and not (skip_zero and d == f"{prefix}0")}
         if write:
             units.append(UnitSpec(read=read, write=write,
                                   label=f"digit ramp at {c}: part of 'last digit of x' (x mod 10) for x in "

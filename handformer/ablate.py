@@ -19,6 +19,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+import numpy as np
+
 from .model import Head, Layer, Transformer
 
 log = logging.getLogger(__name__)
@@ -71,38 +73,46 @@ def apply(model: Transformer, ko: Knockout) -> Transformer:
     """
     if not ko:
         return model
-    n_layers = len(model.layers)
+    embed, layers = apply_parts(model.layout, model.embed, model.layers, ko)
+    out = Transformer(model.layout, embed, layers, model.unembed)
+    log.info("knockout %s: %d -> %d nonzero weights", ko.key(), model.nonzero_params(), out.nonzero_params())
+    return out
+
+
+def apply_parts(layout, embed: np.ndarray, model_layers: list[Layer], ko: Knockout) -> tuple[np.ndarray, list[Layer]]:
+    """The embedding and layers of ``apply``, for any stack of layers (the looped model's block
+    and coda too, handformer/rewrite/viz.py). Same rules, same checks."""
+    n_layers = len(model_layers)
+    model_layers_ = model_layers
     for li, hi in ko.heads:
-        if not (0 <= li < n_layers and 0 <= hi < len(model.layers[li].heads)):
+        if not (0 <= li < n_layers and 0 <= hi < len(model_layers_[li].heads)):
             raise ValueError(f"no head {hi} in layer {li}")
     for li, ui in ko.units:
-        if not (0 <= li < n_layers and 0 <= ui < model.layers[li].w_in.shape[1]):
+        if not (0 <= li < n_layers and 0 <= ui < model_layers_[li].w_in.shape[1]):
             raise ValueError(f"no unit {ui} in layer {li}")
     for d in ko.dims:
-        if d not in model.layout:
+        if d not in layout:
             raise ValueError(f"no residual dim named {d!r}")
         if d in POSITIONAL:
             raise ValueError(f"{d} is a position feature added by the forward pass, not a weight; "
                              "it cannot be knocked out")
-    cols = [model.layout[d] for d in ko.dims]
+    cols = [layout[d] for d in ko.dims]
 
-    embed = model.embed.copy()
+    embed = embed.copy()
     embed[:, cols] = 0.0
     layers = []
-    for li, layer in enumerate(model.layers):
+    for li, layer in enumerate(model_layers_):
         heads = []
         for hi, h in enumerate(layer.heads):
             w_o = h.w_o.copy()
             if (li, hi) in ko.heads:
                 w_o[:] = 0.0
             w_o[:, cols] = 0.0
-            heads.append(Head(h.name, h.w_q, h.w_k, h.w_v, w_o))
+            heads.append(Head(h.name, h.w_q, h.w_k, h.w_v, w_o, h.full))
         w_out = layer.w_out.copy()
         for lj, ui in ko.units:
             if lj == li:
                 w_out[ui, :] = 0.0
         w_out[:, cols] = 0.0
         layers.append(Layer(layer.name, heads, layer.w_in, w_out))
-    out = Transformer(model.layout, embed, layers, model.unembed)
-    log.info("knockout %s: %d -> %d nonzero weights", ko.key(), model.nonzero_params(), out.nonzero_params())
-    return out
+    return embed, layers

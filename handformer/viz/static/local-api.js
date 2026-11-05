@@ -4,7 +4,7 @@
 // page whether it talks to the Python server or runs fully static (GitHub Pages).
 // tests/test_web.py checks this file against the server's answers.
 
-import { Model } from "./engine.js";
+import { Model, runDepth, runLoop, rowsTrace } from "./engine.js";
 
 const log = (...a) => console.info("[local-api]", ...a);
 const MAX_RUNS = 4;
@@ -86,7 +86,7 @@ export class LocalApi {
     const t0 = performance.now();
     const route = {
       "/api/info": () => this.info,
-      "/api/run": () => this.run(body.expression, body.knockout, body.max_new, body.sample),
+      "/api/run": () => this.run(body.expression, body.knockout, body.max_new, body.sample, body.pass ?? null, body.iter ?? null),
       "/api/position": () => this.position(body.run_id, body.q),
       "/api/attention": () => this.attentionMap(body.run_id, body.layer, body.head),
       "/api/residual": () => this.residualMap(body.run_id, body.snapshot),
@@ -117,7 +117,11 @@ export class LocalApi {
     return this.koModels.get(key);
   }
 
-  run(expression, knockout, maxNew = null, sample = null) {
+  run(expression, knockout, maxNew = null, sample = null, loopPass = null, iteration = null) {
+    if (this.cfg.loop) return this.runLoop(expression, knockout, maxNew, loopPass);
+    if (this.cfg.depth) return this.runDepth(expression, knockout, maxNew, iteration);
+    if (loopPass !== null) throw new Error(`the ${this.info.title} has no passes: it is not a looped model`);
+    if (iteration !== null) throw new Error(`the ${this.info.title} has no iterations: its depth is fixed`);
     if (sample) { // the same checks as the server (handformer/viz/server.py SampleBody, runner.run)
       if (!this.cfg.sampling) throw new Error(`the ${this.info.title} decodes greedily only (one right byte at each step)`);
       if (!(sample.temperature >= 0.05 && sample.temperature <= 5)) throw new Error("temperature outside 0.05..5");
@@ -158,7 +162,7 @@ export class LocalApi {
     }
     const tr = this._modelFor(ko).generate(prompt, budget, this.cfg.top_keys, sample);
     const runId = Math.random().toString(16).slice(2, 14).padEnd(12, "0");
-    this.runs.set(runId, { expression, tr, promptLen: prompt.length });
+    this.runs.set(runId, { expression, tr, promptLen: prompt.length, model: this._modelFor(ko), labels: this.labels });
     while (this.runs.size > MAX_RUNS) {
       const old = this.runs.keys().next().value;
       this.runs.delete(old);
@@ -183,6 +187,203 @@ export class LocalApi {
     };
   }
 
+  // ------------------------------------------------------------- the looped calculator
+  // handformer/viz/runner.py _run_loop: one view of a looped run as an ordinary run. A pass: the
+  // tape through the block's layers, each position's next byte being the byte it holds next (the
+  // hold readout). The answer: the final tape and the answer through the coda's layers.
+
+  /** The view models of a (knocked-out) looped model: the layers a view does not run are empty. */
+  _loopViews(ko) {
+    const key = koKey(ko);
+    this.loopViews ||= new Map();
+    if (!this.loopViews.has(key)) {
+      const json = koEmpty(ko) ? this.cfg : knockoutJson(this.cfg, ko);
+      const nb = this.cfg.loop.n_block, empty = (L) => ({ name: L.name, heads: [], units: 0, win: [], wout: [] });
+      const view = (kind) => new Model({ ...json,
+        layers: json.layers.map((L, i) => ((kind === "pass") === (i < nb) ? L : empty(L))),
+        unembed: kind === "pass" ? this.cfg.loop.hold_unembed : json.unembed });
+      const full = koEmpty(ko) ? this.model : this._modelFor(ko);
+      const coda = new Model({ ...json, layers: json.layers.slice(nb) });
+      this.loopViews.set(key, { full, coda, pass: view("pass"), answer: view("answer") });
+      while (this.loopViews.size > MAX_KNOCKOUT_MODELS + 1) this.loopViews.delete(this.loopViews.keys().next().value);
+    }
+    return this.loopViews.get(key);
+  }
+
+  /** What a pass did, from the root's values (handformer/rewrite/viz.py action). */
+  static loopAction(v) {
+    if (v.grow_any > 0.5) return "room";
+    if (v.act_sp > 0.5) return "space";
+    if (v.act_br > 0.5) return "brackets";
+    if (v.macc > 0.5) return `x digit ${Math.round(v.kk)}`;
+    if (v.dsub > 0.5) return "/ subtract";
+    if (v.dwork > 0.5) return "/ shift";
+    if (v.rwp > 0.5) return "^ rewrite";
+    if (v.rwn > 0.5) return `${v.opdiv > 0.5 ? "/" : v.opmul > 0.5 ? "*" : v.opm > 0.5 ? "-" : "+"} write`;
+    return "halt";
+  }
+
+  runLoop(expression, knockout, maxNew, loopPass) {
+    expression = String(expression);
+    const L = this.cfg.loop;
+    // the same input checks as the server (handformer/rewrite/viz.py prompt)
+    if (!expression) throw new Error(this.cfg.pattern_error);
+    if (expression.length > L.max_input) throw new Error(`input longer than ${L.max_input} characters`);
+    const allowed = new Set(this.cfg.input_chars);
+    const bad = [...new Set([...expression].filter((ch) => !allowed.has(ch)))].sort();
+    if (bad.length) throw new Error(`unsupported characters: '${bad.join("")}' ${this.cfg.chars_hint}`);
+    const prompt = [...new TextEncoder().encode(`\n${expression}=`)];
+    const ko = normKnockout(knockout);
+    const views = this._loopViews(ko);
+    const key = `${expression}|${koKey(ko)}`;
+    this.loopRecs ||= new Map();
+    let rec = this.loopRecs.get(key);
+    if (!rec || (maxNew && rec.cap < maxNew)) {
+      const cap = maxNew ? Math.floor(maxNew) : L.max_passes;
+      rec = { ...runLoop(views.full, views.coda, L, prompt, cap, 100000), cap };
+      this.loopRecs.set(key, rec);
+      while (this.loopRecs.size > MAX_RUNS * 2) this.loopRecs.delete(this.loopRecs.keys().next().value);
+    }
+    const nPass = rec.passes.length;
+    const kind = loopPass !== null && loopPass < nPass ? "pass" : "answer";
+    const d = this.model.d;
+    const embedDense = (b) => { const x = new Float64Array(d); const e = this.model.embedRow.get(b); if (e) for (let i = 0; i < e.cols.length; i++) x[e.cols[i]] = e.vals[i]; return x; };
+    let tokens, x0, promptLen;
+    if (kind === "pass") {
+      const p = rec.passes[loopPass];
+      tokens = p.tape;
+      x0 = tokens.map((b, q) => { const x = embedDense(b); L.carried.forEach((j, c) => { x[j] = p.held[q][c]; }); return x; });
+      promptLen = tokens.length;
+    } else {
+      tokens = [...rec.finalTape, ...rec.answer];
+      x0 = tokens.map(embedDense);
+      promptLen = rec.finalTape.length;
+    }
+    const model = views[kind];
+    const tr = rowsTrace(model, x0, tokens, this.cfg.top_keys);
+    const labels = [kind === "pass" ? "state" : "embed", ...this.labels.slice(1)];
+    const runId = Math.random().toString(16).slice(2, 14).padEnd(12, "0");
+    this.runs.set(runId, { expression, tr, promptLen, model, labels, skip: new Set(model.layers.map((Ly, i) => (Ly.heads.length || Ly.units ? -1 : i)).filter((i) => i >= 0 && this.model.layers[i].heads.length + this.model.layers[i].units > 0)) });
+    while (this.runs.size > MAX_RUNS) this.runs.delete(this.runs.keys().next().value);
+    const answer = String.fromCharCode(...rec.answer);
+    log(`loop view ${runId} ${JSON.stringify(expression)}: ${kind} ${kind === "pass" ? loopPass : ""}, ${tokens.length} positions`);
+    return {
+      model_id: this.cfg.model_id, run_id: runId, expression,
+      chars: tokens.map((t) => String.fromCharCode(t)), prompt_len: promptLen,
+      finished: rec.halted && answer.endsWith("\n"), unknown_chars: "",
+      budget: rec.cap, max_budget: Math.max(rec.cap, 10 * L.max_passes),
+      sample: null, knockout: ko,
+      steps: tokens.map((_, q) => this._step(tr, q)),
+      snapshots: labels,
+      loop: { kind, pass: kind === "pass" ? loopPass : null, halted: rec.halted, answer: answer.replace(/\n+$/, ""),
+              passes: rec.passes.map((p) => ({ tape: String.fromCharCode(...p.tape.slice(1, -1)), routed: p.routed, grew: p.grew,
+                                              action: LocalApi.loopAction(p.acts) })) },
+    };
+  }
+
+  // ------------------------------------------------------------- the recurrent-depth calculator
+  // handformer/viz/runner.py _run_depth: a run as an ordinary run, every position at its last
+  // iteration through the block (or the positions up to q, q at iteration k).
+
+  /** The (knocked-out) model and its adapter and T: a knocked-out dim is not carried either. */
+  _depthModel(ko) {
+    const key = koKey(ko);
+    this.depthModels ||= new Map();
+    if (!this.depthModels.has(key)) {
+      const D = this.cfg.depth;
+      const cols = new Set(ko.dims.map((n) => this.index.get(n)));
+      const keep = (t) => !cols.has(t[0]) && !cols.has(t[1]);
+      const depth = koEmpty(ko) ? D : { ...D, adapter: D.adapter.filter(keep), thought: D.thought.filter(keep) };
+      this.depthModels.set(key, { model: this._modelFor(ko), depth });
+      while (this.depthModels.size > MAX_KNOCKOUT_MODELS + 1) this.depthModels.delete(this.depthModels.keys().next().value);
+    }
+    return this.depthModels.get(key);
+  }
+
+  /** Every position's kind and the character shown for it (handformer/loop/viz.py describe). */
+  _describe(rec, nPrompt) {
+    const D = this.cfg.depth, m = this.model, feat = D.feat;
+    const rows = [];
+    for (let b = 0; b < 256; b++) {
+      const r = new Float64Array(feat.length), e = m.embedRow.get(b);
+      if (e) for (let i = 0; i < e.cols.length; i++) { const k = feat.indexOf(e.cols[i]); if (k >= 0) r[k] = e.vals[i]; }
+      rows.push(r);
+    }
+    const kinds = [], chars = [];
+    rec.tokens.forEach((t, q) => {
+      if (!t.latent) { kinds.push(q < nPrompt ? "prompt" : "answer"); chars.push(String.fromCharCode(t.byte)); return; }
+      const e = rec.inputs[q];
+      const role = ["k_s", "k_w", "k_q", "k_r"].find((r) => e[D.roles[r]] > 0.5);
+      if (role === undefined) {
+        let best = 0, bd = Infinity;
+        for (let b = 0; b < 256; b++) {
+          let s = 0;
+          for (let k = 0; k < feat.length; k++) { const z = e[feat[k]] - rows[b][k]; s += z * z; }
+          if (s < bd) { bd = s; best = b; }
+        }
+        const ch = String.fromCharCode(best);
+        kinds.push(ch === "=" ? "root" : "copy"); chars.push(ch);
+        return;
+      }
+      const [kind, shown] = { k_s: ["start", null], k_w: ["column", "dA"], k_q: ["quotient", "qd"], k_r: ["remainder", "rd"] }[role];
+      kinds.push(kind);
+      chars.push(shown === null ? "▸" : String(Math.round(e[D.shown[shown]])));
+    });
+    return { kinds, chars };
+  }
+
+  runDepth(expression, knockout, maxNew, iteration) {
+    expression = String(expression);
+    const D = this.cfg.depth;
+    // the same input checks as the server (handformer/loop/viz.py prompt)
+    if (!expression) throw new Error(this.cfg.pattern_error);
+    if (expression.length > D.max_input) throw new Error(`input longer than ${D.max_input} characters`);
+    const allowed = new Set(this.cfg.input_chars);
+    const bad = [...new Set([...expression].filter((ch) => !allowed.has(ch)))].sort();
+    if (bad.length) throw new Error(`unsupported characters: '${bad.join("")}' ${this.cfg.chars_hint}`);
+    const prompt = [...new TextEncoder().encode(`\n${expression}=`)];
+    const ko = normKnockout(knockout);
+    const { model, depth } = this._depthModel(ko);
+    const key = `${expression}|${koKey(ko)}`;
+    this.depthRecs ||= new Map();
+    let rec = this.depthRecs.get(key);
+    if (!rec || (maxNew && rec.cap < maxNew)) {
+      const cap = maxNew ? Math.floor(maxNew) : D.max_tokens;
+      rec = { ...runDepth(model, depth, prompt, cap, D.max_iters), cap };
+      Object.assign(rec, this._describe(rec, prompt.length));
+      this.depthRecs.set(key, rec);
+      while (this.depthRecs.size > MAX_RUNS * 2) this.depthRecs.delete(this.depthRecs.keys().next().value);
+    }
+    const n = rec.tokens.length, iters = rec.tokens.map((t) => t.iters);
+    let rows;
+    if (iteration !== null) {
+      const [q, k] = iteration.map(Number);
+      if (!(q >= 0 && q < n)) throw new Error(`position ${q} out of range 0..${n - 1}`);
+      if (!(k >= 0 && k < iters[q])) throw new Error(`position ${q} iterated ${iters[q]} times: no iteration ${k + 1}`);
+      rows = rec.lastIn.slice(0, q + 1);
+      if (k < iters[q] - 1) rows[q] = rec.earlier.get(`${q},${k}`);
+    } else rows = rec.lastIn;
+    const chars = rec.chars.slice(0, rows.length);
+    const tr = rowsTrace(model, rows, chars.map((c) => c.charCodeAt(0)), this.cfg.top_keys);
+    const labels = ["input", ...this.labels.slice(1)];
+    const runId = Math.random().toString(16).slice(2, 14).padEnd(12, "0");
+    this.runs.set(runId, { expression, tr, promptLen: prompt.length, model, labels });
+    while (this.runs.size > MAX_RUNS) this.runs.delete(this.runs.keys().next().value);
+    const answer = String.fromCharCode(...rec.answer);
+    log(`depth view ${runId} ${JSON.stringify(expression)}: ${iteration ? `position ${iteration[0]} iteration ${iteration[1]}` : "last iterations"}, ${rows.length} positions`);
+    return {
+      model_id: this.cfg.model_id, run_id: runId, expression,
+      chars, prompt_len: prompt.length,
+      finished: rec.finished && answer.endsWith("\n"), unknown_chars: "",
+      budget: rec.cap, max_budget: Math.max(rec.cap, 10 * D.max_tokens),
+      sample: null, knockout: ko,
+      steps: rows.map((_, q) => this._step(tr, q)),
+      snapshots: labels,
+      depth: { kinds: rec.kinds, iters, chars: rec.chars, answer: answer.replace(/\n+$/, ""), finished: rec.finished,
+               view: iteration ? [Number(iteration[0]), Number(iteration[1])] : null },
+    };
+  }
+
   _get(runId) {
     const r = this.runs.get(runId);
     if (!r) throw new Error(`unknown or evicted run ${runId}`);
@@ -199,21 +400,21 @@ export class LocalApi {
   }
 
   position(runId, q) {
-    const { tr } = this._get(runId);
+    const run = this._get(runId), { tr } = run, model = run.model;
     if (!(q >= 0 && q < tr.tokens.length)) throw new Error(`position ${q} out of range 0..${tr.tokens.length - 1}`);
-    const d = this.model.d, S = this.labels.length;
+    const d = model.d, S = run.labels.length;
     const values = Array.from({ length: d }, () => new Array(S));
     for (let s = 0; s < S; s++) {
       const x = tr.residualAt(q, s);
       for (let j = 0; j < d; j++) values[j][s] = round(x[j], 9);
     }
     const heads = [];
-    this.model.layers.forEach((L, li) => L.heads.forEach((_, hi) => {
-      const gh = this.layerStart[li] + hi;
+    let gh = 0; // the global head index in this run's model (a looped view has empty layers)
+    model.layers.forEach((L, li) => L.heads.forEach((_, hi) => {
       const wrote = tr.headWrote(li, hi, q);
       const w = {};
-      for (let j = 0; j < d; j++) if (Math.abs(wrote[j]) > 1e-9) w[this.model.names[j]] = wrote[j];
-      heads.push({ layer: li, head: hi, top: tr.top[q][gh].map(([k, wt]) => [k, wt]), wrote: w });
+      for (let j = 0; j < d; j++) if (Math.abs(wrote[j]) > 1e-9) w[model.names[j]] = wrote[j];
+      heads.push({ layer: li, head: hi, top: tr.top[q][gh++].map(([k, wt]) => [k, wt]), wrote: w });
     }));
     const units = [];
     tr.pre[q].forEach((p, li) => {
@@ -222,7 +423,7 @@ export class LocalApi {
     });
     const lg = tr.logits[q];
     const order = [...lg.keys()].sort((a, b) => lg[b] - lg[a] || a - b).slice(0, this.cfg.top_logits);
-    const dla = order.slice(0, TOP_DLA).map((t) => this._dla(tr, q, t, values, heads, units, lg[t]));
+    const dla = order.slice(0, TOP_DLA).map((t) => this._dla(run, q, t, values, heads, units, lg[t]));
     log(`position ${runId} q=${q}: ${heads.length} heads, ${units.length} active units`);
     return {
       model_id: this.cfg.model_id, q, values, heads, units,
@@ -231,22 +432,23 @@ export class LocalApi {
     };
   }
 
-  /** The unembedding column of byte b (one weight per dim), dense. */
-  _ucol(b) {
-    this._ucols ||= new Map();
-    if (!this._ucols.has(b)) {
-      const col = new Float64Array(this.model.d);
-      for (const { r, cols, vals } of this.model.unembed) {
+  /** The unembedding column of byte b (one weight per dim) of ``model``, dense. */
+  _ucol(model, b) {
+    model._ucols ||= new Map();
+    if (!model._ucols.has(b)) {
+      const col = new Float64Array(model.d);
+      for (const { r, cols, vals } of model.unembed) {
         for (let i = 0; i < cols.length; i++) if (cols[i] === b) col[r] = vals[i];
       }
-      this._ucols.set(b, col);
+      model._ucols.set(b, col);
     }
-    return this._ucols.get(b);
+    return model._ucols.get(b);
   }
 
   /** Direct logit attribution for byte t at q (same definition as handformer/viz/runner.py _dla). */
-  _dla(tr, q, t, values, heads, units, logit) {
-    const col = this._ucol(t), d = this.model.d, names = this.model.names, S = this.labels.length;
+  _dla(run, q, t, values, heads, units, logit) {
+    const { tr, model } = run;
+    const col = this._ucol(model, t), d = model.d, names = model.names, S = run.labels.length;
     const byDim = [];
     for (let j = 0; j < d; j++) {
       const c = values[j][S - 1] * col[j];
@@ -255,14 +457,14 @@ export class LocalApi {
     let e = 0;
     for (let j = 0; j < d; j++) e += values[j][0] * col[j];
     const parts = [["embed", -1, -1, e]];
-    this.model.layers.forEach((L, li) => L.heads.forEach((_, hi) => {
+    model.layers.forEach((L, li) => L.heads.forEach((_, hi) => {
       const w = tr.headWrote(li, hi, q);
       let c = 0;
       for (let j = 0; j < d; j++) c += w[j] * col[j];
       parts.push(["head", li, hi, c]);
     }));
     for (const u of units) {
-      const Ly = this.model.layers[u.layer];
+      const Ly = model.layers[u.layer];
       const wout = Ly.woutRow || (Ly.woutRow = new Map(Ly.wout.map((w) => [w.r, w])));
       const w = wout.get(u.unit);
       let c = 0;
@@ -280,30 +482,34 @@ export class LocalApi {
   // ------------------------------------------------------------- heatmaps
 
   attentionMap(runId, layer, head) {
-    const { tr } = this._get(runId);
+    const run = this._get(runId), { tr } = run;
     const L = this.model.layers[layer];
     if (!L || !(head >= 0 && head < L.heads.length)) throw new Error(`no head ${head} in layer ${layer}`);
+    if (run.skip?.has(layer)) {
+      throw new Error(`layer ${layer + 1} does not run in this view of the looped model ` +
+        "(the coda runs once, for the answer; answer bytes skip the block)");
+    }
     const n = tr.tokens.length, data = new Float32Array(n * n);
-    for (let q = 0; q < n; q++) data.set(tr.attentionRow(layer, head, q), q * n);
+    for (let q = 0; q < n; q++) data.set(tr.attentionRow(layer, head, q), q * n); // a causal row is shorter: zeros after q
     const name = this.info.layers[layer].heads[head].name;
     return { meta: { layer, head, name, shape: [n, n], dtype: "float32" }, data };
   }
 
   residualMap(runId, snapshot) {
-    const { tr } = this._get(runId);
-    if (!(snapshot >= 0 && snapshot < this.labels.length)) throw new Error(`snapshot ${snapshot} out of range`);
+    const { tr, labels } = this._get(runId);
+    if (!(snapshot >= 0 && snapshot < labels.length)) throw new Error(`snapshot ${snapshot} out of range`);
     const n = tr.tokens.length, d = this.model.d;
     const mat = new Float64Array(d * n);
     for (let q = 0; q < n; q++) {
       const x = tr.residualAt(q, snapshot);
       for (let j = 0; j < d; j++) mat[j * n + q] = x[j];
     }
-    return scaled(mat, d, n, true, { snapshot, label: this.labels[snapshot] });
+    return scaled(mat, d, n, true, { snapshot, label: labels[snapshot] });
   }
 
   mlpMap(runId, layer) {
-    const { tr } = this._get(runId);
-    const L = this.model.layers[layer];
+    const { tr, model } = this._get(runId);
+    const L = model.layers[layer];
     if (!L || !L.units) throw new Error(`layer ${layer} has no MLP units`);
     const n = tr.tokens.length, u = L.units;
     const mat = new Float64Array(u * n);

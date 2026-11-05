@@ -117,6 +117,10 @@ class HeadSpec:
     # When this head's read is exact (tests/test_claims.py): a 0/1 form over dims. None means
     # the default scope: wherever its calculator is on, or (shared heads) every output position.
     exact_when: Form | None = field(default=None, compare=False)
+    # Bidirectional: the head sees every position, later ones too (no causal mask). Only the
+    # looped model's recurrent block has such heads (handformer/rewrite, REWRITE.md); a plain
+    # decoder refuses them.
+    full: bool = False
 
     def __post_init__(self) -> None:
         if not self.where:
@@ -167,6 +171,7 @@ class Head:
     w_k: np.ndarray  # (d_model, d_head)
     w_v: np.ndarray  # (d_model, d_value): one column per source dim the head moves
     w_o: np.ndarray  # (d_value, d_model): where each moved value is written
+    full: bool = False  # no causal mask (HeadSpec.full)
 
     @property
     def w_ov(self) -> np.ndarray:
@@ -236,13 +241,34 @@ class ModelBuilder:
         return v
 
     def build(self) -> Transformer:
+        embed, unembed = self._embed_unembed()
+        model = Transformer(self.layout, embed, self._layers(self.layers), unembed)
+        log.info(
+            "built model: d_model=%d layers=%d heads=%d mlp_units=%d nonzero_params=%d",
+            len(self.layout),
+            len(model.layers),
+            sum(len(l.heads) for l in model.layers),
+            sum(l.w_in.shape[1] for l in model.layers),
+            model.nonzero_params(),
+        )
+        return model
+
+    def _embed_unembed(self) -> tuple[np.ndarray, np.ndarray]:
         d = len(self.layout)
         embed = np.zeros((VOCAB, d))
         for byte, form in self.token_embed.items():
             embed[byte] = self._vec(form)
+        unembed = np.zeros((d, VOCAB))
+        for dim, row in self.unembed.items():
+            for byte, coef in row.items():
+                unembed[self.layout[dim], byte] = coef
+        return embed, unembed
 
+    def _layers(self, specs: list[LayerSpec]) -> list[Layer]:
+        """Dense layers from specs (shared by ``build`` and the looped model's blocks)."""
+        d = len(self.layout)
         layers = []
-        for spec in self.layers:
+        for spec in specs:
             heads = []
             for h in spec.heads:
                 if len(h.query) != len(h.key):
@@ -257,29 +283,14 @@ class ModelBuilder:
                 for c, src in enumerate(srcs):
                     w_v[self.layout[src], c] = 1.0
                     w_o[c] = self._vec(h.value[src])
-                heads.append(Head(h.name, w_q, w_k, w_v, w_o))
+                heads.append(Head(h.name, w_q, w_k, w_v, w_o, h.full))
             w_in = np.zeros((d, len(spec.units)))
             w_out = np.zeros((len(spec.units), d))
             for i, u in enumerate(spec.units):
                 w_in[:, i] = self._vec(u.read)
                 w_out[i] = self._vec(u.write)
             layers.append(Layer(spec.name, heads, w_in, w_out))
-
-        unembed = np.zeros((d, VOCAB))
-        for dim, row in self.unembed.items():
-            for byte, coef in row.items():
-                unembed[self.layout[dim], byte] = coef
-
-        model = Transformer(self.layout, embed, layers, unembed)
-        log.info(
-            "built model: d_model=%d layers=%d heads=%d mlp_units=%d nonzero_params=%d",
-            d,
-            len(layers),
-            sum(len(l.heads) for l in layers),
-            sum(l.w_in.shape[1] for l in layers),
-            model.nonzero_params(),
-        )
-        return model
+        return layers
 
 
 class Tracer:
@@ -304,6 +315,9 @@ class Transformer:
         self.embed = embed
         self.layers = layers
         self.unembed = unembed
+        full = [f"{l.name}/{h.name}" for l in layers for h in l.heads if h.full]
+        if full:  # a decoder's cache and its causal reading both assume masked heads
+            raise ValueError(f"a causal decoder cannot hold bidirectional heads: {', '.join(full)}")
 
     def nonzero_params(self) -> int:
         mats = [self.embed, self.unembed]
@@ -322,9 +336,11 @@ class Transformer:
 
     @staticmethod
     def head_attention(x: np.ndarray, h: Head, causal: np.ndarray) -> np.ndarray:
-        """Causal softmax attention pattern (n, n) of head ``h`` on layer input ``x``."""
+        """Softmax attention pattern (n, n) of head ``h`` on layer input ``x``: causal, unless the
+        head is bidirectional (``h.full``, the looped model's recurrent block only)."""
         scores = (x @ h.w_q) @ (x @ h.w_k).T
-        scores[causal] = -np.inf
+        if not h.full:
+            scores[causal] = -np.inf
         scores -= scores.max(axis=1, keepdims=True)
         attn = np.exp(scores)
         attn /= attn.sum(axis=1, keepdims=True)
@@ -445,10 +461,16 @@ class _DecodeCache:
 
     def step(self, token: int) -> np.ndarray:
         """Append one token; return its next-byte logits."""
+        return self.step_vec(self.m.embed[token])
+
+    def step_vec(self, x: np.ndarray) -> np.ndarray:
+        """Append one position whose input is the residual ``x`` (positional features are added
+        here); return its next-byte logits. ``step`` is this with the token's embedding row; the
+        looped model's coda starts from the tape's final state instead (handformer/rewrite)."""
         if self.n == self.cap:
             self._grow()
         m, q = self.m, self.n
-        x = m.embed[token] + m.positional(q + 1)[q]
+        x = x + m.positional(q + 1)[q]
         for li, layer in enumerate(m.layers):
             delta = np.zeros_like(x)
             for hi, h in enumerate(layer.heads):

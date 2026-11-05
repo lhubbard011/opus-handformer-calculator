@@ -35,6 +35,8 @@ const MARK_LABELS_BY = {
   parse: { E: "end", M: "lex end", Lsep: "rec", la_pos: "next", mpos: "pop" },
   lm: {},
   lmt: {},
+  rewrite: { p: "(", c: ")", o: "o", a_lo: "a_lo", b_hi: "b_hi", lo_B: "lo" },
+  loop: { p: "(", c: ")", o: "o", a_lo: "a_lo", b_hi: "b_hi", ptrN: "src", cp_t: "copy", dg_addr: "digit" },
 };
 
 const state = {
@@ -53,6 +55,8 @@ const state = {
   runSeq: 0, // latest run request; an older response that arrives late is dropped
   running: false,
   baseline: new Map(), // expression -> answer with nothing knocked out
+  loopPass: null, // the looped calculator: the pass on show (null: the answer)
+  depthIter: null, // the recurrent-depth calculator: [position, iteration] on show (null: every position's last)
 };
 
 // ------------------------------------------------------------------ API
@@ -111,7 +115,7 @@ function focusSet() {
   if (s.phase === "op" && s.op) set.add(s.op);
   return set;
 }
-const focused = (circuit) => !$("focus").checked || ["c", "parse", "lm", "lmt"].includes(state.model) || focusSet().has(circuit);
+const focused = (circuit) => !$("focus").checked || ["c", "parse", "lm", "lmt", "rewrite", "loop"].includes(state.model) || focusSet().has(circuit);
 
 // One tooltip for every element carrying data-tip (list rows, tags, bytes, controls).
 function wireTips() {
@@ -376,7 +380,92 @@ function summarizeTrained(run, q, raw) {
   return { q, phase, op: null, pred: p, explain, marks: {} };
 }
 
-const summarizeStep = (run, q, raw) => (state.model === "life" ? summarizeLife(run, q, raw)
+// The looped calculator (handformer/rewrite): a pass view (every cell's next byte is the byte it
+// holds after this pass) or the answer view (the coda writes the answer after the root '=').
+const isPass = (run) => run?.loop?.kind === "pass";
+const LOOP_ACTION = {
+  space: "removes the first space that has something after it (every cell after it takes its right neighbour's byte)",
+  brackets: "drops the brackets around a single number",
+  room: "asks for room: the rewrite is longer than its cells, so the runtime inserts a blank before the root; every cell keeps its byte",
+  "^ rewrite": "rewrites the power a^b as text, one binary-exponentiation step",
+  "/ shift": "long division: stores the quotient digit and brings the next digit down into the remainder (carried, not written); every cell keeps its byte",
+  "/ subtract": "long division: the remainder is at least b, so it subtracts b once (carried, not written); every cell keeps its byte",
+  halt: "finds nothing left to do: the expression is a number. The router sends no cell round again and the coda writes it",
+};
+function summarizeLoop(run, q, raw) {
+  const v = raw.v, r = Math.round, last = run.chars.length - 1;
+  const root = run.steps[last]?.v || v; // the root's own values: the parse every cell acts on
+  const marks = {};
+  for (const d of ["p", "c", "o", "a_lo", "b_hi"]) if (root[d] !== undefined && root.act_red > 0.5) marks[d] = r(root[d]);
+  if (!isPass(run)) {
+    const tape = q < run.prompt_len - 1;
+    return { q, phase: tape ? "tape" : "answer", op: null, pred: raw.pred, marks: {},
+      explain: tape ? `The tape after the last pass: ${JSON.stringify(run.chars[q])}. The coda reads it; nothing here is predicted.`
+        : `The coda writes answer byte ${q - run.prompt_len + 2}: ${JSON.stringify(raw.pred)} (the tape's byte ${q - run.prompt_len + 2}` +
+          ", until the expression ends). The answer is the first thing the model writes; answer bytes skip the block (router depth 0)." };
+  }
+  const act = run.loop.passes[run.loop.pass]?.action || "";
+  if (v.lo_B !== undefined) marks.lo_B = r(v.lo_B);
+  const cur = JSON.stringify(run.chars[q]), nxt = JSON.stringify(raw.pred);
+  let phase, explain;
+  if (q === 0 || q === last) {
+    phase = "fixed";
+    explain = q === 0 ? "The start byte: it never changes." : `The root (the prompt's '='). It sees the whole tape, so it parses it and decides this pass: it ${LOOP_ACTION[act] || "reduces the redex (" + act + ")"}.`;
+  } else if (v.go < 0.5) {
+    phase = "halt"; explain = `This pass halts: the root ${LOOP_ACTION.halt}. Holds ${cur}.`;
+  } else if (v.gelo < 0.5) {
+    phase = "keep"; explain = `Before the bytes this pass replaces: keeps ${cur}.` + (LOOP_ACTION[act] && ["room", "/ shift", "/ subtract"].includes(act) ? ` (${act}: ${LOOP_ACTION[act]})` : act.startsWith("x digit") ? " (multiplying: this pass adds |a| × one digit of b into the carried columns K; no byte changes)" : "");
+  } else if (v.ltend > 0.5) {
+    phase = "result";
+    explain = (v.red_B > 0.5 ? `Writes the result: ${nxt}` : v.br_B > 0.5 ? `Copies the bracketed number's byte ${nxt}` : v.pw_B > 0.5 ? `Writes the power's rewrite: ${nxt}` : `Writes ${nxt}`) +
+      ` (was ${cur}).` + (v.in_col > 0.5 && v.red_B > 0.5 ? ` It is a result column: digits ${fmt(v.aj)} and ${fmt(v.bj)}, carry/borrow in ${fmt(v.cy || v.bw1 || 0)}.` : "");
+  } else if (v.blank > 0.5) {
+    phase = "blank"; explain = `Past the end of the shorter tape: becomes a blank (was ${cur}).`;
+  } else {
+    phase = "shift"; explain = `After the result: takes the byte ${fmt(v.g_B)} cells to its right, ${nxt} (was ${cur}).`;
+  }
+  return { q, phase, op: null, pred: raw.pred, explain, marks };
+}
+
+// The recurrent-depth calculator (handformer/loop): an ordinary decoder run where each position
+// iterated the block as often as its router asked, and most positions are thoughts (latent).
+const DEPTH_KIND = {
+  prompt: "Your text: a prompt byte.",
+  start: "A thought: the step's start. It holds the root's plan (the C_ dims, carried by T into every position of the step).",
+  column: "A thought: a column of the working (its digits and carries are registers in its input).",
+  quotient: "A thought: a quotient digit of the long division.",
+  remainder: "A thought: a remainder digit of the long division.",
+  copy: "A thought: a cell of the next copy of the expression (a byte's embedding plus the walk's registers).",
+  root: "A root: the end of a copy. It sees the whole copy, parses it and plans the next step (or halts).",
+  answer: "A written byte of the answer.",
+};
+function summarizeDepth(run, q, raw) {
+  const D = run.depth, v = raw.v, r = Math.round, kind = D.kinds[q], next = D.kinds[q + 1];
+  const it = D.view && D.view[0] === q ? D.view[1] : D.iters[q] - 1;
+  const marks = {};
+  if (kind === "root" || (kind === "prompt" && q === run.prompt_len - 1)) {
+    if (v.act_red > 0.5) for (const d of ["p", "c", "o", "a_lo", "b_hi"]) marks[d] = r(v[d]);
+  } else if (v.wt > 0.5 && v.to_mid < 0.5 && v.to_root < 0.5) marks.ptrN = r(v.ptrN);
+  if (v.ans > 0.5) marks.cp_t = r(v.cp_t);
+  let does;
+  if (v.ans > 0.5) does = `writes the answer's next byte, ${JSON.stringify(raw.pred)} (copied from the final copy)`;
+  else if (kind === "root" || (kind === "prompt" && q === run.prompt_len - 1)) {
+    does = v.act_sp > 0.5 ? "plans a spaces step (copy without them)" : v.act_br > 0.5 ? "plans a brackets step"
+      : `plans a reduce step (${v.opp > 0.5 ? "+" : v.opm > 0.5 ? "-" : v.opmul > 0.5 ? "×" : v.opdiv > 0.5 ? "÷" : "^"})`;
+    does += " and starts it";
+  } else if (next === "copy" || next === "root") does = `thinks the next copy cell: ${JSON.stringify(D.chars[q + 1])}`;
+  else if (next === "column") does = `computes column ${r(v.nc)}: digit ${D.chars[q + 1]}` + (v.PWm > 0.5 ? ", one iteration per term of the product" : "");
+  else if (next === "quotient") does = `finds the quotient digit ${D.chars[q + 1]}, one iteration per column of the remainder (comparing it with 1..9 × B)`;
+  else if (next === "remainder") does = `computes a remainder digit: ${D.chars[q + 1]}`;
+  else if (next === "start") does = "starts the step";
+  else does = "predicts the next byte (given: it is part of the prompt)";
+  const depth = D.iters[q] > 1 ? ` It iterated ${D.iters[q]} times (the router); shown: iteration ${it + 1}.` : "";
+  return { q, phase: kind, op: null, pred: raw.pred, marks, explain: `${DEPTH_KIND[kind]} Next it ${does}.${depth}` };
+}
+
+const summarizeStep = (run, q, raw) => (state.model === "rewrite" ? summarizeLoop(run, q, raw)
+  : run.depth ? summarizeDepth(run, q, raw)
+  : state.model === "life" ? summarizeLife(run, q, raw)
   : state.model === "c" ? summarizeC(run, q, raw) : state.model === "parse" ? summarizeParse(run, q, raw)
   : state.model === "lm" ? summarizeLM(run, q, raw)
   : state.model === "lmt" ? summarizeTrained(run, q, raw)
@@ -394,6 +483,10 @@ const GRAPH_CIRCUITS = {
           ["record", "record fields"], ["landmarks", "landmarks"]],
   lm: [["heads", "the conditional heads"], ["bigram", "the bigram path"]],
   lmt: [["learned", "the learned dims"]],
+  rewrite: [["all", "all circuits together"], ["block", "the recurrent block"], ["power", "power rewrite"],
+         ["division", "long division"], ["coda", "the coda"]],
+  loop: [["all", "all circuits together"], ["root", "the root's parse"], ["plan", "the plan"], ["walk", "the copy walk"],
+         ["columns", "the working's columns"], ["division", "long division"], ["power", "power rewrite"]],
 };
 
 /** Show the parts of the page that belong to the current model (legend, guide, graph menu, input hint). */
@@ -471,6 +564,8 @@ async function loadInfo() {
 
 /** The final line, made safe to show: unprintable bytes as '·', capped, and flagged if the model never stopped. */
 function answerOf(run) {
+  if (run.loop) return run.loop.halted ? run.loop.answer : `${run.loop.answer || "—"} (did not halt)`;
+  if (run.depth) return run.finished ? run.depth.answer : `${run.depth.answer || "—"} (did not finish)`;
   const text = run.chars.join("");
   // Life: the last generation's grid; the calculator: the line after the last step
   if (state.model === "c") {
@@ -597,7 +692,7 @@ function koButton(kind, item) {
   return b;
 }
 
-async function runExpression(expression, keepStep = null, { maxNew = null } = {}) {
+async function runExpression(expression, keepStep = null, { maxNew = null, pass, iter } = {}) {
   stopPlay();
   setStatus("running…");
   const seq = ++state.runSeq;
@@ -605,8 +700,13 @@ async function runExpression(expression, keepStep = null, { maxNew = null } = {}
   try {
     const ko = koCount() ? JSON.parse(JSON.stringify(state.ko)) : null; // the set this request was made with
     const sample = decodeSample(); // language models: the seeded draw (null: greedy)
+    // looped calculator: the pass asked for, else the one on show while the expression is the same
+    const loopPass = pass !== undefined ? pass : state.run?.loop && state.run.expression === expression ? state.loopPass : null;
+    // recurrent-depth calculator: the iteration asked for, else the one on show for the same expression
+    const depthIter = iter !== undefined ? iter : state.run?.depth && state.run.expression === expression ? state.depthIter : null;
     const body = { expression, ...(ko ? { knockout: ko } : {}), ...(maxNew ? { max_new: maxNew } : {}),
-      ...(sample ? { sample } : {}) };
+      ...(sample ? { sample } : {}), ...(loopPass !== null && state.model === "rewrite" ? { pass: loopPass } : {}),
+      ...(depthIter && state.model === "loop" ? { iter: depthIter } : {}) };
     const run = await api("/api/run", body);
     if (ko && !state.baseline.has(run.expression)) {
       const normal = await api("/api/run", { expression, ...(sample ? { sample } : {}) }); // the comparison run, same draws
@@ -624,6 +724,8 @@ async function runExpression(expression, keepStep = null, { maxNew = null } = {}
       await loadInfo();
     }
     state.run = run;
+    state.loopPass = run.loop?.kind === "pass" ? run.loop.pass : null;
+    state.depthIter = run.depth?.view || null;
     state.pos.clear();
     state.head = null;
     state.openDim = null;
@@ -632,11 +734,15 @@ async function runExpression(expression, keepStep = null, { maxNew = null } = {}
     snap.replaceChildren(...run.snapshots.map((l, i) => new Option(l, i)));
     snap.value = run.snapshots.length - 1;
     $("scrubber").min = firstStep(run);
-    $("scrubber").max = run.chars.length - 2;
+    $("scrubber").max = lastStep(run);
     const answer = answerOf(run);
     const written = run.chars.length - run.prompt_len;
     const cutOff = !run.finished && written >= run.budget; // it was still writing when its byte budget ran out
-    setStatus(`${written} bytes written by the model · answer ${answer}` +
+    const thoughts = run.depth ? run.depth.kinds.filter((k) => !["prompt", "answer"].includes(k)).length : 0;
+    setStatus((run.loop ? `${run.loop.passes.length} passes, then ${answer.length + 1} bytes written: answer ${answer}, the first byte the model writes`
+      : run.depth ? `${thoughts} latent positions (${run.depth.iters.reduce((a, b) => a + b, 0)} block iterations in all), then ` +
+        `${answer.length + 1} bytes written: answer ${answer}, the first byte the model writes`
+      : `${written} bytes written by the model · answer ${answer}`) +
       (koCount() ? ` · ${koCount()} part(s) knocked out` : "") +
       (run.unknown_chars ? ` · fed bytes it has no input features for (${JSON.stringify(run.unknown_chars)}): ` +
         "they reach the model as just the constant 'one', so this is what the weights do with them" : "") +
@@ -653,7 +759,9 @@ async function runExpression(expression, keepStep = null, { maxNew = null } = {}
     }
     log("run", run.run_id, run.expression, run.chars.length, "bytes");
     renderKnockouts();
-    const last = run.chars.length - 2;
+    renderLoopBar();
+    if (run.depth) renderDepthBar();
+    const last = lastStep(run);
     await goto(keepStep === null ? firstStep(run) : Math.max(firstStep(run), Math.min(keepStep, last)));
   } catch (e) {
     if (seq !== state.runSeq) return; // a newer request owns the page
@@ -686,7 +794,10 @@ async function position(q) {
 // with "from first byte" on, position 0, to watch the prompt's own bytes fill the stream. The
 // model computes every position the same way; the prompt's are read, not predicted.
 const fromStart = () => $("from-start").checked;
-const firstStep = (run) => (fromStart() ? 0 : run.prompt_len - 1);
+const firstStep = (run) => (isPass(run) || fromStart() ? 0 : run.prompt_len - 1);
+// The last step: the byte before the final one (it writes it); in a pass every cell, the root too.
+// (a recurrent-depth iteration view ends at the position shown: it can be stood on too)
+const lastStep = (run) => run.chars.length - (isPass(run) || run.depth?.view ? 1 : 2);
 function setFromStart(on) {
   $("from-start").checked = on;
   try { localStorage.setItem("handviz.fromstart", on ? "1" : "0"); } catch { /* private mode */ }
@@ -697,7 +808,7 @@ function setFromStart(on) {
 async function goto(q) {
   if (!state.run) return;
   const run = state.run;
-  q = clamp(q, firstStep(run), run.chars.length - 2);
+  q = clamp(q, firstStep(run), lastStep(run));
   state.q = q;
   const gen = ++state.gen;
   const restoreView = holdView(); // stepping must not shift the panel you are watching
@@ -745,16 +856,22 @@ function renderStrip() {
   }
   const strip = $("tokens");
   strip.replaceChildren();
+  const pass = isPass(run);
   run.chars.forEach((c, i) => {
     const el = document.createElement("span");
     const producer = i >= run.prompt_len ? run.steps[i - 1] : run.steps[0];
-    el.className = "chip " + (i >= run.prompt_len ? phaseClass(producer) : "ph-prompt");
+    el.className = "chip " + (pass ? phaseClass(run.steps[i]) : run.loop ? (i >= run.prompt_len ? "ph-answer" : "ph-tape")
+      : run.depth ? `ph-${run.depth.kinds[i]}` : i >= run.prompt_len ? phaseClass(producer) : "ph-prompt");
+    if (run.depth && run.depth.iters[i] > 1) el.classList.add("deep");
     if (i === q) el.classList.add("query");
-    if (i === q + 1) el.classList.add("output");
-    if (i > q + 1) el.classList.add("future");
+    if (i === q + 1 && !pass) el.classList.add("output");
+    if (i > q + 1 && !pass) el.classList.add("future");
     if (srcs.has(i)) el.classList.add("src");
     el.textContent = showChar(c);
-    el.dataset.tip = `position ${i}: "${showChar(c)}"\n` + (i >= run.prompt_len
+    el.dataset.tip = run.depth ? `position ${i}: "${showChar(c)}", ${run.depth.kinds[i]}` +
+      (run.depth.iters[i] > 1 ? `, ${run.depth.iters[i]} iterations of the block` : "") + "\n(click to step to this position)"
+      : pass ? `cell ${i}: "${showChar(c)}", holds "${showChar(run.steps[i].pred)}" after this pass (${run.steps[i].phase})\n(click to step to this cell)`
+      : `position ${i}: "${showChar(c)}"\n` + (i >= run.prompt_len
       ? `Written by the model at step ${i - 1} (${producer.phase}${producer.op ? ", " + producer.op + " calculator" : ""}).`
       : "Part of the prompt you typed.") + "\n(click to step to this position)";
     if (marks[i]) {  // the pointers drawn above this byte, spelled out (orange, like the tags)
@@ -777,7 +894,7 @@ function renderStrip() {
     idx.textContent = i % 5 === 0 ? i : "";
     el.appendChild(idx);
     el.addEventListener("click", () => {
-      if (i < run.prompt_len - 1 && !fromStart()) setFromStart(true); // a prompt byte: show the prompt
+      if (!pass && i < run.prompt_len - 1 && !fromStart()) setFromStart(true); // a prompt byte: show the prompt
       goto(i);
     });
     strip.appendChild(el);
@@ -791,6 +908,79 @@ function renderStrip() {
     if (top < strip.scrollTop) strip.scrollTop = top - 18;
     else if (bottom > strip.scrollTop + strip.clientHeight) strip.scrollTop = bottom - strip.clientHeight + 18;
   }
+}
+
+// ------------------------------------------------------------------ looped calculator: its passes
+// One button per pass of the recurrent block (what the root decided), then the answer (the coda).
+// The tape a pass read is in each button's tooltip; clicking shows that pass through the block.
+const PASS_BAR_MAX = 400; // a long division has many passes: the bar shows the first and last ones
+function renderLoopBar() {
+  const bar = $("loop-bar"), run = state.run;
+  bar.hidden = !run?.loop;
+  if (!run?.loop) return;
+  const passes = run.loop.passes, cur = run.loop.kind === "pass" ? run.loop.pass : null;
+  const btn = (label, tip, on, go) => {
+    const b = document.createElement("button");
+    b.className = "pass" + (on ? " on" : "");
+    b.textContent = label;
+    b.dataset.tip = tip;
+    b.addEventListener("click", () => keepView(() => runExpression(run.expression, 0, { pass: go })));
+    return b;
+  };
+  const items = [];
+  const show = passes.length <= PASS_BAR_MAX ? passes.map((_, i) => i)
+    : [...passes.keys()].filter((i) => i < PASS_BAR_MAX / 2 || i >= passes.length - PASS_BAR_MAX / 2 || i === cur);
+  let prev = -1;
+  for (const i of show) {
+    if (i !== prev + 1) items.push(Object.assign(document.createElement("span"), { className: "muted", textContent: ` … ${i - prev - 1} more … ` }));
+    const p = passes[i];
+    items.push(btn(`${i + 1} ${p.action}`, `pass ${i + 1}: ${p.action}${p.grew ? " (a blank is inserted after it)" : ""}\ntape it read: ${JSON.stringify(p.tape)}\n` +
+      `${p.routed} positions routed in for another pass\n(click to see this pass through the block's layers)`, i === cur, i));
+    prev = i;
+  }
+  items.push(btn(`answer ${run.loop.answer}`, "The coda: after the last pass it reads the final tape and writes the answer, the first bytes after the prompt's '='.\n(click to see the answer being written)", cur === null, null));
+  const label = Object.assign(document.createElement("span"), { className: "label", textContent: "Passes" });
+  label.dataset.tip = "The recurrent block runs over the whole prompt again and again; its router decides each time whether to go round once more. Nothing is written until it stops.";
+  bar.replaceChildren(label, ...items);
+  const on = bar.querySelector(".pass.on"); // keep it in view by scrolling the bar only, never the window
+  if (on) {
+    const left = on.offsetLeft - bar.offsetLeft, right = left + on.offsetWidth;
+    if (left < bar.scrollLeft) bar.scrollLeft = left - 12;
+    else if (right > bar.scrollLeft + bar.clientWidth) bar.scrollLeft = right - bar.clientWidth + 12;
+  }
+}
+
+// ------------------------------------------------------------------ recurrent-depth calculator: iterations
+// One button per position the router sent round the block more than once; choosing one shows that
+// position at each of its iterations (the positions before it at their last).
+const DEPTH_BAR_MAX = 300;
+function renderDepthBar() {
+  const bar = $("loop-bar"), run = state.run, D = run.depth;
+  bar.hidden = false;
+  const btn = (label, tip, on, iter) => {
+    const b = document.createElement("button");
+    b.className = "pass" + (on ? " on" : "");
+    b.textContent = label;
+    b.dataset.tip = tip;
+    b.addEventListener("click", () => keepView(() => runExpression(run.expression, iter ? iter[0] : state.q, { iter })));
+    return b;
+  };
+  const view = D.view;
+  const items = [btn("all: last iterations", "Every position at its last iteration: exactly what later positions read (the KV cache).", !view, null)];
+  const deep = D.iters.map((n, q) => [q, n]).filter(([, n]) => n > 1);
+  for (const [q, n] of deep.slice(0, DEPTH_BAR_MAX)) {
+    if (view && view[0] === q) {
+      for (let k = 0; k < Math.min(n, DEPTH_BAR_MAX); k++) {
+        items.push(btn(`${q}·${k + 1}`, `position ${q}, iteration ${k + 1} of ${n}`, view[1] === k, [q, k]));
+      }
+    } else {
+      items.push(btn(`${q} ×${n}`, `position ${q} (${D.kinds[q]}): the router sent it through the block ${n} times\n(click to see its iterations)`, false, [q, 0]));
+    }
+  }
+  if (deep.length > DEPTH_BAR_MAX) items.push(Object.assign(document.createElement("span"), { className: "muted", textContent: ` … ${deep.length - DEPTH_BAR_MAX} more` }));
+  const label = Object.assign(document.createElement("span"), { className: "label", textContent: "Depth" });
+  label.dataset.tip = "Each position runs the block until its router says stop. Most stop after one iteration; a product column's predictor takes one per term, a quotient digit's one per column.";
+  bar.replaceChildren(label, ...items);
 }
 
 // ------------------------------------------------------------------ Life board
@@ -966,7 +1156,13 @@ function renderStep() {
   const s = run.steps[state.q];
   const n = run.chars.length - 1 - (run.prompt_len - 1);
   const at = `query pos ${state.q} ${JSON.stringify(run.chars[state.q])}`;
-  $("step-label").textContent = state.q < run.prompt_len - 1
+  $("step-label").textContent = run.depth
+    ? `position ${state.q} / ${run.chars.length - 1} (${run.depth.kinds[state.q]}` +
+      (run.depth.iters[state.q] > 1 ? `, iteration ${(run.depth.view?.[0] === state.q ? run.depth.view[1] : run.depth.iters[state.q] - 1) + 1} of ${run.depth.iters[state.q]}` : "") +
+      `) ${JSON.stringify(run.chars[state.q])} → next ${JSON.stringify(run.depth.chars[state.q + 1] ?? "")}`
+    : isPass(run)
+    ? `pass ${run.loop.pass + 1} / ${run.loop.passes.length} (${run.loop.passes[run.loop.pass].action}) · cell ${state.q} ${JSON.stringify(run.chars[state.q])} → holds ${JSON.stringify(s.pred)} next`
+    : state.q < run.prompt_len - 1
     ? `reading the prompt: byte ${state.q + 1} / ${run.prompt_len} · ${at} (next is given: ${JSON.stringify(run.chars[state.q + 1])})`
     : `step ${state.q - run.prompt_len + 2} / ${n} · ${at} → writes ${JSON.stringify(run.chars[state.q + 1])}`;
   $("explain").textContent = s.explain;
@@ -1573,7 +1769,7 @@ async function play() {
   if (state.playing) return stopPlay();
   state.playing = true;
   $("btn-play").textContent = "Pause";
-  while (state.playing && state.run && state.q < state.run.chars.length - 2) {
+  while (state.playing && state.run && state.q < lastStep(state.run)) {
     await goto(state.q + 1);
     await sleep(Number($("speed").value));
   }
@@ -1691,7 +1887,7 @@ function wire() {
     if (e.key === "ArrowRight") { e.preventDefault(); goto(state.q + 1); }
     else if (e.key === "ArrowLeft") { e.preventDefault(); goto(state.q - 1); }
     else if (e.key === "Home" && state.run) { e.preventDefault(); goto(firstStep(state.run)); }
-    else if (e.key === "End" && state.run) { e.preventDefault(); goto(state.run.chars.length - 2); }
+    else if (e.key === "End" && state.run) { e.preventDefault(); goto(lastStep(state.run)); }
   });
 }
 
@@ -2130,6 +2326,8 @@ function viewParams() {
   if (state.model !== "calc") h.set("m", state.model);
   h.set("e", state.run.expression);
   if (state.run.sample) h.set("dec", `${state.run.sample.temperature},${state.run.sample.seed}`);
+  if (state.run.loop?.kind === "pass") h.set("lp", String(state.run.loop.pass)); // looped calculator: the pass
+  if (state.run.depth?.view) h.set("it", state.run.depth.view.join(".")); // recurrent depth: position.iteration
   h.set("q", String(state.q));
   h.set("map", state.map);
   if (state.head) h.set("head", state.head.join("."));
@@ -2160,7 +2358,7 @@ function readHash() {
     else if (t[0] === "d") ko.dims.push(t.slice(1));
   }
   const head = /^(\d+)\.(\d+)$/.exec(h.get("head") || "");
-  return { m: h.get("m"), e: h.get("e"), q: num("q"), map: h.get("map"), head: head ? [Number(head[1]), Number(head[2])] : null,
+  return { m: h.get("m"), e: h.get("e"), q: num("q"), lp: num("lp"), it: /^\d+\.\d+$/.test(h.get("it") || "") ? h.get("it").split(".").map(Number) : undefined, map: h.get("map"), head: head ? [Number(head[1]), Number(head[2])] : null,
            ml: num("ml"), snap: num("snap"), g: h.get("g"), pins: (h.get("pins") || "").split(",").filter(Boolean),
            ko, diff: h.get("diff") !== "0", any: h.toString().length > 0,
            dec: /^[\d.]+,\d+$/.test(h.get("dec") || "") ? h.get("dec").split(",").map(Number) : null };
@@ -2234,9 +2432,11 @@ async function main() {
     $("diff").checked = v.diff;
     if (v.pins.length) { [...pins].forEach(unpinOne); togglePin(null, { ids: v.pins, scroll: false }); }
     renderGraph();
-    await runExpression(getInput());
+    await runExpression(getInput(), null, state.model === "rewrite" ? { pass: v.lp }
+      : state.model === "loop" ? { iter: v.it } : {});
+    if (!state.run) return; // the run failed (the status line says why): nothing to restore
     if (v.snap !== null && v.snap < state.run.snapshots.length) $("snapshot").value = v.snap;
-    if (v.q !== null && v.q < state.run.prompt_len - 1 && !fromStart()) { // the link was copied inside the prompt
+    if (v.q !== null && !isPass(state.run) && v.q < state.run.prompt_len - 1 && !fromStart()) { // the link was copied inside the prompt
       log("link step", v.q, "is inside the prompt: showing from the first byte");
       setFromStart(true);
     }

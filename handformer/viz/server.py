@@ -35,6 +35,11 @@ class RunBody(BaseModel):
     knockout: Knockout | None = None
     max_new: int | None = Field(default=None, ge=1, le=100_000)  # "run longer"; the model's own limit still applies
     sample: SampleBody | None = None  # language models: seeded sampling instead of greedy
+    # looped calculator: which pass to show (None: the answer, written by the coda)
+    loop_pass: int | None = Field(default=None, ge=0, alias="pass")
+    # recurrent-depth calculator: [position, iteration] to show at that iteration (None: every
+    # position at its last)
+    iteration: list[int] | None = Field(default=None, min_length=2, max_length=2, alias="iter")
 
 
 class PositionBody(BaseModel):
@@ -123,7 +128,7 @@ def create_app(runners: dict[str, Runner]) -> FastAPI:
     @app.post("/api/run")
     def run(body: RunBody) -> dict:
         return pick(body.model).run(body.expression, body.knockout.model_dump() if body.knockout else None, body.max_new,
-                                    body.sample.model_dump() if body.sample else None)
+                                    body.sample.model_dump() if body.sample else None, body.loop_pass, body.iteration)
 
     @app.post("/api/position")
     def position(body: PositionBody) -> dict:

@@ -928,11 +928,11 @@ Each circuit is a short list of named heads and units, placed at fixed layers wi
 | what | where |
 |---|---|
 | **Engine** | |
-| weights from named linear forms | [model.py:185](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L185 "src:engine.builder") `ModelBuilder`: `{dim: coef}` forms become matrices |
+| weights from named linear forms | [model.py:190](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L190 "src:engine.builder") `ModelBuilder`: `{dim: coef}` forms become matrices |
 | a head = query, key, value forms | [model.py:91](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L91 "src:engine.head_spec") `HeadSpec` |
-| an MLP unit = ReLU(read) → write | [model.py:127](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L127 "src:engine.unit_spec") `UnitSpec` |
-| the forward pass | [model.py:333](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L333 "src:engine.forward") `Transformer.residual` |
-| cached greedy decoding | [model.py:416](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L416 "src:engine.decode_cache") `_DecodeCache` |
+| an MLP unit = ReLU(read) → write | [model.py:131](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L131 "src:engine.unit_spec") `UnitSpec` |
+| the forward pass | [model.py:349](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L349 "src:engine.forward") `Transformer.residual` |
+| cached greedy decoding | [model.py:432](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/model.py#L432 "src:engine.decode_cache") `_DecodeCache` |
 | **Primitives** | |
 | exact lookup: score −β(k−t)² | [primitives.py:66](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L66 "src:prim.gather") `gather_head` |
 | latest match (tags grow with position) | [primitives.py:142](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L142 "src:prim.latest_feature") `latest_feature` |

@@ -15,6 +15,8 @@ import yaml
 
 from .. import arith, common as cm, cparse, csyntax, expr, frame, life, strip
 from ..lm import viz as lmviz
+from ..rewrite import viz as loopviz
+from ..loop import docs as depthdocs, viz as depthviz
 
 log = logging.getLogger(__name__)
 SHOWN_FILE = Path(__file__).with_name("models.yaml")  # which models the drop-down offers
@@ -88,6 +90,19 @@ class ModelDef:
     sampling: bool = False  # the page may ask for seeded sampling instead of greedy decoding (language models)
 
 
+# The recurrent-depth calculator: the roles, the walk, the working's registers, the router
+DEPTH_MARKS = ("fz", "p", "c", "o", "a_lo", "b_hi", "ptrN", "cp_t", "dg_addr")
+DEPTH_SUMMARY = (*DEPTH_MARKS, "is_cell", "lat", "k_s", "k_w", "k_q", "k_r", "is_eq", "think", "route", "halt",
+                 "act_sp", "act_br", "act_red", "opp", "opm", "opmul", "opdiv", "opc",
+                 "wt", "ans", "preE", "z_mid", "ptr", "mk", "to_mid", "to_root", "PWa", "PWm", "PWq", "PQ", "PR",
+                 "nc", "dA", "dB", "cA", "cB", "cm", "kk", "qd", "qt", "rd", "rn")
+
+# The rewriting loop (bidirectional block): the root's decisions, the cell's zone, its column work, what it carries
+REWRITE_SUMMARY = ("act_sp", "act_br", "act_red", "rwn", "rwp", "macc", "dwork", "dsub", "grow_any", "go", "route",
+                "p", "c", "o", "a_lo", "b_hi", "kk", "qc", "K", "Q", "F", "ni", "Fp", "lo_B", "m_B", "g_B", "gelo",
+                "ltend", "blank", "red_B", "br_B", "pw_B", "in_col", "aj", "bj", "cy", "bw1", "inx", "cR")
+
+
 C_SAMPLE = """#include <stdio.h>
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
@@ -138,6 +153,21 @@ MODELS = {
                       "".join(sorted(csyntax.circuit.ALLOWED)), csyntax.circuit.CHARS_HINT, r"\S",
                       "empty source", strip_spaces=False, prompt_end="\x03", max_input=PARSE_MAX_INPUT,
                       multiline=True, node_names=tuple(cparse.toy.NAMES.items())),
+    # The calculator as one looped bidirectional block rewriting the prompt in place (handformer/rewrite,
+    # REWRITE.md): set aside, not a decoder (its block reads later positions).
+    "rewrite": ModelDef("rewrite", "calculator, looped rewriter (bidirectional)", loopviz.builder, loopviz.prompt, loopviz.category,
+                     ("o", "a_lo", "b_hi", "p", "c", "lo_B"), REWRITE_SUMMARY, loopviz.DOCS, loopviz.MAX_INPUT + 2,
+                     loopviz.SAMPLE, loopviz.HINT,
+                     loopviz.CHARS, loopviz.CHARS_HINT,
+                     r"^.+$", "empty expression", strip_spaces=False, max_input=loopviz.MAX_INPUT,
+                     extra_info={"looped": True}),
+    # The calculator as a recurrent-depth decoder (handformer/loop, LOOPED.md): it thinks in latent
+    # positions, each iterating the block as deep as its router asks, and writes only the answer.
+    "loop": ModelDef("loop", "calculator, recurrent depth (answer first)", depthviz.builder, depthviz.prompt,
+                     depthviz.category, DEPTH_MARKS, DEPTH_SUMMARY, depthdocs.docs(), depthviz.MAX_INPUT + 2,
+                     depthviz.SAMPLE, depthviz.HINT, depthviz.CHARS, depthviz.CHARS_HINT,
+                     r"^.+$", "empty expression", strip_spaces=False, max_input=depthviz.MAX_INPUT,
+                     extra_info={"depth": True}),
     # Needs the corpus (python tools/fetch_corpus.py); offered locally with --models, not on the site.
     "lm": ModelDef("lm", "language model (stage 1: trigram heads)", lmviz.builder, lmviz.prompt, lmviz.category,
                    (), (), lmviz.LazyDocs(), lmviz.MAX_INPUT + 1 + lmviz.MAX_NEW, lmviz.SAMPLE, lmviz.HINT,

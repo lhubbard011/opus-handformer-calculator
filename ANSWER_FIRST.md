@@ -1,6 +1,9 @@
 # Answer-first: can the model emit nothing until it has the answer?
 
-Status: analysis only, for later review (2026-11-03). Nothing here is built.
+Status: analysis (2026-11-03). A looped model is now built as a causal recurrent-depth decoder:
+`LOOPED.md` (2026-11-05). Each position loops one block as deep as its router asks, and the
+working moves into latent positions. An earlier in-place version of §6 needed bidirectional
+heads (`REWRITE.md`, set aside). The fixed-depth limits below stand.
 The current model (see `DESIGN.md`) writes its working into the token stream
 before the answer. This note asks what it would take for the **first emitted
 byte to be the first digit of the answer**, and what stops us.

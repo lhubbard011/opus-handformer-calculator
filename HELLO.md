@@ -77,7 +77,7 @@ fire at the same step, the control byte wins.
 
 If the carry units really carry, removing them should break exactly the sums
 that carry. Knockouts zero a part's output in the weights
-([ablate.py:53](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/ablate.py#L53 "src:ablate.apply")):
+([ablate.py:55](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/ablate.py#L55 "src:ablate.apply")):
 
 ```python
 from handformer import hello, ablate

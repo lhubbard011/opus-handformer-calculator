@@ -69,6 +69,18 @@
         <span class="lg ph-prompt" data-tip="The count and the starting grid you typed.">prompt</span><span class="lg ph-cell" data-tip="A cell of the next generation, from the rule: born with 3 live neighbours, survives with 2 or 3.">cell</span>
         <span class="lg ph-rowend" data-tip="A row end ('/') or grid end ('='), copied from the same offset one generation back.">row end</span><span class="lg ph-count" data-tip="The count digit (one less than the last block's) and its ':', or the final newline.">count</span>
       </span>
+      <span class="legend" data-model="loop" hidden>
+        <span class="lg ph-prompt" data-tip="The prompt you typed.">prompt</span><span class="lg ph-root" data-tip="A root '=': the end of a copy. It parses the copy and plans the next step, or halts.">root</span>
+        <span class="lg ph-start" data-tip="A thought: a step's start, holding the root's plan.">start</span><span class="lg ph-column" data-tip="A thought: a column of the working (+ - ×, or the quotient row of ÷).">column</span>
+        <span class="lg ph-quotient" data-tip="A thought: a quotient digit, found by a position that iterates once per column.">quotient</span><span class="lg ph-remainder" data-tip="A thought: a remainder digit of the long division.">remainder</span>
+        <span class="lg ph-copy" data-tip="A thought: a cell of the next copy of the expression.">copy</span><span class="lg ph-answer" data-tip="The answer: the only bytes the model writes.">answer</span>
+      </span>
+      <span class="legend" data-model="rewrite" hidden>
+        <span class="lg ph-fixed" data-tip="The start byte, and the root (the prompt's '='): the root sees the whole tape and decides each pass.">root</span><span class="lg ph-keep" data-tip="Before the bytes this pass replaces: the cell keeps its byte.">keep</span>
+        <span class="lg ph-result" data-tip="The cells that take the result: digits computed this pass, a copied number, or a power's rewrite.">result</span><span class="lg ph-shift" data-tip="After the result: the cell takes the byte some cells to its right (or left, when the result is longer).">shift</span>
+        <span class="lg ph-blank" data-tip="Past the end of the shorter tape: the cell becomes a blank.">blank</span><span class="lg ph-halt" data-tip="The pass that finds nothing to do: the router stops the loop.">halt</span>
+        <span class="lg ph-tape" data-tip="The final tape, read by the coda.">tape</span><span class="lg ph-answer" data-tip="The answer, written by the coda: the first bytes after the prompt.">answer</span>
+      </span>
       <span class="legend" data-model="calc">
         <span class="lg ph-prompt" data-tip="Characters you typed.">prompt</span><span class="lg ph-open" data-tip="The model opens a working step with '['.">open [</span>
         <span class="lg ph-copy" data-tip="The model copies the piece it chose to solve next (innermost brackets first, then ^, then × ÷, then + −).">copy redex</span><span class="lg ph-add" data-tip="Written by the addition calculator (inside a step).">add</span>
@@ -77,6 +89,7 @@
         <span class="lg ph-rewrite" data-tip="The model rewrites the line with the solved piece replaced by its answer.">rewrite</span><span class="lg ph-strip" data-tip="A step that removes bytes with nothing to compute: [ ] removes the line's last space, [()] the brackets around a single number. The line is rewritten without them.">strip</span>
       </span>
     </div>
+    <div id="loop-bar" class="loop-bar" hidden></div>
     <div id="tokens" class="token-strip" data-resize="the sequence"></div>
     <input id="scrubber" type="range" min="0" max="0" value="0" aria-label="Step">
   </section>
