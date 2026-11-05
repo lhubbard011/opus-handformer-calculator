@@ -301,8 +301,8 @@ class TestWebParity(unittest.TestCase):
                 close([sums.get(b, 0.0)], [v], f"q={q} column sum of {b!r}")
 
     def test_errors_match(self):
-        """The calculator takes any input as its bytes, unknown ones included (spaces, letters, '=',
-        UTF-8), and both engines run it the same way, list the unknown bytes and cut a run that
+        """The calculator takes any input as its bytes, unknown ones included (letters, '=', UTF-8;
+        spaces are known and removed by the weights), and both engines run it the same way, list the unknown bytes and cut a run that
         never finishes at the same length ("run longer" lifts that); only an empty input is refused."""
         cases = ["2+x", "2 + 3", "2+\u00e9", "x", "7=="]
         js = self.node([*(["/api/run", {"expression": e}] for e in cases), ["/api/run", {"expression": ""}],
@@ -315,7 +315,9 @@ class TestWebParity(unittest.TestCase):
                 self.assertEqual(j["unknown_chars"], py["unknown_chars"])
                 self.assertEqual((j["budget"], j["max_budget"]), (py["budget"], py["max_budget"]))
         self.assertEqual(js[0]["unknown_chars"], "x")
-        self.assertEqual(js[1]["unknown_chars"], " ")  # spaces reach the model now
+        self.assertEqual(js[1]["unknown_chars"], "")  # spaces are an input the weights remove (strip.py)
+        self.assertTrue(js[1]["finished"])
+        self.assertEqual("".join(js[1]["chars"]).rsplit("]", 1)[-1], "5\n")
         self.assertEqual(js[2]["chars"][3:5], ["\u00c3", "\u00a9"])  # 'é' as its two UTF-8 bytes
         loop = self.runner.run("x")  # never finishes: cut off
         self.assertFalse(loop["finished"])

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 
-from . import addition, division, expr, frame, multiplication, power, subtraction
+from . import addition, division, expr, frame, multiplication, power, strip, subtraction
 from . import common as cm
 from . import primitives as pr
 from .model import Form, HeadSpec, Layout, ModelBuilder, Transformer, UnitSpec
@@ -98,8 +98,8 @@ def builder() -> ModelBuilder:
 
     lay = Layout()
     cm.add_input_dims(lay)
-    lay.add(*frame.DIMS, *expr.DIMS)
-    shared = set(lay.names) | set(OP_OUTPUTS) | set(expr.OUT_DIMS)
+    lay.add(*frame.DIMS, *expr.DIMS, *strip.DIMS)
+    shared = set(lay.names) | set(OP_OUTPUTS) | set(expr.OUT_DIMS) | set(strip.OUT_DIMS)
     for ns, cb in circuits.items():
         # _Namespace.dim prefixes every name in the circuit's layout. If that layout
         # held a shared name (``one``, ``neg``, an output dim), the circuit's reads and
@@ -109,12 +109,13 @@ def builder() -> ModelBuilder:
         if clash:  # a private name equal to a shared dim would silently capture every use of it
             raise ValueError(f"circuit {ns} declares private dims that shadow shared dims: {sorted(clash)}")
         lay.add(*(f"{ns}.{d}" for d in cb.layout.names))
-    lay.add(*OP_OUTPUTS, *expr.OUT_DIMS)
+    lay.add(*OP_OUTPUTS, *expr.OUT_DIMS, *strip.OUT_DIMS)
 
     b = ModelBuilder(lay)
     cm.embed(b)
     frame.build(b)
     expr.build(b)
+    strip.build(b)
     for ns, cb in circuits.items():
         nsp = _Namespace(ns, set(cb.layout.names))
         for i, spec in enumerate(cb.layers, start=1):

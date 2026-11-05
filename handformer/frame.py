@@ -19,16 +19,24 @@ Layer 1 attn  flags of the previous byte (digit? ')'?) -> unary vs binary '-'
 Layer 1 mlp   latest-match key features for every marker class
 Layer 2 attn  latest heads: F '[', Rb ']', E '=', S ';'/'<', R '|', P any op,
               plus classes used by the parser: Lg '(' or ']', Lrp ')',
-              Lmul '*', Ladd '+'/'-', Lnd non-digit
+              Lmul '*', Ladd '+'/'-', Lnd non-digit, Lsp ' '
 Layer 2 mlp   open = [F > Rb]; seen_eq/semi/bar = [E/S/R > F]
 Layer 3 attn  Ls = Rb at F (start of the source line); p = Lg at F-1
               (innermost '(' of the source line, or its start);
               previous-match pointers PM_c = L_c at pos-1;
               operator type at P; sign at S; (P-F)^2 for multiplication
               operand signs sa, sb (a '-' right after '[' / after the operator)
-Layer 3 mlp   eff_sb = sb XOR [op is -]; phase1 (emit '['), phase2 (copy), phase4 (rewrite)
+Layer 3 mlp   til_line (the line is the prompt, which ends in "~N"); Lend at layer 4
+Layer 3-9     precision N: the digits between '~' and the prompt's '=', spaces skipped
 Layer 4 mlp   act_add: + or - with sa == eff_sb (add magnitudes); act_sub: signs differ
               (subtract magnitudes); act_mul: '*'. Each AND is one or two ReLUs.
+Layer 8 mlp   phase1 (emit '['), phase2 (copy), phase4 (rewrite); 2 and 4 are off in a
+              strip frame (sp or pf, strip.py: a space, or brackets around one number)
+
+Strip frames. A line holding a space, or whose innermost group is a single number, is
+not parsed: its frame is ``[ ]`` or ``[()]`` and the line is rewritten without that space
+or those brackets (strip.py finds them and writes it):
+``\n(1) + 2=[ ](1)+ 2=[ ](1)+2=[()]1+2=[1+2=3;3]3``.
 """
 
 from __future__ import annotations
@@ -61,6 +69,7 @@ MARKERS: dict[str, list[Form]] = {
     "Ldot": [{"is_dot": 1.0}],
     "Lnz": [{"nz": 1.0}],  # nonzero digit (trailing-zero count of a result)
     "Ptil": [{"is_tilde": 1.0}],  # the prompt's precision marker (0 if absent)
+    "Lsp": [{"is_space": 1.0}],  # a space (removed by a space frame)
 }
 NEXT_CLASSES = ("Lrp", "Lmul", "Ladd", "Lnd")  # classes searched with next_match
 OPS = {"add": "is_plus", "sub": "is_minus", "mul": "is_star", "div": "is_slash", "pow": "is_caret"}
@@ -72,9 +81,11 @@ DIMS = (
     "open", "seen_eq", "seen_semi", "seen_bar",
     "Ls", "p", *(f"PM_{c}" for c in NEXT_CLASSES), *(f"typ_{op}" for op in OPS),
     "Pf", "neg", "sa", "sb", "PF2",
-    "f_E0", "E0", "has_til", *(f"tN{k}" for k in range(N_DIGITS)), *(f"Nd{k}" for k in range(N_DIGITS)), "N",
+    "f_E0", "E0", "has_til", "f_Ndg", "Ndg", *(f"qN{k}" for k in range(N_DIGITS)),
+    *(f"Nd{k}" for k in range(N_DIGITS)), "N", "til_line", "Lend",
     *(f"act_{op}" for op in OPS), "phase1", "phase2", "phase4",
 )
+LE: Form = {"F": 1.0, "one": -1.0}  # the source line's '=' (the frame's '[' is right after it)
 
 # Fences of the frame's operands, past their signs: a in (F+sa, P), b in (P+sb, E).
 FA: Form = {"F": 1.0, "sa": 1.0}
@@ -124,14 +135,9 @@ def build(b: ModelBuilder) -> None:
     l2 = b.at(2)
     l2.heads += [pr.latest_head(f"latest {m}", f"f_{m}", m) for m in MARKERS]
     l2.heads.append(pr.latest_head("prompt '='", "f_E0", "E0"))
-    # Precision N: the digits between '~' and the prompt's '=' (N <= 9999).
-    # has_til = [Ptil >= 1] (Ptil reads BOS = 0 without a '~'). The 10^k digit sits at
-    # E0-1-k = Ptil + tN_k, so tN_k = ReLU(E0 - Ptil - 1 - k); a place N lacks gives 0, i.e. the
-    # '~' itself, whose val is 0. Layer 3 gathers those digits (Nd_k) and sums N.
+    # Precision N: the digits between '~' and the prompt's '=' (N <= 9999), read in layers 3-9.
+    # has_til = [Ptil >= 1] (Ptil reads BOS = 0 without a '~').
     l2.units += pr.clamp01_units({"Ptil": 1.0}, {"has_til": 1.0})
-    for k in range(N_DIGITS):
-        l2.units.append(pr.relu_unit({"E0": 1.0, "Ptil": -1.0, "one": -1.0 - k}, {f"tN{k}": 1.0},
-                                     label=f"offset 'tN{k}' from '~' to precision digit {k} (10^{k} place): (#digits between '~' and prompt '=') - {k}; 0 points at '~' itself"))
     # open = [F - Rb >= 1]: a '[' after the latest ']'. seen_eq/semi/bar = [E/S/R - F >= 1]: that
     # marker was already written inside the current frame. Robust steps give exact 0/1 flags.
     l2.units += pr.clamp01_units({"F": 1.0, "Rb": -1.0}, {"open": 1.0})
@@ -159,25 +165,35 @@ def build(b: ModelBuilder) -> None:
         # Circuits work on magnitudes, fenced at F+sa and P+sb (FA, PB above).
         pr.gather_head("sign of a", pr.add({"F": 1.0}, pr.const(1.0)), "sa", src="is_minus"),
         pr.gather_head("sign of b", pr.add({"P": 1.0}, pr.const(1.0)), "sb", src="is_minus"),
-        # Nd_k = digit value (val) at Ptil + tN_k: the 10^k digit of N, 0 where N has no such place
-        *(pr.gather_head(f"precision digit {k}", {"Ptil": 1.0, f"tN{k}": 1.0}, f"Nd{k}")
-          for k in range(N_DIGITS)),
     ]
+    # the prompt line carries "~N" after the expression; no rewrite copies it
+    # til_line = [Ptil > Ls]: the '~' lies in the source line, so this is the prompt line
+    l3.units += pr.clamp01_units({"Ptil": 1.0, "Ls": -1.0}, {"til_line": 1.0})
+
+    # Precision digits. A digit of N is a digit with a '~' before it: is_digit AND has_til (the
+    # prompt has one '~', so the expression's digits, before it, never match). Layer 3 tags them,
+    # layer 4 finds the latest one (Ndg; BOS = 0, whose val is 0, when none is left). Then right to
+    # left, one per layer: qN_0 = Ndg at the prompt's '=' - 1, qN_k = Ndg at qN_(k-1) - 1; spaces
+    # are skipped because they are not digits. The next layer reads Nd_k = val at qN_k, the 10^k
+    # digit of N (0 where N has none).
+    b.at(3).units += pr.latest_feature({"is_digit": 1.0, "has_til": 1.0, "one": -1.0}, "f_Ndg")
+    b.at(4).heads.append(pr.latest_head("latest digit of N", "f_Ndg", "Ndg"))
+    for k in range(N_DIGITS):
+        before = pr.add({"E0": 1.0} if k == 0 else {f"qN{k - 1}": 1.0}, pr.const(-1.0))
+        b.at(5 + k).heads.append(pr.gather_head(f"precision digit {k} position", before, f"qN{k}", src="Ndg"))
+        b.at(6 + k).heads.append(pr.gather_head(f"precision digit {k}", {f"qN{k}": 1.0}, f"Nd{k}"))
     # N = has_til * sum_k 10^k Nd_k (0 without '~'); read by the parser's division pads (layer 14)
-    l3.units += pr.times_flag_units({f"Nd{k}": 10.0 ** k for k in range(N_DIGITS)}, {"has_til": 1.0}, {"N": 1.0})
-    # Phases (exact: ReLUs of 0/1 flags); read by the parser's byte votes in layer 22.
-    l3.units += [
-        pr.relu_unit({"is_eq": 1.0, "open": -1.0}, {"phase1": 1.0},
-                     label="'phase1': at a line-ending '=' with no frame open, so the next byte is '[' (start a new frame)"),
-        pr.relu_unit({"open": 1.0, "seen_eq": -1.0}, {"phase2": 1.0},
-                     label="'phase2': a frame is open but has no '=' yet, so the model is copying the redex into it"),
-        pr.relu_unit({"one": 1.0, "open": -1.0, "is_eq": -1.0}, {"phase4": 1.0},
-                     label="'phase4': frame closed and not on '=', so the model is rewriting the expression line after ']'"),
-    ]
+    b.at(5 + N_DIGITS).units += pr.times_flag_units({f"Nd{k}": 10.0 ** k for k in range(N_DIGITS)},
+                                                    {"has_til": 1.0}, {"N": 1.0})
 
     # Layer 4. Heads: (P-Fa)^2 for multiplication and the frame operator's one-hot type.
     # MLP: the act_* routing flags, read by every gated operator-circuit unit (arith.py).
     l4 = b.at(4)
+    # Lend: where the source line's expression ends. Le, or the '~' on the prompt line
+    # (Lend = Le + til_line * (Ptil - Le)). Read by the rewrite (expr) and the space frame.
+    l4.units.append(pr.relu_unit(LE, {"Lend": 1.0},
+                                 label="'Lend' base: Le, where the line's expression ends; the prompt line's '~N' correction is added next"))
+    l4.units += pr.times_flag_units({"Ptil": 1.0, "F": -1.0, "one": 1.0}, {"til_line": 1.0}, {"Lend": 1.0})
     l4.heads += [
         # square table: pos2 gathered at x = P - (F+sa) is x^2, x = (digits of |a|) + 1
         # (read by multiplication.py's S2)
@@ -221,4 +237,16 @@ def build(b: ModelBuilder) -> None:
                      label="'act_div': AND of open frame, past its '=', frame operator '/': enables the division circuit"),
         pr.relu_unit(pr.add(work, {"typ_pow": 1.0}, pr.const(-2.0)), {"act_pow": 1.0},
                      label="'act_pow': AND of open frame, past its '=', frame operator '^': enables the power-rewrite circuit"),
+    ]
+
+    # Layer 8 MLP. Phases (exact: ReLUs of 0/1 flags); read by the parser's byte votes in layer 22.
+    # In a strip frame (sp or pf = 1, strip.py; never both) there is no redex to copy and no
+    # result to write: phase2 and phase4 are off and strip.py writes the frame and the line.
+    b.at(8).units += [
+        pr.relu_unit({"is_eq": 1.0, "open": -1.0}, {"phase1": 1.0},
+                     label="'phase1': at a line-ending '=' with no frame open, so the next byte is '[' (start a new frame)"),
+        pr.relu_unit({"open": 1.0, "seen_eq": -1.0, "sp": -1.0, "pf": -1.0}, {"phase2": 1.0},
+                     label="'phase2': a frame is open but has no '=' yet and is not a strip frame, so the model is copying the redex into it"),
+        pr.relu_unit({"one": 1.0, "open": -1.0, "is_eq": -1.0, "sp": -1.0, "pf": -1.0}, {"phase4": 1.0},
+                     label="'phase4': frame closed, not on '=', not a strip frame: the model is rewriting the expression line after ']'"),
     ]

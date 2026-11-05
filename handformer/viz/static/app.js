@@ -107,7 +107,7 @@ function focusSet() {
   if (state.model === "life") return new Set(["input", "output", "life"]); // one circuit, always on
   const set = new Set(["input", "output", "frame"]);
   if (!s) return set;
-  if (s.phase === "copy" || s.phase === "rewrite") set.add("parser");
+  if (s.phase === "copy" || s.phase === "rewrite" || s.phase === "strip") set.add("parser");
   if (s.phase === "op" && s.op) set.add(s.op);
   return set;
 }
@@ -190,6 +190,7 @@ function summarize(run, q, raw) {
   let phase, op = null;
   if (q < run.prompt_len - 1) phase = "prompt";
   else if (v.phase1 > 0.5) phase = "open";
+  else if (v.sp > 0.5 || v.pf > 0.5) phase = "strip";
   else if (v.phase2 > 0.5) phase = "copy";
   else if (v.open > 0.5) { phase = "op"; op = OPS.find((o) => v[`act_${o}`] > 0.5) || null; }
   else phase = "rewrite";
@@ -200,7 +201,16 @@ function summarize(run, q, raw) {
   else if (phase === "open") explain = "The line ends with '=' and no step is open, so the model opens one: it writes '['.";
   else if (phase === "copy") explain = v.end2 > 0.5 ? `The chosen piece is fully copied: write the step's '='. (${redex}.)`
     : `Copying the chosen piece into the step: byte ${r(v.a_lo + 1 + q - v.F)} ${ch(v.a_lo + 1 + q - v.F)}. (${redex}.)`;
-  else if (phase === "op") {
+  else if (phase === "strip") {
+    const sp = v.sp > 0.5, cur = run.chars[q];
+    const what = sp ? `the space at ${r(v.sp_at)}` : `the brackets at ${r(v.p)} and ${r(v.c)}` + (v.cn > 0.5 ? " and the two signs, -(-v) = v" : "");
+    if (v.open > 0.5) explain = cur === "[" ? (sp ? `The line has a space, so this step removes one instead of solving anything: write ' ' (${what}).`
+      : `The innermost group is a single number, so this step removes its brackets instead of solving anything: write '(' (${what}).`)
+      : cur === "(" ? "The bracket step's body names what it removes: write ')'."
+      : `The step's body names what it removes: close it with ']'.`;
+    else if (v.st_end > 0.5) explain = `The new line is complete: ${v.st_cont > 0.5 ? "a space, an operator or a bracket remains, so write '='" : "nothing is left to do, so write the final newline"}.`;
+    else explain = `Writing the line without ${what}: byte ${r(q - v.Rb)}, copied from ${r(v.st_src)} ${ch(v.st_src)}.`;
+  } else if (phase === "op") {
     const sub = v.seen_semi > 0.5 ? "writing the answer" : op === "mul" && v.seen_bar > 0.5 ? "gathering the product" : "doing the working";
     explain = `The ${op || "?"} calculator is ${sub}, inside the step that starts at ${r(v.F)}.`;
   } else {

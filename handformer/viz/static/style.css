@@ -15,6 +15,7 @@
   --ph-sub: #c792ea;
   --ph-mul: #ff8a65;
   --ph-rewrite: #4fd1c5;
+  --ph-strip: #9aa5b8;
   --ph-div: #f0d060;
   --ph-pow: #e07bd0;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
@@ -82,6 +83,7 @@ input[type=text], select {
 .ph-div { border-bottom-color: var(--ph-div); } .lg.ph-div { background: var(--ph-div); }
 .ph-pow { border-bottom-color: var(--ph-pow); } .lg.ph-pow { background: var(--ph-pow); }
 .ph-rewrite { border-bottom-color: var(--ph-rewrite); } .lg.ph-rewrite { background: var(--ph-rewrite); }
+.ph-strip { border-bottom-color: var(--ph-strip); } .lg.ph-strip { background: var(--ph-strip); }
 #scrubber { width: 100%; margin-top: 18px; }
 
 .grid { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(320px, 1.3fr) minmax(300px, 1.2fr); gap: 10px; padding: 10px 16px; }

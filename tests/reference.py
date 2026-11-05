@@ -177,6 +177,38 @@ def step(x: str) -> tuple[str, str, bool]:
     return f"[{ia}{op}{ib}={body}]", x[:lo] + result + tail, more
 
 
+def _more(nxt: str) -> bool:
+    """A strip frame's line needs another frame: a space, a binary operator or a '(' is left."""
+    return " " in nxt or "(" in nxt or any(binary_op(nxt, k) for k in range(len(nxt)))
+
+
+def space_step(x: str) -> tuple[str, str, bool]:
+    """A space frame: the line without its last space (and without the prompt's "~N")."""
+    line = x.split("~")[0]
+    i = line.rfind(" ")
+    nxt = line[:i] + line[i + 1:]
+    return "[ ]", nxt, _more(nxt)
+
+
+def bare_group(line: str) -> bool:
+    """The innermost group (latest '(' to the first ')' after it) holds no binary operator."""
+    p = line.rfind("(")
+    c = line.find(")", p + 1) if p >= 0 else -1
+    return c >= 0 and not any(binary_op(line, i) for i in range(p + 1, c))
+
+
+def bracket_step(x: str) -> tuple[str, str, bool]:
+    """A bracket frame: the line without the brackets around its innermost single number."""
+    line = x.split("~")[0]
+    p = line.rfind("(")
+    c = line.find(")", p + 1)
+    if p >= 1 and unary(line, p - 1) and line[p + 1] == "-":  # -(-v) is v: both signs go too
+        nxt = line[:p - 1] + line[p + 2:c] + line[c + 1:]
+    else:
+        nxt = line[:p] + line[p + 1:c] + line[c + 1:]
+    return "[()]", nxt, _more(nxt)
+
+
 PRECISION = 0  # set per call by output()
 
 
@@ -186,10 +218,11 @@ def output(expression: str) -> str:
     ``expression`` may end with ``~N``: N fractional digits for every '/'.
     """
     global PRECISION
-    PRECISION = int(expression.split("~")[1]) if "~" in expression else 0
+    PRECISION = int(expression.split("~")[1].replace(" ", "")) if "~" in expression else 0
     x, out = expression, []
     while True:
-        frame, x, more = step(x)
+        line = x.split("~")[0]
+        frame, x, more = (space_step(x) if " " in line else bracket_step(x) if bare_group(line) else step(x))
         out.append(frame + x + ("=" if more else "\n"))
         if not more:
             return "".join(out)

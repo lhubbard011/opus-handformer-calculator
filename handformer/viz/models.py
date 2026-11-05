@@ -13,7 +13,7 @@ from typing import Callable
 
 import yaml
 
-from .. import arith, common as cm, cparse, csyntax, expr, frame, life
+from .. import arith, common as cm, cparse, csyntax, expr, frame, life, strip
 from ..lm import viz as lmviz
 
 log = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ SHOWN_FILE = Path(__file__).with_name("models.yaml")  # which models the drop-do
 CALC_MARKS = ("Ls", "F", "p", "c", "o", "a_lo", "b_hi", "E", "S", "Rb", "P", "R")
 CALC_SUMMARY = (*CALC_MARKS, "phase1", "phase2", "phase4", "act_add", "act_sub", "act_mul", "act_div", "act_pow",
                 "open", "seen_eq", "seen_semi", "seen_bar", "drop", "cont", "end2", "end4",
-                "in1", "in12", "in123", "src4", "neg", "use_mul")
+                "in1", "in12", "in123", "src4", "neg", "use_mul", "sp", "sp_at", "pf", "cn", "st_src", "st_end", "st_cont")
 LIFE_MARKS = ("C", "L", "F")
 LIFE_SUMMARY = (*LIFE_MARKS, "is_count", "up_ok", "down_ok", "self", "n", "nxt", "cellp", "pT_slash", "pT_eq",
                 *(f"K{d}" for d in range(10)), *(f"a_{k}" for k in life.circuit.NEIGHBOURS))
@@ -30,12 +30,12 @@ LIFE_SUMMARY = (*LIFE_MARKS, "is_count", "up_ok", "down_ok", "self", "n", "nxt",
 
 def _calc_prompt(text: str) -> list[int]:
     """The input exactly as typed, as its UTF-8 bytes, framed as ``\\n<input>=``. Nothing is
-    stripped or refused for what it contains: spaces, letters, '=' or 'é' reach the weights, and
-    what they do with bytes they have no input features for is the model's business (the run
-    lists those as unknown_chars)."""
+    stripped or refused for what it contains: spaces (which the weights remove, strip.py),
+    letters, '=' or 'é' reach the weights, and what they do with bytes they have no input
+    features for is the model's business (the run lists those as unknown_chars)."""
     if not text:
         raise ValueError("empty expression")
-    unknown = sorted({ch for ch in text if len(ch.encode("utf-8")) > 1 or ord(ch) not in cm.ALPHABET and ch != "~"})
+    unknown = sorted({ch for ch in text if len(ch.encode("utf-8")) > 1 or ord(ch) not in cm.ALPHABET and ch not in "~ "})
     if unknown:
         log.info("calculator input has bytes it has no features for: %r", "".join(unknown))
     return [cm.BOS, *text.encode("utf-8"), ord("=")]  # = arith.prompt, for any bytes
@@ -46,9 +46,9 @@ def _calc_category(name: str) -> str:
         return "input"
     if name in frame.DIMS:
         return "frame"
-    if name in expr.DIMS:
+    if name in expr.DIMS or name in strip.DIMS:  # a strip step is a rewrite of the line
         return "parser"
-    if name in expr.OUT_DIMS or name in arith.OP_OUTPUTS:
+    if name in expr.OUT_DIMS or name in strip.OUT_DIMS or name in arith.OP_OUTPUTS:
         return "output"
     return name.split(".", 1)[0] if "." in name else "other"
 
@@ -116,7 +116,7 @@ PARSE_SAMPLE = """if (ready) {
 MODELS = {
     "calc": ModelDef("calc", "calculator", arith.builder, _calc_prompt, _calc_category, CALC_MARKS, CALC_SUMMARY,
                      {}, 3000, "2+3*(4-1)", "an expression: + - * / ^ ( ), decimals, ~N for division precision",
-                     "".join(sorted(chr(b) for b in cm.ALPHABET)) + "~",
+                     "".join(sorted(chr(b) for b in cm.ALPHABET)) + "~ ",  # spaces: the weights remove them (strip.py)
                      "(use digits . + - * / ( ) and ~N)", r"^.+$", "empty expression", strip_spaces=False,
                      lenient=True),
     "life": ModelDef("life", "game of life", life.builder, life.prompt, _life_category, LIFE_MARKS, LIFE_SUMMARY,

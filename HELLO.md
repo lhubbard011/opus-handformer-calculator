@@ -3,7 +3,7 @@
 Read this before the full calculator. `handformer/hello.py` is one file and
 five layers: 9 attention heads, 66 MLP units and 761 nonzero weights. Every
 weight comes from a formula you can read, and the same primitives build the
-full calculator (8,478 weights).
+full calculator (8,915 weights).
 
 ```
 $ python -m handformer.hello 47+38 99999+1
@@ -61,7 +61,7 @@ reads its own previous output and needs no memory beyond the text.
 
 **4. Write a working digit** [hello.py:121](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L121 "src:hello.digit"). Shared ReLU ramps turn
 `A + B + carry` (0–19) into a one-hot vote for its last digit `D0`–`D9`
-([common.py:119](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/common.py#L119 "src:prim.ramp")). A separate unit writes `;` once both operands are used up
+([common.py:121](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/common.py#L121 "src:prim.ramp")). A separate unit writes `;` once both operands are used up
 and no carry is left [hello.py:125](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L125 "src:hello.semi"). A latest head finds the top nonzero
 working digit [hello.py:115](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/hello.py#L115 "src:hello.top"), which gives the answer's length.
 

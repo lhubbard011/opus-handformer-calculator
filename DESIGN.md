@@ -133,22 +133,23 @@ the parser uses to find `)`, the next operator and the end of each operand.
 
 ### 5.1 Allocation
 
-All 576 dimensions are named. They are allocated by category:
+All 603 dimensions are named. They are allocated by category:
 
 | category | dims | contents |
 |---|---|---|
-| input | 37 | `one`, `pos`, `pos²`, digit value, digit one-hot, byte-class flags |
-| shared frame locator | 74 | marker positions, frame flags, phases, `act_*`, previous-match pointers, signs, precision N |
-| parser / rewriter | 114 | p, c, o, operand bounds, decimal pads, region flags, source positions, copy one-hots |
+| input | 38 | `one`, `pos`, `pos²`, digit value, digit one-hot, byte-class flags |
+| shared frame locator | 80 | marker positions, frame flags, phases, `act_*`, previous-match pointers, signs, precision N, line end |
+| parser / rewriter | 113 | p, c, o, operand bounds, decimal pads, region flags, source positions, copy one-hots |
+| strip frames | 19 | the line's space, the bracketed-number test, skip counts, source position, end and continue flags (§35) |
 | addition (private) | 16 | digit targets, gathered digits, carry, answer pointer |
 | subtraction (private) | 25 | same, plus top/lowest-digit pointers and complement value |
 | multiplication (private) | 39 | squares, line index j, column m, b_j one-hot, products, carry |
 | division (private) | 132 | grid geometry, multiples 0–9 of the divisor, digit comparisons, quotient digit |
 | power (private) | 102 | exponent parity and halving, expansion segments, copied base |
-| output | 37 | one dimension per emitted byte class, read linearly by the unembedding |
+| output | 39 | one dimension per emitted byte class, read linearly by the unembedding |
 
 The operator circuits never run at the same position, so their private
-dimensions could share space (planned compaction, about 576 → 300).
+dimensions could share space (planned compaction, about 603 → 300).
 
 ### 5.2 Conventions
 
@@ -270,15 +271,18 @@ innermost-first means a depth counter is never needed.
 | `]` | closes the frame | operator circuit |
 | X_{t+1} | the line with the sub-expression replaced by its result | rewriter (phase 4) |
 | final `\n` | no operator left: X_n is the answer | rewriter |
+| `[ ]` | a strip frame: the line has a space, so X_{t+1} is X_t without its last space (§35) | strip.py |
+| `[()]` | a strip frame: the innermost group is one number, so X_{t+1} is X_t without those brackets (§35) | strip.py |
 
-**Phases**, decided per query position in layer 3:
+**Phases**, decided per query position in layer 8 (`strip` = `sp` or `pf`: the line has a space, or its innermost group is one number):
 
 | phase | condition | action |
 |---|---|---|
 | 1 | current byte is `=` and no frame is open | emit `[` |
-| 2 | frame open, frame's `=` not yet written | copy the sub-expression, then `=` |
+| 2 | frame open, frame's `=` not yet written, not `strip` | copy the sub-expression, then `=` |
 | 3 | frame open, `=` written | the active operator circuit writes working, result, `]` |
-| 4 | frame closed, current byte is not `=` | write the reduced line, then `=` or `\n` |
+| 4 | frame closed, current byte is not `=`, not `strip` | write the reduced line, then `=` or `\n` |
+| strip | `strip` | write the body (` ` or `()`) and `]`, then the line without those bytes, then `=` or `\n` |
 
 ## 9. Global layer map
 
@@ -290,39 +294,39 @@ layers because they never need to be active at the same position.
 
 | layer | heads | heads by circuit | MLP units | units by circuit |
 |---|---|---|---|---|
-| 1 | 2 | frame 2 | 40 | frame 40 |
-| 2 | 16 | frame 16 | 14 | frame 14 |
-| 3 | 14 | frame 14 | 36 | frame 5, add 12, sub 15, mul 4 |
-| 4 | 39 | frame 2, parser 7, add 5, sub 7, mul 7, div 8, pow 3 | 49 | frame 11, add 9, sub 12, mul 7, div 2, pow 8 |
-| 5 | 9 | parser 3, add 1, mul 2, div 2, pow 1 | 89 | parser 6, add 38, sub 27, mul 6, pow 12 |
-| 6 | 10 | parser 1, sub 1, mul 4, div 4 | 78 | parser 4, sub 9, mul 10, div 44, pow 11 |
-| 7 | 21 | mul 2, div 17, pow 2 | 170 | parser 3, sub 3, mul 22, div 48, pow 94 |
-| 8 | 9 | parser 7, div 2 | 97 | parser 6, sub 12, mul 18, div 32, pow 29 |
-| 9 | 17 | parser 5, div 12 | 57 | parser 12, mul 3, div 26, pow 16 |
-| 10 | 3 | parser 2, pow 1 | 257 | parser 4, mul 126, div 66, pow 61 |
-| 11 | 3 | parser 1, div 2 | 9 | parser 5, div 4 |
+| 1 | 2 | frame 2 | 42 | frame 42 |
+| 2 | 17 | frame 17 | 10 | frame 10 |
+| 3 | 10 | frame 10 | 35 | frame 4, add 12, sub 15, mul 4 |
+| 4 | 43 | frame 3, parser 7, strip 3, add 5, sub 7, mul 7, div 8, pow 3 | 52 | frame 14, add 9, sub 12, mul 7, div 2, pow 8 |
+| 5 | 11 | frame 1, parser 3, strip 1, add 1, mul 2, div 2, pow 1 | 91 | parser 2, strip 2, add 38, sub 27, mul 10, pow 12 |
+| 6 | 15 | frame 2, parser 1, strip 3, sub 1, mul 4, div 4 | 84 | parser 4, strip 6, sub 9, mul 10, div 44, pow 11 |
+| 7 | 23 | frame 2, mul 2, div 17, pow 2 | 175 | parser 3, strip 5, sub 3, mul 22, div 48, pow 94 |
+| 8 | 11 | frame 2, parser 7, div 2 | 103 | frame 3, parser 6, strip 3, sub 12, mul 18, div 32, pow 29 |
+| 9 | 18 | frame 1, parser 5, div 12 | 67 | frame 2, parser 12, strip 8, mul 3, div 26, pow 16 |
+| 10 | 3 | parser 2, pow 1 | 258 | parser 4, strip 1, mul 126, div 66, pow 61 |
+| 11 | 3 | parser 1, div 2 | 13 | parser 5, strip 4, div 4 |
 | 12 | 2 | parser 1, div 1 | 17 | parser 5, div 12 |
 | 13 | 0 | — | 2 | parser: raw decimal pads |
 | 14 | 0 | — | 11 | parser: pads `pad_a`, `pad_b`, result places `f_res` |
 | 15 | 0 | — | 27 | parser: frame-copy segment flags (in a, pad, op, in b, pad), '.' skips |
 | 16 | 0 | — | 8 | parser: frame-copy source position `src2`, trailing zeros |
-| 17 | 1 | parser: frame copy | 4 | parser |
-| 18 | 0 | — | 7 | parser: end of the reduced line `Lend`, result width, '.' position |
+| 17 | 1 | parser: frame copy | 2 | parser |
+| 18 | 0 | — | 4 | parser: result width, '.' position |
 | 19 | 0 | — | 20 | parser: rewrite region flags (prefix, result, suffix) |
 | 20 | 0 | — | 2 | parser: left padding of the result |
-| 21 | 0 | — | 6 | parser: rewrite source position `src4` |
-| 22 | 1 | parser: rewrite copy | 44 | parser: output votes for every byte |
+| 21 | 0 | — | 8 | parser 6, strip 2: rewrite source position `src4` |
+| 22 | 1 | parser: rewrite copy | 70 | parser 44, strip 26: output votes for every byte |
 
-Totals: 147 heads (frame 34, parser 29, add 6, sub 8, mul 15, div 48, pow 7)
-and 1,044 units (frame 70, parser 176, add 59, sub 78, mul 196, div 234, pow 231).
+Totals: 160 heads (frame 40, parser 29, strip 7, add 6, sub 8, mul 15, div 48, pow 7)
+and 1,101 units (frame 75, parser 167, strip 57, add 59, sub 78, mul 200, div 234, pow 231).
 
 **Why layers 13–16 and 18–21 have no heads.** Those layers do arithmetic on
 values the position already holds, so there is nothing to look up. The two
 copies at the end each need a source position that takes a chain of ReLU
 steps to compute, and an MLP of layer i is only visible to the heads of layer
 i+1 (§7). The frame copy chain is raw pads (L13) → pads (L14) → segment flags
-(L15) → source position (L16) → copy head (L17). The rewrite chain is line end
-(L18) → region flags (L19) → padding (L20) → source position (L21) → copy head
+(L15) → source position (L16) → copy head (L17). The rewrite chain is result
+width (L18) → region flags (L19) → padding (L20) → source position (L21) → copy head
 (L22). Depth here is the length of a dependency chain, not a count of
 lookups.
 
@@ -338,6 +342,7 @@ open      = [F > Rb]        seen_eq   = [E > F]
 seen_semi = [S > F]         seen_bar  = [R > F]
 act_<op>  = open AND seen_eq AND (byte at P is <op>)
 neg       = byte at S is '<'
+Lend      = Le, or the '~' on the prompt line (the line's expression ends there)
 ```
 
 ### 9.2 Choosing and rewriting the sub-expression (`expr.py`, layers 4–22)
@@ -487,14 +492,14 @@ on the bounding byte, whose value is 0.
 | | |
 |---|---|
 | layers | 22 |
-| heads | 147 |
-| MLP units | 1,044 |
-| d_model | 576 |
-| nonzero parameters | 8,478 |
+| heads | 160 |
+| MLP units | 1,101 |
+| d_model | 603 |
+| nonzero parameters | 8,915 |
 
-Stored as dense matrices that is 2.08M cells, of which 0.41% are nonzero.
+Stored as dense matrices that is 2.29M cells, of which 0.39% are nonzero.
 Heads are factored (§7): query/key width 1–3, and each head moves at most
-18 values. A dense d×d value/output map per head would be 48.8M cells.
+19 values. A dense d×d value/output map per head would be 58.2M cells.
 
 ## 15. Verification
 
@@ -510,7 +515,9 @@ Heads are factored (§7): query/key width 1–3, and each head moves at most
   - random operands: + and − up to 300 digits, × up to 25 digits;
   - edge cases: zeros, leading zeros, long carry and borrow chains.
 - `tests/test_expr.py`: hand-picked expressions, plus random expression trees
-  up to depth 4 with parentheses, precedence and left-to-right order.
+  up to depth 4 with parentheses, precedence and left-to-right order, and the
+  same trees with random spaces, and with random leaves in brackets of their
+  own (exact answers, §35).
 - Run all: `python -m unittest discover -s tests -t .`
 - The test harness recomputes full n² attention with no caching, which limits
   how long the tested × cases can be. The weights themselves are not limited
@@ -518,8 +525,8 @@ Heads are factored (§7): query/key width 1–3, and each head moves at most
 
 ## 16. Limitations
 
-- **A prompt must contain at least one operator.**
-- **Parentheses around a bare number** (`(5)+1`) are not handled.
+- **A prompt must contain at least one operator** (or brackets or spaces to remove: `(5)`
+  and `5 ` give 5, `5` does not).
 - **Each frame rewrites the whole line,** so an expression with k operators
   takes about k × its length in bytes, on top of each operation's working.
 - **About 2 extra layers' worth of heads are spent recomputing pointers**
@@ -729,7 +736,7 @@ against exact truncated rational arithmetic.
   `tests/test_export.py` checks a bit-exact round trip, that the official
   `safetensors` reader agrees when it is installed, and that the numpy-only runner
   computes correct answers from the file.
-- **Density:** 8,478 nonzero of 2.08M stored cells (0.41%). The median residual
+- **Density:** 8,915 nonzero of 2.29M stored cells (0.39%). The median residual
   dimension has one writer and one reader, and the median MLP unit reads 5
   dimensions. The sparsity is the price of one meaning per dimension. Planned
   compaction: time-share the private dimensions of the mutually exclusive
@@ -807,7 +814,7 @@ no server and costs nothing to host. GitHub Actions builds and deploys it
 (`.github/workflows/pages.yml`).
 
 - **`tools/export_web.py`** writes `model.json`, a list of every nonzero
-  weight as `[row, col, value]` (8,478 entries, 130 KB). Python's float repr
+  weight as `[row, col, value]` (8,915 entries, 137 KB). Python's float repr
   round-trips exactly through JSON into a JavaScript float64. It also writes
   `info.json`, the same model description the server returns: names,
   explanations, formulas and wiring.
@@ -911,7 +918,7 @@ A review list for anyone reading the model or the visualizer. §27 links each me
     10⁵–10⁶ positions (§12).
 12. **The browser and Python agree to 10⁻⁶, not bit for bit,** because the
     float sums run in a different order. The bytes are identical (§24).
-13. **Some reads are not exact where nothing reads them** (37 known cases,
+13. **Some reads are not exact where nothing reads them** (30 known cases,
     §28). The claims test pins them down so that no new one can appear unnoticed.
 
 ## 27. Where each circuit is written
@@ -935,24 +942,24 @@ Each circuit is a short list of named heads and units, placed at fixed layers wi
 | floor(x/s) by attention over a ruler | [primitives.py:97](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L97 "src:prim.floor_div") `floor_div_head` |
 | exact 0/1 steps that reject noise | [primitives.py:291](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L291 "src:prim.clamp01") `clamp01_units` |
 | gating with −BIG·(1−flag) | [primitives.py:330](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/primitives.py#L330 "src:prim.gated") `gated` |
-| digit of x mod 10 by ReLU ramps | [common.py:119](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/common.py#L119 "src:prim.ramp_mod10") `ramp_mod10_units` |
-| byte embedding | [common.py:56](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/common.py#L56 "src:prim.embed") `embed` |
+| digit of x mod 10 by ReLU ramps | [common.py:121](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/common.py#L121 "src:prim.ramp_mod10") `ramp_mod10_units` |
+| byte embedding | [common.py:57](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/common.py#L57 "src:prim.embed") `embed` |
 | **Frame locator (layers 1–4)** | |
-| unary vs binary '-' | [frame.py:39](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L39 "src:frame.unary_minus") frame.py |
-| latest-marker heads F, Rb, E, S, P, … | [frame.py:124](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L124 "src:frame.latest_heads") layer 2 |
-| precision N read from the prompt | [frame.py:127](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L127 "src:frame.precision") layer 2 |
-| routing: which calculator runs (sign XOR) | [frame.py:193](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L193 "src:frame.routing") layer 4 `act_*` |
+| unary vs binary '-' | [frame.py:47](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L47 "src:frame.unary_minus") frame.py |
+| latest-marker heads F, Rb, E, S, P, … | [frame.py:135](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L135 "src:frame.latest_heads") layer 2 |
+| precision N read from the prompt | [frame.py:138](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L138 "src:frame.precision") layer 2 |
+| routing: which calculator runs (sign XOR) | [frame.py:209](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L209 "src:frame.routing") layer 4 `act_*` |
 | **Parser and rewriter (layers 4–22)** | |
-| find the innermost group | [expr.py:94](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L94 "src:parser.redex") layers 4–5 |
-| group end c = min(first ')', line end) | [expr.py:114](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L114 "src:parser.group_end") layer 5 |
-| precedence: choose the operator o | [expr.py:131](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L131 "src:parser.precedence") layer 7 |
-| operand bounds a_lo, b_hi | [expr.py:144](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L144 "src:parser.operands") layers 8–9 |
-| drop the parentheses | [expr.py:211](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L211 "src:parser.drop_parens") layer 11 |
-| cancel −(−v) | [expr.py:222](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L222 "src:parser.cancel") layer 11 |
-| decimal alignment and result places | [expr.py:244](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L244 "src:parser.decimals") layers 13–14 |
-| frame copy segments | [expr.py:274](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L274 "src:parser.frame_copy") layers 14–16, copied by the L17 head |
-| result formatting and the rewrite | [expr.py:323](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L323 "src:parser.rewrite") layers 17–21 |
-| output votes | [expr.py:396](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L396 "src:parser.outputs") layer 22 |
+| find the innermost group | [expr.py:98](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L98 "src:parser.redex") layers 4–5 |
+| group end c = min(first ')', line end) | [expr.py:118](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L118 "src:parser.group_end") layer 5 |
+| precedence: choose the operator o | [expr.py:135](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L135 "src:parser.precedence") layer 7 |
+| operand bounds a_lo, b_hi | [expr.py:148](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L148 "src:parser.operands") layers 8–9 |
+| drop the parentheses | [expr.py:215](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L215 "src:parser.drop_parens") layer 11 |
+| cancel −(−v) | [expr.py:226](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L226 "src:parser.cancel") layer 11 |
+| decimal alignment and result places | [expr.py:248](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L248 "src:parser.decimals") layers 13–14 |
+| frame copy segments | [expr.py:278](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L278 "src:parser.frame_copy") layers 14–16, copied by the L17 head |
+| result formatting and the rewrite | [expr.py:327](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L327 "src:parser.rewrite") layers 17–21 |
+| output votes | [expr.py:397](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L397 "src:parser.outputs") layer 22 |
 | **Calculators** | |
 | addition: whole circuit (~60 lines) | [addition.py:32](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/addition.py#L32 "src:add.circuit") layers 3–5 |
 | addition: carry recovered, never stored | [addition.py:83](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/addition.py#L83 "src:add.carry") layer 4 |
@@ -969,24 +976,30 @@ Each circuit is a short list of named heads and units, placed at fixed layers wi
 | outputs gated by act_* (no dispatch) | [arith.py:72](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/arith.py#L72 "src:merge.gating") `_Namespace.unit` |
 | private dims may not shadow shared ones | [arith.py:110](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/arith.py#L110 "src:merge.no_shadow") `builder` |
 | **Example dims** | |
-| `inB`: this byte copies operand b into the frame | [expr.py:298](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L298 "src:dim:inB") |
-| `f_R`: landmark tag for the latest `\|` | [frame.py:115](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L115 "src:dim:f_R") |
+| `inB`: this byte copies operand b into the frame | [expr.py:302](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/expr.py#L302 "src:dim:inB") |
+| `f_R`: landmark tag for the latest `\|` | [frame.py:126](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/frame.py#L126 "src:dim:f_R") |
 | `mul.carry`: the multiplication carry | [multiplication.py:211](https://github.com/lhubbard011/opus-handformer-calculator/blob/main/handformer/multiplication.py#L211 "src:dim:mul.carry") |
 
 ## 28. Checked claims (`tests/test_claims.py`)
 
-Each explanation is a claim about what a part computes. The test runs 24
-traces (every operator, signs, decimals, `~N`, powers, nested parentheses)
-and checks three kinds of claim at every position:
+Each explanation is a claim about what a part computes. The test runs 29
+traces (every operator, signs, decimals, `~N`, powers, nested parentheses,
+spaces and bracketed numbers) and checks three kinds of claim at every position:
 
 | claim | where it comes from | checks |
 |---|---|---|
-| a head reads one exact value | every head (scope: `HeadSpec.exact_when`, else where its calculator is on, else every output position) | about 81,000 head reads |
-| a yes/no step never sees an input on its ramp (within ¼ of an integer) | `clamp01_units` / `hat_units`, `("outside", -1, 1)` | about 237,000 |
-| a calculator's outputs are silent while it is off | `arith` gating, `("silent_unless", "act_op")` | about 418,000 |
+| a head reads one exact value | every head (scope: `HeadSpec.exact_when`, else where its calculator is on, else every output position) | about 184,000 head reads |
+| a yes/no step never sees an input on its ramp (within ¼ of an integer) | `clamp01_units` / `hat_units`, `("outside", -1, 1)` | about 1.3M unit checks, |
+| a calculator's outputs are silent while it is off | `arith` gating, `("silent_unless", "act_op")` | these two together |
 
-**Result.** Silence holds everywhere. The other two hold everywhere except 37
-known cases (23 heads, 14 steps), listed with their diagnosis in
+**Where the parser owes its claims.** Each position recomputes the parser and none reads
+another's, so its values matter only where it writes. At a line's `=` (phase 1) the byte is
+`[` whatever it holds, and in a strip frame (§35) its writing is off. There the parser's
+specs from layer 6 on (operator, operands, regions) are not checked; the strip frame reads
+only its `p` and `c` (layers 3–5), which still are.
+
+**Result.** Silence holds everywhere. The other two hold everywhere except 30
+known cases (16 heads, 14 steps), listed with their diagnosis in
 `tests/claims_known.json`. The test fails on any new violation, and on a
 listed one that no longer occurs. No known case changes an answer. Each is a
 value that nothing reads at that position:
@@ -999,7 +1012,8 @@ value that nothing reads at that position:
   p, the search averages and its found-flag is about 0. `c` and choice 2 of
   `o` are gated by that flag. Choice 3 is not, so `o` is fractional at the
   prompt's `=`, where the only output is `[`. The seven gathers at o ± 1
-  inherit this.
+  inherit this; they were listed until the parser's claims were scoped to
+  where it writes (above).
 - **Prompt bytes.** `phase4 = 1 − open − is_eq` is also 1 before the prompt's
   `=`, so rewrite steps run on undefined operand bounds there. Prompt
   positions are teacher-forced and never sampled.
@@ -1114,3 +1128,68 @@ the lexer's votes of 10. Record ends are tagged on `|` and `\x04`, and the stack
 `after_M`, because C source contains `|`. The tests check the silence at every output byte: in
 the letters every parser rule, `out` and `after_M` are exactly 0; in the records every lexer rule.
 The parser's layers moved to 7-12 with their internal plan unchanged.
+
+## 35. Strip frames: spaces and bracketed numbers (`handformer/strip.py`)
+
+Two kinds of byte carry nothing to compute: spaces, and the brackets of a group that holds a
+single number, `(5)`. The parser has no rule for either (a group with no operator has no
+redex). Both are removed in the weights, the host sending the bytes as typed. A line holding
+a space, or whose innermost group is one number, is not parsed: its frame is `[ ]` or `[()]`,
+and the next line is the same line without its last space, or without those brackets:
+
+```
+\n(1) + 2=[ ](1)+ 2=[ ](1)+2=[()]1+2=[1+2=3;3]3
+```
+
+**Why one per frame.** Removing every space in one rewrite needs, at each output byte, how
+many spaces come before its source byte. Attention gives a count only as a fraction of the
+position (a uniform average), and turning that back into an integer address is not exact
+at any length. Removing one space (or one pair of brackets) is an offset: copy the line,
+reading one byte further from the removed byte on. That is the rewrite the model already
+does after every frame, so the cost is that of one more operator: a line rewrite each.
+
+**Finding them.** Every pointer read is the frame's own, so the flags hold from the frame's
+`[` to the next line's `=`. Spaces go first: a group is judged only once the line has none.
+
+| flag | meaning |
+|---|---|
+| `sp` | `sp_at` = the latest space before `Lend` (`Lsp` read at `Lend − 1`), and it is after `Ls` |
+| `pf` | the innermost group p..c (the parser's own, §9.2) is `(` number `)`: the byte at p is `(`, the byte at c is `)`, the latest binary operator before c is before p (`Pc < p`), and not `sp` |
+| `cn` | `pf`, the `(` follows a sign and the number is negative: `-(-5)` is 5, so both signs go with the brackets, as the parser cancels −(−v) for a result. Without it `-(-5)+1` would become `--5+1`, which the parser reads as −(−5+1) |
+
+**Writing.** Frame layer 8 turns phases 2 and 4 off while `sp` or `pf`; the parser still runs
+underneath and nothing it writes reaches the logits. With `t = Ls + 1 + (pos − Rb)`:
+
+| layer | what |
+|---|---|
+| 4–7 | the flags above |
+| 6, 9 | bytes skipped so far: `[t ≥ sp_at]` for a space; `[t ≥ p] + [t+1 ≥ c]` for brackets; `3·[t ≥ p−1] + [t+3 ≥ c]` when the signs cancel (each step gated by its case) |
+| 10 | `st_src = t + skips`, the byte to copy next |
+| 11 | `st_end = [st_src = Lend]`; with `st_cont` (another space, or a binary operator or a `(` among the bytes written since `]`) it picks `=` or newline |
+| 21 | `src4 += (sp + pf) · st_src`; the parser's own `src4` terms are off in a strip frame |
+| 22 | the parser's rewrite copy reads `Y4` at `src4` (it has a space entry too); votes: the body (` `, or `(` then `)`), `]`, the copied byte, `=` or newline |
+
+The copy is the parser's own (§9.2), not a second one: only its source position changes.
+Copying stops by itself at `Lend`, whose byte is `=` or `~` and has no copy vote. The
+continue test reads the bytes just written, not the old line: in `3 - 2` the `-` follows a
+space, so frame layer 1 reads it as a sign; in `3-2` it is subtraction. A line left with
+nothing to do (`5 `, `(5)`) ends with a newline and is the answer.
+
+**Precision.** `~N` may hold spaces too (`1/3 ~ 1 2`). A digit of N is a digit with a `~`
+before it (`is_digit AND has_til`; the expression's digits come before the prompt's one `~`).
+Layer 3 tags those, layer 4 finds the latest (`Ndg`), and N's digits are read right to left
+as a chain: `qN_k` = `Ndg` just before `qN_(k−1)` (layers 5–8), `Nd_k` = val there (6–9).
+Spaces between them are skipped because they are not digits; a missing place reads BOS
+(val 0). The strip frames never copy `~N`, like every rewrite.
+
+**Semantics.** Spaces: exactly the stripped expression, `1 2+3` is `12+3`; only the space
+byte (tabs and other bytes have no features, as before). Brackets: `(v)` is `v`, and `-(-v)`
+is `v`; `(-5)^2` becomes `-5^2`, which is 25 under the convention that a unary minus binds
+tighter than `^`.
+
+**Tests.** `tests/reference.py` writes both frames (`space_step`, `bracket_step`).
+`test_expr.test_spaces` and `test_expr.test_bracketed_numbers` check hand-picked cases byte
+for byte under teacher forcing and against Python's answer, and random trees with random
+spaces, or with random leaves in brackets of their own (`(12)`, `-(-(3))`). The claims corpus
+includes both kinds of line, so the new steps and the parser running underneath them are
+checked for robust inputs too.

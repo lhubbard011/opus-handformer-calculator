@@ -59,9 +59,9 @@ DIMS = (
     "has_a", "res_op", "res_wrap", "rneg", "b_dot", "res_expr", "drop", "frac_a", "has_b", "prevA_unary", "Lnzr", "cancel", "cont2", "frac_b",
     "found_nz", "pad_a_raw", "pad_b_raw", "pad_a", "pad_b", "f_res", "tzx",
     "inA", "inPA", "atOp", "inB", "inPB", "end2", "skipA", "skipB",
-    "tz", "src2", *(f"Y2_{d}" for d in NAMES.values()), "fp", "til_line", "Lend", "wd", "dotf",
+    "tz", "src2", *(f"Y2_{d}" for d in NAMES.values()), "fp", "wd", "dotf",
     "in1", "in12", "in123", "end4", "isSign", "isDot", "afterdot", "padzero", "src4",
-    *(f"Y4_{d}" for d in NAMES.values()),
+    *(f"Y4_{d}" for d in NAMES.values()), "Y4_is_space",
 )
 OUT_DIMS = (*(f"O_{d}" for d in NAMES.values()), "out_lbr", "out_eq", "out_nl")
 
@@ -71,13 +71,17 @@ ND: Form = {"one": 1.0, "is_digit": -1.0, "is_dot": -1.0}  # not part of a numbe
 BSTART: Form = {"o": 1.0, "sb_x": 1.0}  # byte before b's digits (o, or b's sign)
 
 
-def _copy_head(name: str, src: Form, prefix: str) -> HeadSpec:
-    """Gather at position ``src``: ``<prefix>_<d>`` = [byte at src is d] for every alphabet byte d."""
+def _copy_head(name: str, src: Form, prefix: str, space: bool = False) -> HeadSpec:
+    """Gather at position ``src``: ``<prefix>_<d>`` = [byte at src is d] for every alphabet byte d
+    (and the space, for the rewrite: a space frame copies the line's other spaces, strip.py)."""
+    value = {d: {f"{prefix}_{d}": 1.0} for d in NAMES.values()}
+    if space:
+        value["is_space"] = {f"{prefix}_is_space": 1.0}
     return HeadSpec(
         name=name,
         query=[pr.scale(src, 2 * pr.GATHER_BETA), pr.const(-pr.GATHER_BETA)],
         key=[{"pos": 1.0}, {"pos2": 1.0}],
-        value={d: {f"{prefix}_{d}": 1.0} for d in NAMES.values()},
+        value=value,
     )
 
 
@@ -327,21 +331,15 @@ def build(b: ModelBuilder) -> None:
     m = pr.add({"Rb": 1.0, "S": -1.0, "rneg": -1.0}, pr.const(-1.0))  # result digits
     mp = pr.add(m, {"tz": -1.0})  # digits after stripping trailing zeros
 
-    # Layer 17. Head: frame copy, Y2_d = [byte at src2 is d]. MLP: fp and til_line.
+    # Layer 17. Head: frame copy, Y2_d = [byte at src2 is d]. MLP: fp.
     l17 = b.at(17)
     l17.heads.append(_copy_head("frame copy", {"src2": 1.0}, "Y2"))
     # fp = f' = found_nz * (f_res - tz): fraction digits left after stripping; 0 for a zero result
     l17.units += pr.times_flag_units({"f_res": 1.0, "tz": -1.0}, {"found_nz": 1.0}, {"fp": 1.0})
-    # the prompt line carries "~N" after the expression; the rewrite does not copy it
-    # til_line = [Ptil > Ls]: the '~' lies in the source line, so this is the prompt line
-    l17.units += pr.clamp01_units({"Ptil": 1.0, "Ls": -1.0}, {"til_line": 1.0})
 
-    # Layer 18 MLP: Lend, the result width wd and dotf = [f' >= 1] (the result has a '.').
+    # Layer 18 MLP: the result width wd and dotf = [f' >= 1] (the result has a '.').
+    # (The suffix copy stops at Lend, frame layer 4: Le, or the '~' on the prompt line.)
     l18 = b.at(18)
-    l18.units.append(pr.relu_unit(LE, {"Lend": 1.0},
-                                  label="'Lend' base: Le, where the suffix copy stops; the prompt line's '~N' correction is added next"))  # where the line's suffix copy stops
-    # Lend += til_line * (Ptil - F + 1) = til_line * (Ptil - Le): Lend = Ptil on the prompt line
-    l18.units += pr.times_flag_units({"Ptil": 1.0, "F": -1.0, "one": 1.0}, {"til_line": 1.0}, {"Lend": 1.0})
     l18.units += [  # width of the zero-padded digit string: max(m', f'+1)
         pr.relu_unit({"fp": 1.0, "one": 1.0}, {"wd": 1.0},
                      label="'wd' base: f'+1 (fraction digits plus one leading 0); with the paired unit wd = max(m', f'+1)"),
@@ -388,16 +386,19 @@ def build(b: ModelBuilder) -> None:
     l21 = b.at(21)
     resdig = pr.add(in_res, {"isSign": -1.0, "isDot": -1.0, "padzero": -1.0})  # copied result digit
     src_res = pr.add({"S": 1.0, "rneg": 1.0, "wd": -1.0}, k, mp, pr.const(1.0))
-    l21.units += pr.times_flag_units(pr.add({"Ls": 1.0}, pr.const(1.0), r), {"in1": 1.0}, {"src4": 1.0})
-    l21.units += pr.times_flag_units(src_res, resdig, {"src4": 1.0})
+    # In a strip frame (sp or pf = 1) the region flags mean nothing: each select's flag is less
+    # sp and pf, so it is off there, and strip.py adds its own source position st_src instead.
+    strip = {"sp": -1.0, "pf": -1.0}
+    l21.units += pr.times_flag_units(pr.add({"Ls": 1.0}, pr.const(1.0), r), pr.add({"in1": 1.0}, strip), {"src4": 1.0})
+    l21.units += pr.times_flag_units(src_res, pr.add(resdig, strip), {"src4": 1.0})
     l21.units += pr.times_flag_units(pr.add(B, pr.const(1.0), r, neg(n1), neg(n2)),
-                                     {"in123": 1.0, "in12": -1.0}, {"src4": 1.0})
+                                     pr.add({"in123": 1.0, "in12": -1.0}, strip), {"src4": 1.0})
 
     # ---------------------------------------------------------- outputs
     # Layer 22. Head: rewrite copy, Y4_d = [byte at src4 is d]. MLP: the byte votes, each an AND
     # ReLU(byte + phase + region - 2), or a fixed byte ('[', '0', '-', '.', '=', newline) per phase.
     l22 = b.at(22)
-    l22.heads.append(_copy_head("rewrite copy", {"src4": 1.0}, "Y4"))
+    l22.heads.append(_copy_head("rewrite copy", {"src4": 1.0}, "Y4", space=True))
     # copy regions (disjoint flags, so each sum is 0/1): frame copy a, operator, b;
     # rewrite prefix, suffix (in123 - in12), or a copied result digit
     copy2 = {"inA": 1.0, "atOp": 1.0, "inB": 1.0}

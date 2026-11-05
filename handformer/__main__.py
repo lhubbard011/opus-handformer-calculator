@@ -31,8 +31,9 @@ def main() -> int:
     log.info("model built in %.2fs", time.perf_counter() - t0)
 
     def run(expression: str) -> None:
-        expression = expression.strip().replace(" ", "")
-        if not expression:
+        # only the line break is framing; spaces reach the weights, which remove them
+        expression = expression.strip("\r\n")
+        if not expression.strip():
             return
         t = time.perf_counter()
         out = arith.solve(model, expression)

@@ -40,6 +40,8 @@ EXPRESSIONS = [
     "47+38", "99999+1", "0.5+0.25", "1-999", "-(1-4)", "12*34-400", "2*-3", "-12.5*3-4", "3.14*(2-0.5)",
     "1+(3-7)*2", "(1+2)*(3+4)", "355/113~6", "100/7~2", "-7/2~1", "1.5/0.25~2", "(2+3)^3/7~3", "2^-2~4",
     "-2^3", "2^10", "0*5", "-0*5", "10-10", "123456789*987", "((1+2)*3-4)/5~2",
+    # strip frames (the parser also runs on those lines, its writing switched off by sp / pf)
+    " -3 * ( 2 + 4 ) ", "1 / 3 ~ 1 2", "(5)+1", "-(-5)*2", "((2+3))*(4)",
 ]
 EXACT = 1e-6
 KNOWN = json.loads((Path(__file__).with_name("claims_known.json")).read_text())
@@ -59,6 +61,19 @@ class _Trace(Tracer):
 
     def mlp(self, layer: int, pre: np.ndarray) -> None:
         self.pre[layer] = pre
+
+
+def _parser_off(spec, layer: int, final: np.ndarray, layout) -> np.ndarray:
+    """Positions where a parser spec's claims are not owed, because nothing reads what it computes
+    there (each position recomputes the parser; none reads another's, expr.py):
+    - a strip frame (sp or pf, strip.py): the parser has no redex and its writing is off
+      (phases 2 and 4, and every src4 select, whose flag is at most 1 less the strip flag);
+    - a line's '=' (phase1): the byte written is '[' whatever the parser holds.
+    The strip frame reads only the parser's p and c, found by layer 5, so only the parser's
+    specs from layer 6 on (operator, operands, regions) are excused; all it reads is checked."""
+    if not spec.where.startswith("handformer/expr.py") or layer < 6:
+        return np.zeros(len(final), bool)
+    return final[:, layout["sp"]] + final[:, layout["pf"]] + final[:, layout["phase1"]] > 0.5
 
 
 def _form(x: np.ndarray, form: Form, layout) -> np.ndarray:
@@ -106,6 +121,7 @@ class TestClaims(unittest.TestCase):
                     scope = final[:, lay[f"act_{spec.name.split(':')[0]}"]] > 0.5
                 else:
                     scope = np.arange(n) >= plen - 1
+                scope &= ~_parser_off(spec, li + 1, final, lay)
                 scope[-1] = False
                 v = tr.snaps[2 * li] @ head.w_v
                 top = v[a.argmax(axis=1)]
@@ -119,15 +135,17 @@ class TestClaims(unittest.TestCase):
     def test_unit_claims(self):
         lay, bad, checked = self.model.layout, {}, 0
         for e, toks, _plen, tr in self.traces:
+            final = tr.snaps[-1][:-1]
             for li, pre in tr.pre.items():
                 x = tr.snaps[2 * li + 1]  # the MLP's input: after this layer's attention
                 for ui, spec in enumerate(self.builder.layers[li].units):
+                    owed = ~_parser_off(spec, li + 1, final, lay)
                     for claim in spec.claims:
                         p = pre[:-1, ui]
                         if claim[0] == "outside":
                             lo, hi = claim[1], claim[2]
                             scope = (_form(x[:-1], claim[3], lay) > 0.5) if len(claim) > 3 else np.ones(len(p), bool)
-                            viol = np.flatnonzero(scope & (p > lo) & (p < hi))
+                            viol = np.flatnonzero(owed & scope & (p > lo) & (p < hi))
                             what = f"input {{:.3g}} inside ({lo:g}, {hi:g})"
                         elif claim[0] == "silent_unless":
                             viol = np.flatnonzero((x[:-1, lay[claim[1]]] < 0.5) & (p > 1e-9))

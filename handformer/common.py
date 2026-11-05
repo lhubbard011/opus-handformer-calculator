@@ -14,6 +14,7 @@ Token embedding (one row per byte, all hand-set):
     is_lpar '(' is_rpar ')'   is_dot '.' (decimal point)
     is_plus '+' is_minus '-' is_star '*' is_slash '/' is_caret '^'  is_opany: any of them
     is_tilde    '~' (precision marker in the prompt: <expr>~N=)
+    is_space    ' ' (the calculator removes spaces from its line, one per frame: frame.py)
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ INPUT_DIMS = (
     "is_digit", "nz", "n9", "is0", "is9", "is_bos",
     "is_eq", "is_semi", "is_lt", "is_comma", "is_bar", "is_lbr", "is_rbr",
     "is_lpar", "is_rpar", "is_dot", "is_plus", "is_minus", "is_star", "is_slash", "is_caret", "is_opany",
-    "is_tilde",
+    "is_tilde", "is_space",
 )
 
 # Bytes an expression line can contain, and the input dim that flags each.
@@ -81,7 +82,8 @@ def embed(b: ModelBuilder) -> None:
         )
     single = {BOS: "is_bos", ord("="): "is_eq", WORK_END: "is_semi", COMMA: "is_comma",
               BAR: "is_bar", FRAME_OPEN: "is_lbr", FRAME_CLOSE: "is_rbr",
-              ord("("): "is_lpar", ord(")"): "is_rpar", ord("."): "is_dot", ord("~"): "is_tilde"}
+              ord("("): "is_lpar", ord(")"): "is_rpar", ord("."): "is_dot", ord("~"): "is_tilde",
+              ord(" "): "is_space"}
     for byte, dim in single.items():
         b.embed_byte(byte, {dim: 1.0})
     b.embed_byte(WORK_END_NEG, {"is_semi": 1.0, "is_lt": 1.0})
